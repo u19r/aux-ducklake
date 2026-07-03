@@ -1,16 +1,20 @@
 # aux-ducklake
 
-Ducklake with FoundationDB metadata catalog. Contents:
+FoundationDB catalog support for DuckLake and DuckDB. This repository builds a DuckLake runtime
+that stores catalog metadata in FoundationDB while keeping DuckLake data files in object storage or
+the configured filesystem `DATA_PATH`.
+
+Contents:
 
 - `ducklake-catalog`, a Rust catalog runtime compiled as both a Rust library and a C-compatible
   dynamic library for the patched DuckLake/DuckDB bridge.
-- FoundationDB live tests, simulation workloads, parity fixtures, and release gates.
+- FoundationDB live tests, simulation workloads, recovery drills, and release gates.
 - Scripts for fetching the pinned upstream DuckLake source, applying the aux catalog bridge patch,
-  building combined DuckDB/DuckLake binaries, packaging release artifacts, and running benchmarks.
+  building FoundationDB-capable DuckDB/DuckLake binaries, packaging release artifacts, and running
+  benchmarks.
 
-DuckLake data files are still owned by DuckLake object storage or the configured filesystem
-`DATA_PATH`. The aux runtime owns catalog metadata in FoundationDB under one catalog-specific prefix.
-If `AUX_DUCKLAKE_FDB_PREFIX` is not set, the runtime uses `dl/`.
+The aux runtime owns catalog metadata in FoundationDB under one catalog-specific prefix. If
+`AUX_DUCKLAKE_FDB_PREFIX` is not set, the runtime uses `dl/`.
 
 For end-user setup, see [USAGE.md](USAGE.md). It covers both supported consumption modes: the
 standalone loadable DuckLake extension and the packaged DuckDB binary with DuckLake compiled in.
@@ -33,7 +37,6 @@ standalone loadable DuckLake extension and the packaged DuckDB binary with DuckL
 - Rust `1.96.0` or newer compatible with this workspace.
 - `just`, `cmake`, `git`, and either `ninja` or `make`.
 - FoundationDB client tools and client library for FDB tests and release runtime work.
-- `pg_config`/`libpq` when building or running Postgres comparison paths.
 - Docker Buildx for Linux release artifacts.
 - macOS developers can run `just setup` to install common Homebrew dependencies.
 
@@ -196,7 +199,7 @@ artifact contract.
      -u AUX_DUCKLAKE_BENCHMARK_RUNTIME_EXTRA_FEATURES \
      -u AUX_DUCKLAKE_BENCHMARK_RUNTIME_METRICS_SCOPE \
      -u AUX_DUCKLAKE_BENCHMARK_RUNTIME_READ_CONTEXT \
-     AUX_DUCKLAKE_POSTGRES_DSN='host=127.0.0.1 port=15432 dbname=postgres' \
+     AUX_DUCKLAKE_BENCHMARK_BACKEND=fdb \
      AUX_DUCKLAKE_BENCHMARK_DUCKLAKE_MAX_RETRY_COUNT=100 \
      AUX_DUCKLAKE_BENCHMARK_BUILD_PROFILE=release \
      ./scripts/ducklake_catalog_benchmark.sh varied
@@ -246,7 +249,18 @@ just ducklake-fdb-runtime-smoke
 just ducklake-fdb-prefix-clone-drill
 ```
 
-Postgres/FDB parity and upstream compatibility:
+Upstream DuckLake compatibility checks for the FoundationDB catalog:
+
+```sh
+just ducklake-upstream-fdb-smoke
+just ducklake-upstream-fdb-full
+just ducklake-upstream-fdb-slow
+```
+
+Optional Postgres comparison scripts remain available for development parity investigations. They
+are not part of the release package or the default FoundationDB operator path, and require
+`pg_config`, `libpq`, a reachable Postgres database, and the DuckDB `postgres_scanner` helper
+extension:
 
 ```sh
 just ducklake-parity-postgres-smoke
@@ -255,11 +269,8 @@ just ducklake-parity-postgres-fdb-mutations
 just ducklake-parity-postgres-fdb-ddl
 just ducklake-parity-postgres-fdb-inline
 just ducklake-upstream-postgres-smoke
-just ducklake-upstream-fdb-smoke
 just ducklake-upstream-postgres-full
-just ducklake-upstream-fdb-full
 just ducklake-upstream-postgres-slow
-just ducklake-upstream-fdb-slow
 ```
 
 Use `AUX_DUCKLAKE_RELEASE_SKIP_STEPS` only for local iteration when a previous release-gate step is
@@ -276,7 +287,7 @@ just ducklake-catalog-benchmark-profile
 just ducklake-catalog-benchmark-profile 1000
 ```
 
-Larger same-SQL comparison workloads:
+Larger FoundationDB catalog workloads:
 
 ```sh
 just ducklake-catalog-benchmark-realistic
@@ -293,8 +304,11 @@ just ducklake-release-benchmark-profile-tiny
 
 Benchmark JSON summaries live in `docs/benchmarks/ducklake-fdb-feature-parity/`. The latest full
 varied baseline is summarized in `BENCHMARK.md`. Treat benchmark timings as local trend signals, not
-external service sizing claims. Compare semantic labels and row counts before using timing deltas to
-choose optimization work.
+external service sizing claims.
+
+Set `AUX_DUCKLAKE_BENCHMARK_BACKEND=both` and `AUX_DUCKLAKE_POSTGRES_DSN` only when running optional
+same-SQL comparisons against DuckLake's Postgres catalog backend. Compare semantic labels and row
+counts before using timing deltas to choose optimization work.
 
 Optional runtime metrics are disabled for release-shape benchmarks unless explicitly needed for a
 diagnostic run. Enable them with `AUX_DUCKLAKE_BENCHMARK_RUNTIME_METRICS_PATH` and scope labels with

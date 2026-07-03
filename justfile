@@ -1,4 +1,37 @@
+set unstable := true
+
+# List available public commands.
+default:
+    @just _default
+
+# Install local development tools.
 setup:
+    @just _setup
+
+# Run cargo check for the full workspace.
+check:
+    @just _check
+
+# Apply Rust formatting.
+style:
+    @just _style
+
+# Run workspace tests.
+test:
+    @just _test
+
+# Run the full local sign-off gate before pushing.
+pre-push:
+    @just _pre-push
+
+# Run the CI repository gate.
+ci-check:
+    @just _ci-check
+
+_default:
+    @just --list
+
+_setup:
     #!/usr/bin/env bash
     set -euo pipefail
     if command -v brew >/dev/null 2>&1; then
@@ -15,14 +48,46 @@ setup:
         exit 1
     fi
 
-ci-check:
+_check:
+    ./scripts/fetch_ducklake.sh
+    ./scripts/cargo_with_sccache.sh check --workspace --all-targets --all-features
+
+_style:
+    ./scripts/cargo_with_sccache.sh fmt --all
+
+_style-check:
+    ./scripts/cargo_with_sccache.sh fmt --all --check
+
+_test:
+    ./scripts/cargo_with_sccache.sh test --workspace --all-targets
+
+_pre-push:
+    @just _style-check
+    @just _check
+    @just _test
+    @just _runtime-protocol-check
+    @just _workload-inventory-verify
+    @just _upstream-disabled-diff-temp
+
+_ci-check:
     #!/usr/bin/env bash
     set -euo pipefail
     ./scripts/fetch_ducklake.sh
-    ./scripts/cargo_with_sccache.sh fmt --check
+    just _style-check
     ./scripts/cargo_with_sccache.sh check -p ducklake-catalog --all-targets
+    just _runtime-protocol-check
+    just _workload-inventory-verify
+    just _upstream-disabled-diff-temp
+
+_runtime-protocol-check:
     ./scripts/cargo_with_sccache.sh test -p ducklake-catalog --no-default-features --features foundationdb ffi_probe_round_trips_runtime_frame
+
+_workload-inventory-verify:
     ./scripts/verify_ducklake_workload_inventory.sh
+
+_upstream-disabled-diff-temp:
+    #!/usr/bin/env bash
+    set -euo pipefail
     disabled_diff_dir="$(mktemp -d)"
     trap 'rm -rf "$disabled_diff_dir"' EXIT
     AUX_DUCKLAKE_RELEASE_EVIDENCE_DIR="$disabled_diff_dir" ./scripts/ducklake_upstream_disabled_diff.sh

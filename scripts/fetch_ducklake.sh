@@ -7,7 +7,21 @@ DUCKLAKE_COMMIT="7e3c8e97cc5acddbcd2a1ebfb8530e6c52efdacf"
 PIN_FILE="$DUCKLAKE_DIR/.aux-ducklake-pinned-commit"
 PATCH_FILE="$ROOT_DIR/patches/ducklake/0001-add-aux-catalog-metadata-manager.patch"
 PATCH_MARKER="$DUCKLAKE_DIR/.aux-ducklake-bridge-patch"
-PATCH_HASH="$(shasum -a 256 "$PATCH_FILE" | awk '{print $1}')"
+
+ducklake_sha256() {
+    local path="$1"
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$path" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$path" | awk '{print $1}'
+    else
+        echo "sha256sum or shasum is required to hash $path" >&2
+        exit 1
+    fi
+}
+
+PATCH_HASH="$(ducklake_sha256 "$PATCH_FILE")"
 
 ducklake_configure_release_extensions() {
     local extension_config="$DUCKLAKE_DIR/extension_config.cmake"

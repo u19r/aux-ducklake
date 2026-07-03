@@ -7,6 +7,17 @@ WORKLOAD_SOURCE="$ROOT_DIR/crates/ducklake-catalog/src/workload.rs"
 
 "$ROOT_DIR/scripts/fetch_ducklake.sh"
 
+contains_literal() {
+    local needle="$1"
+    local haystack="$2"
+
+    if [[ -d "$haystack" ]]; then
+        grep -R -F -q -- "$needle" "$haystack"
+    else
+        grep -F -q -- "$needle" "$haystack"
+    fi
+}
+
 required_ducklake_symbols=(
     "LoadDuckLake"
     "GetCatalogForSnapshot"
@@ -48,14 +59,14 @@ required_inventory_variants=(
 )
 
 for symbol in "${required_ducklake_symbols[@]}"; do
-    if ! rg -q -F "$symbol" "$DUCKLAKE_SOURCE"; then
+    if ! contains_literal "$symbol" "$DUCKLAKE_SOURCE"; then
         echo "missing DuckLake metadata workload symbol: $symbol" >&2
         exit 1
     fi
 done
 
 for variant in "${required_inventory_variants[@]}"; do
-    if ! rg -q -F "$variant" "$WORKLOAD_SOURCE"; then
+    if ! contains_literal "$variant" "$WORKLOAD_SOURCE"; then
         echo "missing ducklake-catalog workload inventory variant: $variant" >&2
         exit 1
     fi

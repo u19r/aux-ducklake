@@ -12,7 +12,6 @@ contract.
 - `AUX_DUCKLAKE_CATALOG_BACKEND`: selects `fdb`, `foundationdb`, or local backends.
 - `AUX_DUCKLAKE_FDB_CLUSTER_FILE`: optional FoundationDB cluster file override.
 - `AUX_DUCKLAKE_FDB_PREFIX`: FoundationDB key-prefix namespace for a catalog.
-- `AUX_DUCKLAKE_POSTGRES_DSN`: Postgres comparison backend DSN.
 - `AUX_DUCKLAKE_RUNTIME_CATALOG_IDENTITY`: explicit stable catalog identity when
   metadata path/database/schema should not determine the runtime catalog id.
 - `AUX_DUCKLAKE_RUNTIME_LIBRARY`: C++ FFI runtime library path.
@@ -44,6 +43,8 @@ These variables belong only to benchmark scripts and benchmark documentation.
 - `AUX_DUCKLAKE_BENCHMARK_RUNTIME_READ_CONTEXT`
 - `AUX_DUCKLAKE_BENCHMARK_RUNTIME_EXTRA_FEATURES`
 - `AUX_DUCKLAKE_BENCHMARK_DUCKLAKE_MAX_RETRY_COUNT`
+- `AUX_DUCKLAKE_POSTGRES_DSN`: Postgres comparison backend DSN for optional
+  benchmark parity runs.
 - `AUX_DUCKLAKE_REALISTIC_PARALLEL_WORKERS`
 - `AUX_DUCKLAKE_REALISTIC_PRELOAD_BATCH_ROWS`
 - `AUX_DUCKLAKE_REALISTIC_PRELOAD_WORKERS`

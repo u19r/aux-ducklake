@@ -770,7 +770,6 @@ struct GlobalStatsFileRow {
     row_id_start: Option<u64>,
 }
 
-#[cfg(feature = "foundationdb")]
 #[derive(Clone, Default)]
 struct GlobalColumnStats {
     has_contains_null: bool,
@@ -1002,7 +1001,6 @@ impl GlobalTableStats {
     }
 }
 
-#[cfg(feature = "foundationdb")]
 impl GlobalColumnStats {
     fn merge_file(&mut self, row: FileColumnStatsRow) {
         self.has_contains_null = true;
@@ -1137,7 +1135,6 @@ fn parse_global_stats_bool(value: &str, field_name: &str) -> CatalogResult<bool>
     }
 }
 
-#[cfg(feature = "foundationdb")]
 fn global_stats_value_less_than(left: &str, right: &str) -> bool {
     match (left.parse::<i64>(), right.parse::<i64>()) {
         (Ok(left), Ok(right)) => left < right,
@@ -1145,7 +1142,6 @@ fn global_stats_value_less_than(left: &str, right: &str) -> bool {
     }
 }
 
-#[cfg(feature = "foundationdb")]
 fn global_stats_value_greater_than(left: &str, right: &str) -> bool {
     match (left.parse::<i64>(), right.parse::<i64>()) {
         (Ok(left), Ok(right)) => left > right,
@@ -1153,7 +1149,6 @@ fn global_stats_value_greater_than(left: &str, right: &str) -> bool {
     }
 }
 
-#[cfg(feature = "foundationdb")]
 fn merge_global_extra_stats(current: &str, incoming: &str) -> String {
     if current.is_empty() {
         return strip_sql_string_quotes(incoming).to_owned();
@@ -1170,7 +1165,6 @@ fn merge_global_extra_stats(current: &str, incoming: &str) -> String {
     strip_sql_string_quotes(incoming).to_owned()
 }
 
-#[cfg(feature = "foundationdb")]
 fn strip_sql_string_quotes(value: &str) -> &str {
     value
         .strip_prefix('\'')
@@ -1178,7 +1172,6 @@ fn strip_sql_string_quotes(value: &str) -> &str {
         .unwrap_or(value)
 }
 
-#[cfg(feature = "foundationdb")]
 #[derive(Default)]
 struct GeoExtraStats {
     xmin: Option<f64>,
@@ -1192,7 +1185,6 @@ struct GeoExtraStats {
     types: BTreeSet<String>,
 }
 
-#[cfg(feature = "foundationdb")]
 impl GeoExtraStats {
     fn parse(value: &str) -> Option<Self> {
         let value = strip_sql_string_quotes(value);
@@ -1245,7 +1237,6 @@ impl GeoExtraStats {
     }
 }
 
-#[cfg(feature = "foundationdb")]
 fn parse_json_number_field(value: &str, field: &str) -> Option<f64> {
     let field_marker = format!("\"{field}\"");
     let start = value.find(&field_marker)?;
@@ -1261,7 +1252,6 @@ fn parse_json_number_field(value: &str, field: &str) -> Option<f64> {
     rest[..end].parse::<f64>().ok()
 }
 
-#[cfg(feature = "foundationdb")]
 fn parse_json_string_array_field(value: &str, field: &str) -> Option<BTreeSet<String>> {
     let field_marker = format!("\"{field}\"");
     let start = value.find(&field_marker)?;
@@ -1282,7 +1272,6 @@ fn parse_json_string_array_field(value: &str, field: &str) -> Option<BTreeSet<St
     Some(result)
 }
 
-#[cfg(feature = "foundationdb")]
 fn merge_optional_f64_min(left: Option<f64>, right: Option<f64>) -> Option<f64> {
     match (left, right) {
         (Some(left), Some(right)) => Some(left.min(right)),
@@ -1291,7 +1280,6 @@ fn merge_optional_f64_min(left: Option<f64>, right: Option<f64>) -> Option<f64> 
     }
 }
 
-#[cfg(feature = "foundationdb")]
 fn merge_optional_f64_max(left: Option<f64>, right: Option<f64>) -> Option<f64> {
     match (left, right) {
         (Some(left), Some(right)) => Some(left.max(right)),
@@ -1300,7 +1288,6 @@ fn merge_optional_f64_max(left: Option<f64>, right: Option<f64>) -> Option<f64> 
     }
 }
 
-#[cfg(feature = "foundationdb")]
 fn json_number_or_null(value: Option<f64>) -> String {
     value
         .map(|value| value.to_string())

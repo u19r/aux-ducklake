@@ -1,3 +1,5 @@
+#![cfg_attr(not(feature = "foundationdb"), allow(unused_imports))]
+
 use super::*;
 use crate::{
     CatalogId, CatalogOrderId, ColumnId, DataFileId, DataFileRow, DeleteFileId, DeleteFileRow,
