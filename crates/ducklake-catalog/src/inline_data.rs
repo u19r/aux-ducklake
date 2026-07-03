@@ -12,15 +12,16 @@ use crate::{
 pub use inline_deletions::{
     InlineDeletionChunkRow, load_inline_deletion_payload_at, register_inline_deletion_payload,
 };
+#[cfg(feature = "foundationdb")]
+pub(crate) use inline_file_deletes::list_inline_file_deletion_rows_for_data_files_at;
 pub use inline_file_deletes::{
     InlineFileDeletionRow, commit_inline_file_deletions, list_inline_file_deletions_at,
     list_inline_file_deletions_between,
 };
 pub(crate) use inline_file_deletes::{
     inline_file_deletion_begin_order, inline_file_deletion_changed_table_ids_at,
-    list_inline_file_deletion_rows_for_data_files_at, list_inline_file_deletion_rows_for_table_at,
-    list_inline_file_deletions_for_data_files_at, stage_flush_inline_file_deletions,
-    stage_inline_file_deletion,
+    list_inline_file_deletion_rows_for_table_at, list_inline_file_deletions_for_data_files_at,
+    stage_flush_inline_file_deletions, stage_inline_file_deletion,
 };
 pub use inline_row_deletes::{
     InlineTableDeleteCommit, commit_delete_inline_table_rows,

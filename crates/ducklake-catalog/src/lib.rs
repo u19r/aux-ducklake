@@ -1,3 +1,5 @@
+#![cfg_attr(not(feature = "foundationdb"), allow(dead_code))]
+
 pub mod append_commits;
 mod bounded_cache;
 mod change_keys;
