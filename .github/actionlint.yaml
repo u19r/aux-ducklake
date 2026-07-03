@@ -1,0 +1,8 @@
+self-hosted-runner:
+  labels:
+    - aux-build
+    - standard
+    - large
+    - xlarge
+    - docker
+    - memory

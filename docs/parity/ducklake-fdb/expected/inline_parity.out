@@ -1,0 +1,7 @@
+mixed_file_seed=100,5050
+mixed_latest=102,5253,2
+mixed_inline_cdf_insert=2,203,2,2
+mixed_inline_delete=101,5152,1,0
+mixed_inline_cdf_delete=1,101,1,1
+mixed_after_flush=101,5152,1
+mixed_inline_delete_readback=101,5152,1

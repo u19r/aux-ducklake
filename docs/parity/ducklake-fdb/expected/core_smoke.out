@@ -1,0 +1,4 @@
+core_latest=2,30,one,two
+core_after_append=3,60,one,two,three
+core_time_travel=2,30,one,two
+core_readback=3,60,one,two,three

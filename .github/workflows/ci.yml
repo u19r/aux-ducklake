@@ -1,0 +1,87 @@
+name: ci
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci-check:
+    name: repo-gate
+    if: ${{ github.repository_owner == 'u19r' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && !contains(github.event.pull_request.labels.*.name, 'no-ci'))) }}
+    # Runner class: arm64/large maps to the approved 4xlarge-first Spot pool.
+    # Use x64 only for x86-only toolchains; use xlarge/docker or memory only
+    # for release, image, or integration jobs that cannot pass on large.
+    runs-on:
+      - self-hosted
+      - aux-build
+      - linux
+      - arm64
+      - large
+      - run-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Run repository gate
+        run: just ci-check
+
+  report:
+    name: report
+    if: ${{ always() && github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'no-ci') }}
+    needs: ci-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Comment PR status
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.repository_owner }}" != "u19r" ]; then
+            status="skipped: repository is outside the u19r scope"
+          elif [ "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]; then
+            status="skipped: fork pull requests do not run trusted Aux self-hosted runners"
+          else
+            status="${{ needs.ci-check.result }}"
+          fi
+          gh pr comment "${{ github.event.pull_request.number }}" \
+            --body "ci check: ${status} in run ${{ github.run_id }}" || true
+
+  metadata:
+    name: metadata
+    if: ${{ github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, 'no-ci') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Validate workflow metadata
+        run: |
+          set -euo pipefail
+          test "${{ github.repository_owner }}" = "u19r"
+          test -f justfile
+          test -f scripts/fetch_ducklake.sh
+          test -f scripts/build_ducklake_linux_release.sh
+          test -f docker/ducklake-release.Dockerfile

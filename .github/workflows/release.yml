@@ -1,0 +1,133 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: Release tag to create or update, for example v0.1.0
+        required: true
+        type: string
+      draft:
+        description: Create or keep the GitHub release as a draft
+        required: true
+        default: false
+        type: boolean
+      prerelease:
+        description: Mark the GitHub release as a prerelease
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.repository }}-${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build-linux:
+    name: build ${{ matrix.platform }}
+    if: ${{ github.repository_owner == 'u19r' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-amd64
+            runner_arch: x64
+          - platform: linux-arm64
+            runner_arch: arm64
+    runs-on:
+      - self-hosted
+      - aux-build
+      - linux
+      - ${{ matrix.runner_arch }}
+      - large
+      - run-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 240
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Prepare DuckLake source tree
+        run: ./scripts/fetch_ducklake.sh
+
+      - name: Check Docker buildx
+        run: |
+          set -euo pipefail
+          docker version
+          docker buildx version
+
+      - name: Build Linux release package
+        run: ./scripts/release.sh "${{ matrix.platform }}"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: aux-ducklake-${{ matrix.platform }}-${{ github.run_id }}
+          path: |
+            artifacts/*-${{ matrix.platform }}.tar.gz
+            artifacts/*-${{ matrix.platform }}.tar.gz.sha256
+          if-no-files-found: error
+
+  publish:
+    name: publish github release
+    needs: build-linux
+    if: ${{ github.repository_owner == 'u19r' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
+      RELEASE_DRAFT: ${{ github.event_name == 'workflow_dispatch' && inputs.draft || false }}
+      RELEASE_PRERELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Download release packages
+        uses: actions/download-artifact@v6
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Publish GitHub release
+        run: |
+          set -euo pipefail
+          if [ -z "$RELEASE_TAG" ]; then
+            echo "release tag is required" >&2
+            exit 64
+          fi
+          mapfile -t assets < <(find release-artifacts -type f \( -name '*.tar.gz' -o -name '*.sha256' \) | sort)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "no release assets were downloaded" >&2
+            exit 1
+          fi
+          args=()
+          if [ "$RELEASE_DRAFT" = "true" ]; then
+            args+=(--draft)
+          fi
+          if [ "$RELEASE_PRERELEASE" = "true" ]; then
+            args+=(--prerelease)
+          fi
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$RELEASE_TAG" \
+              --target "$GITHUB_SHA" \
+              --title "aux-ducklake ${RELEASE_TAG}" \
+              --notes "Linux amd64 and arm64 aux-ducklake release packages." \
+              "${args[@]}" \
+              "${assets[@]}"
+          fi

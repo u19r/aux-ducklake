@@ -1,0 +1,9 @@
+/target/
+/artifacts/
+/build/
+/third_party/ducklake/
+run-artifacts/
+duckdb_unittest_tempdir/
+docs/evidence/ducklake-fdb-release
+simfdb/
+.DS_Store

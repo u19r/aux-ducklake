@@ -1,0 +1,12 @@
+ddl_parity_table=orders_archive,orders table
+ddl_parity_column=quantity,BIGINT,'7',order quantity
+ddl_parity_rows=3,17
+ddl_parity_historical=2,10
+ddl_parity_view=orders_view_v2,orders view
+ddl_parity_view_rows=3,17
+ddl_parity_macro=5
+ddl_parity_partition_filter=2,40
+ddl_parity_partition_historical=1,20
+ddl_parity_sort_rows=2,3,1
+ddl_parity_readback_rows=3,17
+ddl_parity_readback_view_missing=0

@@ -1,0 +1,8 @@
+mutations_parity_final=3,270
+mutations_parity_insert_cdf=3,60
+mutations_parity_update_preimage=2,30
+mutations_parity_update_postimage=2,230
+mutations_parity_delete_cdf=1,30
+mutations_parity_time_travel_update=3,260
+mutations_parity_readback=3,270
+mutations_parity_readback_changes=9

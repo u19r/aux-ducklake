@@ -1,0 +1,10 @@
+[[test]]
+testTitle = "DuckLakeFdbCatalogSmoke"
+
+  [[test.workload]]
+  testName = "External"
+  workloadName = "__WORKLOAD__"
+  libraryPath = "__LIBRARY_PATH__"
+  libraryName = "__LIBRARY_NAME__"
+  profile = "__PROFILE__"
+  activeClientCount = __ACTIVE_CLIENT_COUNT__

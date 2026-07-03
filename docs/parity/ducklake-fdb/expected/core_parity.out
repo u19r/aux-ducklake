@@ -1,0 +1,5 @@
+core_parity_join_filter=3,800
+core_parity_projection=40.0,3
+core_parity_time_travel=3,600
+core_parity_readback=4,1000
+many_tables_total=10000
