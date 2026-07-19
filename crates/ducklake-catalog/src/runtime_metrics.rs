@@ -295,13 +295,13 @@ fn open_runtime_trace() -> Option<File> {
             );
         }
         Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-            if std::fs::metadata(&path).is_ok_and(|metadata| metadata.len() == 0) {
-                if let Ok(mut file) = OpenOptions::new().append(true).open(&path) {
-                    let _ = writeln!(
-                        file,
-                        "seq,scope,operation,status,items,bytes,elapsed_micros,pid,thread_id"
-                    );
-                }
+            if std::fs::metadata(&path).is_ok_and(|metadata| metadata.len() == 0)
+                && let Ok(mut file) = OpenOptions::new().append(true).open(&path)
+            {
+                let _ = writeln!(
+                    file,
+                    "seq,scope,operation,status,items,bytes,elapsed_micros,pid,thread_id"
+                );
             }
         }
         Err(_) => return None,

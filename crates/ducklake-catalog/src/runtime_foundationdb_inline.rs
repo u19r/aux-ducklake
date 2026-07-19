@@ -75,9 +75,11 @@ pub(crate) fn runtime_foundationdb_register_inline_rows(
         table,
         crate::SchemaId(request.schema_version),
         request.payload.into_bytes(),
-        request.commit_snapshot,
-        request.read_snapshot,
-        Some(&request.commit_metadata),
+        crate::InlineTableCommitContext {
+            commit_snapshot: request.commit_snapshot,
+            read_snapshot: request.read_snapshot,
+            commit_metadata: Some(&request.commit_metadata),
+        },
     )
 }
 
@@ -128,7 +130,7 @@ fn same_user_visible_table_for_inline_insert(
     let mut current_table = current_table.clone();
     read_table.inlined_data_tables.clear();
     current_table.inlined_data_tables.clear();
-    read_table.validity = current_table.validity.clone();
+    read_table.validity = current_table.validity;
     read_table == current_table
 }
 

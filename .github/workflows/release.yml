@@ -51,6 +51,13 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Print workflow dispatch inputs
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          WORKFLOW_DISPATCH_INPUTS: ${{ toJson(inputs) }}
+        run: |
+          echo "workflow_dispatch inputs:"
+          printf '%s\n' "$WORKFLOW_DISPATCH_INPUTS"
       - name: Checkout
         uses: actions/checkout@v6
         with:
@@ -91,6 +98,13 @@ jobs:
       RELEASE_DRAFT: ${{ github.event_name == 'workflow_dispatch' && inputs.draft || false }}
       RELEASE_PRERELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}
     steps:
+      - name: Print workflow dispatch inputs
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          WORKFLOW_DISPATCH_INPUTS: ${{ toJson(inputs) }}
+        run: |
+          echo "workflow_dispatch inputs:"
+          printf '%s\n' "$WORKFLOW_DISPATCH_INPUTS"
       - name: Checkout
         uses: actions/checkout@v6
         with:

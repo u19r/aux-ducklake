@@ -170,11 +170,7 @@ fn catalog_object_versionstamp_offsets_point_to_fdb_stamp_bytes() {
     let view = ViewRow::new(
         TableId(3),
         SchemaId(1),
-        "view-uuid",
-        "view",
-        "duckdb",
-        "SELECT 1",
-        Vec::new(),
+        crate::ViewDefinition::new("view-uuid", "view", "duckdb", "SELECT 1", Vec::new()),
         order,
     );
     let macro_row = MacroRow::new(MacroId(4), SchemaId(1), "macro", Vec::new(), order);

@@ -34,7 +34,6 @@ pub fn snapshot_timestamp_prefix(catalog: CatalogId) -> Vec<u8> {
     family_prefix(catalog, KeyFamily::SnapshotByTimestamp)
 }
 
-#[must_use]
 pub fn decode_snapshot_timestamp_key(
     catalog: CatalogId,
     key: &[u8],

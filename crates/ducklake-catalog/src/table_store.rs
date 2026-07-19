@@ -3,6 +3,8 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 #[cfg(not(test))]
+use crate::CatalogCacheNamespace;
+#[cfg(not(test))]
 use crate::bounded_cache::{BoundedCache, static_bounded_cache};
 use crate::{
     CatalogError, CatalogId, CatalogResult, KvBatch, MutableCatalogKv, OrderedCatalogKv,
@@ -20,19 +22,22 @@ use crate::{
 };
 
 #[cfg(not(test))]
-static TABLE_ROWS_CACHE: OnceLock<BoundedCache<(CatalogId, CatalogOrderId), Vec<TableRow>>> =
-    OnceLock::new();
+static TABLE_ROWS_CACHE: OnceLock<
+    BoundedCache<(CatalogCacheNamespace, CatalogId, CatalogOrderId), Vec<TableRow>>,
+> = OnceLock::new();
 
 #[cfg(not(test))]
-static CURRENT_TABLE_ROWS_CACHE: OnceLock<BoundedCache<CatalogId, Vec<TableRow>>> = OnceLock::new();
+static CURRENT_TABLE_ROWS_CACHE: OnceLock<
+    BoundedCache<(CatalogCacheNamespace, CatalogId), Vec<TableRow>>,
+> = OnceLock::new();
 
 #[cfg(not(test))]
 pub(crate) fn invalidate_runtime_table_read_context(catalog: CatalogId) {
     if let Some(cache) = TABLE_ROWS_CACHE.get() {
-        cache.retain(|(cached_catalog, _), _| *cached_catalog != catalog);
+        cache.retain(|(_, cached_catalog, _), _| *cached_catalog != catalog);
     }
     if let Some(cache) = CURRENT_TABLE_ROWS_CACHE.get() {
-        cache.remove(catalog);
+        cache.retain(|(_, cached_catalog), _| *cached_catalog != catalog);
     }
 }
 
@@ -422,11 +427,12 @@ pub(crate) fn list_current_table_rows(
     #[cfg(not(test))]
     if crate::store::runtime_read_context_enabled() {
         let cache = static_bounded_cache(&CURRENT_TABLE_ROWS_CACHE, 64);
-        if let Some(rows) = cache.get(catalog) {
+        let key = (kv.catalog_cache_namespace(), catalog);
+        if let Some(rows) = cache.get(key) {
             return Ok(rows);
         }
         let rows = list_current_table_rows_uncached(kv, catalog)?;
-        cache.insert(catalog, rows.clone());
+        cache.insert(key, rows.clone());
         return Ok(rows);
     }
     list_current_table_rows_uncached(kv, catalog)
@@ -455,14 +461,14 @@ pub(crate) fn list_table_rows(
 ) -> CatalogResult<Vec<TableRow>> {
     #[cfg(test)]
     {
-        return list_table_rows_uncached(kv, catalog);
+        list_table_rows_uncached(kv, catalog)
     }
     #[cfg(not(test))]
     {
         let Some(latest) = latest_snapshot(kv, catalog)? else {
             return list_table_rows_uncached(kv, catalog);
         };
-        let key = (catalog, latest.order);
+        let key = (kv.catalog_cache_namespace(), catalog, latest.order);
         let cache = static_bounded_cache(&TABLE_ROWS_CACHE, 1024);
         if let Some(rows) = cache.get(key) {
             return Ok(rows);
@@ -481,11 +487,11 @@ pub(crate) fn list_table_rows_with_snapshot_cache(
     #[cfg(test)]
     {
         let _ = snapshot_order;
-        return list_table_rows_uncached(kv, catalog);
+        list_table_rows_uncached(kv, catalog)
     }
     #[cfg(not(test))]
     {
-        let key = (catalog, snapshot_order);
+        let key = (kv.catalog_cache_namespace(), catalog, snapshot_order);
         let cache = static_bounded_cache(&TABLE_ROWS_CACHE, 1024);
         if let Some(rows) = cache.get(key) {
             return Ok(rows);

@@ -70,6 +70,30 @@ fn ffi_resolve_catalog_id_returns_namespaced_foundationdb_identity() {
 }
 
 #[test]
+fn ffi_resolve_catalog_id_treats_omitted_aux_schema_as_main() {
+    let omitted = runtime_request_payload_for_catalog(
+        "ffi-resolve-default-schema-omitted",
+        RuntimeCatalogBackend::FoundationDb,
+        CatalogId(99),
+        "ResolveCatalogId",
+        "metadata_path=/tmp/a.duckdb\nmetadata_database=metadata_a\nmetadata_schema=\n".to_owned(),
+    );
+    let explicit = runtime_request_payload_for_catalog(
+        "ffi-resolve-default-schema-explicit",
+        RuntimeCatalogBackend::FoundationDb,
+        CatalogId(100),
+        "ResolveCatalogId",
+        "metadata_path=/tmp/a.duckdb\nmetadata_database=metadata_a\nmetadata_schema=main\n"
+            .to_owned(),
+    );
+
+    assert_eq!(
+        payload_line_u64(&omitted, "runtime_catalog_id"),
+        payload_line_u64(&explicit, "runtime_catalog_id")
+    );
+}
+
+#[test]
 fn ffi_resolve_catalog_id_uses_explicit_runtime_catalog_identity() {
     let first = runtime_request_payload_for_catalog(
         "ffi-resolve-explicit-identity-a",
@@ -429,21 +453,23 @@ fn ffi_change_feed_reads_live_foundationdb_catalog_when_enabled() {
         .commit_data_mutation_versionstamped(
             CatalogId(1),
             None,
-            vec![
-                DataFileRow::new(
-                    DataFileId(41),
-                    table,
-                    "main/runtime/fdb-change-feed.parquet",
-                    29,
-                    8192,
-                    initial.order,
-                )
-                .with_row_id_start(200),
-            ],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
+            crate::FdbDataMutation::new(
+                vec![
+                    DataFileRow::new(
+                        DataFileId(41),
+                        table,
+                        "main/runtime/fdb-change-feed.parquet",
+                        29,
+                        8192,
+                        initial.order,
+                    )
+                    .with_row_id_start(200),
+                ],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap();
     let [committed] = commit.data_files.try_into().unwrap();
@@ -451,11 +477,13 @@ fn ffi_change_feed_reads_live_foundationdb_catalog_when_enabled() {
     kv.commit_data_mutation_versionstamped(
         CatalogId(1),
         None,
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        vec![committed.data_file_id],
+        crate::FdbDataMutation::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![committed.data_file_id],
+        ),
     )
     .unwrap();
     let expired = crate::latest_snapshot(&kv, CatalogId(1)).unwrap().unwrap();
@@ -577,7 +605,7 @@ fn ffi_metadata_attach_and_initialization_use_live_foundationdb_catalog_when_ena
         "ffi-fdb-initialize-ducklake",
         RuntimeCatalogBackend::FoundationDb,
         "InitializeDuckLake",
-        String::new(),
+        initialization_payload(),
     );
     let after = runtime_request_payload(
         "ffi-fdb-metadata-exists-after",
@@ -593,7 +621,7 @@ fn ffi_metadata_attach_and_initialization_use_live_foundationdb_catalog_when_ena
     assert!(before.contains("metadata_exists=false"));
     assert!(initialized.contains("operation=InitializeDuckLake"));
     assert!(initialized.contains("catalog_snapshot_order="));
-    assert!(after.contains("metadata_exists=false"));
+    assert!(after.contains("metadata_exists=true"));
 }
 
 #[cfg(feature = "foundationdb")]
@@ -682,7 +710,7 @@ fn ffi_create_table_commit_snapshot_keeps_public_snapshot_id_when_enabled() {
         "ffi-fdb-public-initialize",
         RuntimeCatalogBackend::FoundationDb,
         "InitializeDuckLake",
-        String::new(),
+        initialization_payload(),
     );
     let created = runtime_request_payload(
         "ffi-fdb-public-create-schema",
@@ -766,7 +794,7 @@ fn ffi_standalone_inline_insert_then_flush_keeps_single_snapshot_insert_feed_whe
         "ffi-fdb-inline-flush-init",
         RuntimeCatalogBackend::FoundationDb,
         "InitializeDuckLake",
-        String::new(),
+        initialization_payload(),
     );
     let created_table = runtime_request_payload(
         "ffi-fdb-inline-flush-create-table",
@@ -1098,35 +1126,39 @@ fn ffi_list_snapshots_reads_live_foundationdb_catalog_when_enabled() {
     kv.commit_data_mutation_versionstamped(
         CatalogId(1),
         None,
-        vec![DataFileRow::new(
-            DataFileId(42),
-            table,
-            "main/runtime/fdb-snapshot-list.parquet",
-            5,
-            1024,
-            initial.order,
-        )],
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
+        crate::FdbDataMutation::new(
+            vec![DataFileRow::new(
+                DataFileId(42),
+                table,
+                "main/runtime/fdb-snapshot-list.parquet",
+                5,
+                1024,
+                initial.order,
+            )],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ),
     )
     .unwrap();
     kv.commit_data_mutation_versionstamped(
         CatalogId(1),
         None,
-        Vec::new(),
-        vec![DeleteFileRow::new(
-            DeleteFileId(43),
-            DataFileId(42),
-            "main/runtime/fdb-snapshot-list-delete.parquet",
-            2,
-            128,
-            initial.order,
-        )],
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
+        crate::FdbDataMutation::new(
+            Vec::new(),
+            vec![DeleteFileRow::new(
+                DeleteFileId(43),
+                DataFileId(42),
+                "main/runtime/fdb-snapshot-list-delete.parquet",
+                2,
+                128,
+                initial.order,
+            )],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ),
     )
     .unwrap();
     let latest = crate::latest_snapshot(&kv, CatalogId(1)).unwrap().unwrap();
@@ -1244,18 +1276,20 @@ fn ffi_cleanup_listing_reads_live_foundationdb_catalog_when_enabled() {
         .commit_data_mutation_versionstamped(
             CatalogId(1),
             None,
-            vec![DataFileRow::new(
-                DataFileId(61),
-                table,
-                "main/runtime/fdb-cleanup-known.parquet",
-                37,
-                8192,
-                initial.order,
-            )],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
+            crate::FdbDataMutation::new(
+                vec![DataFileRow::new(
+                    DataFileId(61),
+                    table,
+                    "main/runtime/fdb-cleanup-known.parquet",
+                    37,
+                    8192,
+                    initial.order,
+                )],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap();
     let [known_file] = commit.data_files.try_into().unwrap();
@@ -1263,11 +1297,13 @@ fn ffi_cleanup_listing_reads_live_foundationdb_catalog_when_enabled() {
     kv.commit_data_mutation_versionstamped(
         CatalogId(1),
         None,
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        vec![known_file.data_file_id],
+        crate::FdbDataMutation::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![known_file.data_file_id],
+        ),
     )
     .unwrap();
     drop(kv);
@@ -1351,21 +1387,23 @@ fn ffi_fdb_cleanup_removal_preserves_reachable_delete_metadata_for_time_travel()
         .commit_data_mutation_versionstamped(
             catalog,
             None,
-            vec![
-                DataFileRow::new(
-                    DataFileId(161),
-                    table,
-                    "main/runtime/fdb-delete-cleanup-data.parquet",
-                    100,
-                    8192,
-                    initial.order,
-                )
-                .with_row_id_start(0),
-            ],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
+            crate::FdbDataMutation::new(
+                vec![
+                    DataFileRow::new(
+                        DataFileId(161),
+                        table,
+                        "main/runtime/fdb-delete-cleanup-data.parquet",
+                        100,
+                        8192,
+                        initial.order,
+                    )
+                    .with_row_id_start(0),
+                ],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap();
     let [data_file] = data_commit.data_files.try_into().unwrap();
@@ -1373,18 +1411,20 @@ fn ffi_fdb_cleanup_removal_preserves_reachable_delete_metadata_for_time_travel()
         .commit_data_mutation_versionstamped(
             catalog,
             None,
-            Vec::new(),
-            vec![DeleteFileRow::new(
-                DeleteFileId(171),
-                data_file.data_file_id,
-                "main/runtime/fdb-delete-cleanup-delete-1.parquet",
-                50,
-                4096,
-                data_file.validity.begin_order,
-            )],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
+            crate::FdbDataMutation::new(
+                Vec::new(),
+                vec![DeleteFileRow::new(
+                    DeleteFileId(171),
+                    data_file.data_file_id,
+                    "main/runtime/fdb-delete-cleanup-delete-1.parquet",
+                    50,
+                    4096,
+                    data_file.validity.begin_order,
+                )],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap();
     let [first_delete_file] = first_delete_commit.delete_files.try_into().unwrap();
@@ -1393,18 +1433,20 @@ fn ffi_fdb_cleanup_removal_preserves_reachable_delete_metadata_for_time_travel()
         .commit_data_mutation_versionstamped(
             catalog,
             None,
-            Vec::new(),
-            vec![DeleteFileRow::new(
-                DeleteFileId(172),
-                data_file.data_file_id,
-                "main/runtime/fdb-delete-cleanup-delete-2.parquet",
-                75,
-                4096,
-                first_delete_file.validity.begin_order,
-            )],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
+            crate::FdbDataMutation::new(
+                Vec::new(),
+                vec![DeleteFileRow::new(
+                    DeleteFileId(172),
+                    data_file.data_file_id,
+                    "main/runtime/fdb-delete-cleanup-delete-2.parquet",
+                    75,
+                    4096,
+                    first_delete_file.validity.begin_order,
+                )],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap();
     let [second_delete_file] = second_delete_commit.delete_files.try_into().unwrap();
@@ -1490,30 +1532,32 @@ fn ffi_compaction_mutations_update_live_foundationdb_catalog_when_enabled() {
         .commit_data_mutation_versionstamped(
             CatalogId(1),
             None,
-            vec![
-                DataFileRow::new(
-                    DataFileId(90),
-                    table,
-                    "main/runtime/fdb-merge-left.parquet",
-                    10,
-                    512,
-                    initial.order,
-                )
-                .with_row_id_start(0),
-                DataFileRow::new(
-                    DataFileId(91),
-                    table,
-                    "main/runtime/fdb-merge-right.parquet",
-                    12,
-                    512,
-                    initial.order,
-                )
-                .with_row_id_start(10),
-            ],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
+            crate::FdbDataMutation::new(
+                vec![
+                    DataFileRow::new(
+                        DataFileId(90),
+                        table,
+                        "main/runtime/fdb-merge-left.parquet",
+                        10,
+                        512,
+                        initial.order,
+                    )
+                    .with_row_id_start(0),
+                    DataFileRow::new(
+                        DataFileId(91),
+                        table,
+                        "main/runtime/fdb-merge-right.parquet",
+                        12,
+                        512,
+                        initial.order,
+                    )
+                    .with_row_id_start(10),
+                ],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap();
     let [left, right] = commit.data_files.try_into().unwrap();
@@ -1564,39 +1608,43 @@ fn ffi_rewrite_delete_mutation_updates_live_foundationdb_catalog_when_enabled() 
         .commit_data_mutation_versionstamped(
             CatalogId(1),
             None,
-            vec![
-                DataFileRow::new(
-                    DataFileId(100),
-                    table,
-                    "main/runtime/fdb-rewrite-source.parquet",
-                    20,
-                    2048,
-                    initial.order,
-                )
-                .with_row_id_start(0),
-            ],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
+            crate::FdbDataMutation::new(
+                vec![
+                    DataFileRow::new(
+                        DataFileId(100),
+                        table,
+                        "main/runtime/fdb-rewrite-source.parquet",
+                        20,
+                        2048,
+                        initial.order,
+                    )
+                    .with_row_id_start(0),
+                ],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap();
     let [source] = commit.data_files.try_into().unwrap();
     kv.commit_data_mutation_versionstamped(
         CatalogId(1),
         None,
-        Vec::new(),
-        vec![DeleteFileRow::new(
-            DeleteFileId(101),
-            source.data_file_id,
-            "main/runtime/fdb-rewrite-delete.parquet",
-            5,
-            256,
-            initial.order,
-        )],
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
+        crate::FdbDataMutation::new(
+            Vec::new(),
+            vec![DeleteFileRow::new(
+                DeleteFileId(101),
+                source.data_file_id,
+                "main/runtime/fdb-rewrite-delete.parquet",
+                5,
+                256,
+                initial.order,
+            )],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ),
     )
     .unwrap();
     drop(kv);
@@ -1949,6 +1997,11 @@ fn runtime_request_payload(
     payload: String,
 ) -> String {
     runtime_request_payload_for_catalog(request_id, backend, CatalogId(1), operation, payload)
+}
+
+fn initialization_payload() -> String {
+    "version=1.0\ncreated_by=DuckDB test\ndata_path=/tmp/ducklake-test/\nencrypted=false\n"
+        .to_owned()
 }
 
 fn runtime_request_payload_for_catalog(

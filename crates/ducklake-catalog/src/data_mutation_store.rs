@@ -31,6 +31,17 @@ use crate::{
     },
 };
 
+#[derive(Debug, Default)]
+pub struct DataMutationInput {
+    pub data_files: Vec<DataFileRow>,
+    pub delete_files: Vec<DeleteFileRow>,
+    pub inline_flushes: Vec<InlineTableFlush>,
+    pub partition_values: Vec<FilePartitionValueRow>,
+    pub inline_file_deletions: Vec<InlineFileDeletionRow>,
+    pub file_column_stats: Vec<FileColumnStatsRow>,
+    pub dropped_data_file_ids: Vec<DataFileId>,
+}
+
 pub fn commit_data_mutation(
     kv: &mut impl MutableCatalogKv,
     catalog: CatalogId,
@@ -76,52 +87,34 @@ pub fn commit_data_mutation_with_file_partitions_and_inline_deletes(
     partition_values: Vec<FilePartitionValueRow>,
     inline_file_deletions: Vec<InlineFileDeletionRow>,
 ) -> CatalogResult<DataMutationCommit> {
-    commit_data_mutation_with_file_partitions_inline_deletes_and_dropped_files(
+    commit_data_mutation_with_details(
         kv,
         catalog,
-        data_files,
-        delete_files,
-        inline_flushes,
-        partition_values,
-        inline_file_deletions,
-        Vec::new(),
+        DataMutationInput {
+            data_files,
+            delete_files,
+            inline_flushes: inline_flushes.to_vec(),
+            partition_values,
+            inline_file_deletions,
+            ..DataMutationInput::default()
+        },
     )
 }
 
-pub fn commit_data_mutation_with_file_partitions_inline_deletes_and_dropped_files(
+pub fn commit_data_mutation_with_details(
     kv: &mut impl MutableCatalogKv,
     catalog: CatalogId,
-    data_files: Vec<DataFileRow>,
-    delete_files: Vec<DeleteFileRow>,
-    inline_flushes: &[InlineTableFlush],
-    partition_values: Vec<FilePartitionValueRow>,
-    inline_file_deletions: Vec<InlineFileDeletionRow>,
-    dropped_data_file_ids: Vec<DataFileId>,
+    input: DataMutationInput,
 ) -> CatalogResult<DataMutationCommit> {
-    commit_data_mutation_with_file_partitions_inline_deletes_stats_and_dropped_files(
-        kv,
-        catalog,
-        data_files,
+    let DataMutationInput {
+        mut data_files,
         delete_files,
         inline_flushes,
         partition_values,
-        inline_file_deletions,
-        Vec::new(),
+        mut inline_file_deletions,
+        file_column_stats,
         dropped_data_file_ids,
-    )
-}
-
-pub fn commit_data_mutation_with_file_partitions_inline_deletes_stats_and_dropped_files(
-    kv: &mut impl MutableCatalogKv,
-    catalog: CatalogId,
-    mut data_files: Vec<DataFileRow>,
-    delete_files: Vec<DeleteFileRow>,
-    inline_flushes: &[InlineTableFlush],
-    partition_values: Vec<FilePartitionValueRow>,
-    mut inline_file_deletions: Vec<InlineFileDeletionRow>,
-    file_column_stats: Vec<FileColumnStatsRow>,
-    dropped_data_file_ids: Vec<DataFileId>,
-) -> CatalogResult<DataMutationCommit> {
+    } = input;
     if data_files.is_empty()
         && delete_files.is_empty()
         && inline_flushes.is_empty()
@@ -205,7 +198,7 @@ pub fn commit_data_mutation_with_file_partitions_inline_deletes_stats_and_droppe
                 kv,
                 catalog,
                 &data_files,
-                inline_flushes,
+                &inline_flushes,
                 materialization.row(),
                 latest.as_ref(),
             )?;
@@ -238,7 +231,7 @@ pub fn commit_data_mutation_with_file_partitions_inline_deletes_stats_and_droppe
         latest.as_ref(),
         order,
     )?;
-    for flush in inline_flushes {
+    for flush in &inline_flushes {
         stage_flush_inline_table_payloads(kv, &mut batch, catalog, *flush, order)?;
     }
     for row in &mut inline_file_deletions {

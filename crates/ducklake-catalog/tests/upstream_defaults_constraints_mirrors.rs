@@ -3,10 +3,9 @@ use ducklake_catalog::{
     FakeOrderedCatalogKv, FileColumnStatsRow, InlineRowChangeKind, InlineTableFlush,
     OrderedCatalogKv, SchemaId, TableColumnRow, TableId, TableRow, commit_append_table_columns,
     commit_change_table_column_defaults, commit_create_table_row, commit_data_mutation,
-    commit_data_mutation_with_file_partitions_inline_deletes_stats_and_dropped_files,
-    initialize_catalog_if_absent, keys::inline_table_end_key, latest_snapshot,
-    list_file_column_stats_for_table_column, list_inline_row_changes, load_table_at,
-    register_inline_table_payload_with_table,
+    commit_data_mutation_with_details, initialize_catalog_if_absent, keys::inline_table_end_key,
+    latest_snapshot, list_file_column_stats_for_table_column, list_inline_row_changes,
+    load_table_at, register_inline_table_payload_with_table,
 };
 
 #[test]
@@ -405,16 +404,18 @@ fn append_file_with_stats(
     data_file: DataFileRow,
     stats: Vec<FileColumnStatsRow>,
 ) {
-    commit_data_mutation_with_file_partitions_inline_deletes_stats_and_dropped_files(
+    commit_data_mutation_with_details(
         kv,
         catalog,
-        vec![data_file],
-        Vec::new(),
-        &[],
-        Vec::new(),
-        Vec::new(),
-        stats,
-        Vec::new(),
+        ducklake_catalog::DataMutationInput {
+            data_files: vec![data_file],
+            delete_files: Vec::new(),
+            inline_flushes: [].to_vec(),
+            partition_values: Vec::new(),
+            inline_file_deletions: Vec::new(),
+            file_column_stats: stats,
+            dropped_data_file_ids: Vec::new(),
+        },
     )
     .unwrap();
 }

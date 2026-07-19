@@ -3,6 +3,8 @@ use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
 #[cfg(not(test))]
+use crate::CatalogCacheNamespace;
+#[cfg(not(test))]
 use crate::bounded_cache::{BoundedCache, static_bounded_cache};
 use crate::{
     CatalogError, CatalogId, CatalogResult, KvBatch, MacroId, MacroRow, MutableCatalogKv,
@@ -15,8 +17,9 @@ use crate::{
 };
 
 #[cfg(not(test))]
-static MACRO_ROWS_CACHE: OnceLock<BoundedCache<(CatalogId, CatalogOrderId), Vec<MacroRow>>> =
-    OnceLock::new();
+static MACRO_ROWS_CACHE: OnceLock<
+    BoundedCache<(CatalogCacheNamespace, CatalogId, CatalogOrderId), Vec<MacroRow>>,
+> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DroppedMacro {
@@ -125,14 +128,14 @@ pub(crate) fn list_macro_rows(
 ) -> CatalogResult<Vec<MacroRow>> {
     #[cfg(test)]
     {
-        return list_macro_rows_uncached(kv, catalog);
+        list_macro_rows_uncached(kv, catalog)
     }
     #[cfg(not(test))]
     {
         let Some(latest) = latest_snapshot(kv, catalog)? else {
             return list_macro_rows_uncached(kv, catalog);
         };
-        let key = (catalog, latest.order);
+        let key = (kv.catalog_cache_namespace(), catalog, latest.order);
         let cache = static_bounded_cache(&MACRO_ROWS_CACHE, 1024);
         if let Some(rows) = cache.get(key) {
             return Ok(rows);
@@ -151,11 +154,11 @@ pub(crate) fn list_macro_rows_for_snapshot_cache(
     #[cfg(test)]
     {
         let _ = snapshot_order;
-        return list_macro_rows_uncached(kv, catalog);
+        list_macro_rows_uncached(kv, catalog)
     }
     #[cfg(not(test))]
     {
-        let key = (catalog, snapshot_order);
+        let key = (kv.catalog_cache_namespace(), catalog, snapshot_order);
         let cache = static_bounded_cache(&MACRO_ROWS_CACHE, 1024);
         if let Some(rows) = cache.get(key) {
             return Ok(rows);

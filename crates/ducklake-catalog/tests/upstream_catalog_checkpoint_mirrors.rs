@@ -480,11 +480,13 @@ fn view_row(view: TableId, name: &str, sql: &str) -> ViewRow {
     ViewRow::new(
         view,
         SchemaId(1),
-        format!("view-{}", view.0),
-        name,
-        "duckdb",
-        sql,
-        vec!["a".to_owned()],
+        ducklake_catalog::ViewDefinition::new(
+            format!("view-{}", view.0),
+            name,
+            "duckdb",
+            sql,
+            vec!["a".to_owned()],
+        ),
         CatalogOrderId::uuid_v7(0),
     )
 }

@@ -1,4 +1,6 @@
 #[cfg(not(test))]
+use crate::CatalogCacheNamespace;
+#[cfg(not(test))]
 use crate::bounded_cache::{BoundedCache, static_bounded_cache};
 use crate::{
     CatalogId, CatalogResult, DataFileChangeKind, DataFileId, DataFileRow, DeleteFileChange,
@@ -24,6 +26,7 @@ static ORDER_DELETE_FILE_CHANGE_CACHE: OnceLock<
 #[cfg(not(test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct OrderDeleteFileChangeCacheKey {
+    namespace: CatalogCacheNamespace,
     catalog: CatalogId,
     start_order: CatalogOrderId,
     end_order: CatalogOrderId,
@@ -193,6 +196,7 @@ fn list_order_delete_file_changes_between(
     #[cfg(not(test))]
     {
         let key = OrderDeleteFileChangeCacheKey {
+            namespace: kv.catalog_cache_namespace(),
             catalog,
             start_order,
             end_order,

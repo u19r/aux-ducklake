@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use crate::{
     CatalogError, CatalogId, CatalogResult, RawSnapshotSequence, SnapshotRow, TableId, TableRow,
@@ -253,11 +256,27 @@ pub trait MutableCatalogKv: OrderedCatalogKv {
     }
 }
 
-#[derive(Debug, Default)]
+static NEXT_FAKE_CATALOG_CACHE_NAMESPACE: AtomicUsize = AtomicUsize::new(1);
+
+#[derive(Debug)]
 pub struct FakeOrderedCatalogKv {
+    cache_namespace: CatalogCacheNamespace,
     items: BTreeMap<Vec<u8>, Vec<u8>>,
     fence_versions: HashMap<Vec<u8>, u64>,
     next_order: u128,
+}
+
+impl Default for FakeOrderedCatalogKv {
+    fn default() -> Self {
+        Self {
+            cache_namespace: CatalogCacheNamespace::process_local(
+                NEXT_FAKE_CATALOG_CACHE_NAMESPACE.fetch_add(1, Ordering::Relaxed),
+            ),
+            items: BTreeMap::new(),
+            fence_versions: HashMap::new(),
+            next_order: 0,
+        }
+    }
 }
 
 impl FakeOrderedCatalogKv {
@@ -338,6 +357,10 @@ impl FakeOrderedCatalogKv {
 }
 
 impl OrderedCatalogKv for FakeOrderedCatalogKv {
+    fn catalog_cache_namespace(&self) -> CatalogCacheNamespace {
+        self.cache_namespace
+    }
+
     fn get(&self, key: &[u8]) -> CatalogResult<Option<Vec<u8>>> {
         Ok(Self::get(self, key))
     }

@@ -817,8 +817,7 @@ mod tests {
         .unwrap();
         let latest_line = payload
             .lines()
-            .filter(|line| line.starts_with("snapshot\t"))
-            .next_back()
+            .rfind(|line| line.starts_with("snapshot\t"))
             .unwrap();
         let fields = latest_line.split('\t').collect::<Vec<_>>();
 
@@ -1019,7 +1018,18 @@ mod tests {
         let mut kv = FakeOrderedCatalogKv::new();
         initialize_catalog_if_absent(&mut kv, catalog).unwrap();
         stage_table_snapshot(&mut kv, catalog, 10, table_id, "a", 1);
-        stage_table_rename_snapshot(&mut kv, catalog, 10, 20, table_id, "a", "b", 2);
+        stage_table_rename_snapshot(
+            &mut kv,
+            catalog,
+            TableRenameSnapshot {
+                previous_order_number: 10,
+                next_order_number: 20,
+                table_id,
+                previous_name: "a",
+                next_name: "b",
+                sequence: 2,
+            },
+        );
 
         let payload = String::from_utf8(
             list_snapshots_payload(
@@ -1433,34 +1443,39 @@ mod tests {
         kv.commit(batch).unwrap();
     }
 
-    fn stage_table_rename_snapshot(
-        kv: &mut FakeOrderedCatalogKv,
-        catalog: CatalogId,
+    struct TableRenameSnapshot<'a> {
         previous_order_number: u128,
         next_order_number: u128,
         table_id: TableId,
-        previous_name: &str,
-        next_name: &str,
+        previous_name: &'a str,
+        next_name: &'a str,
         sequence: u64,
+    }
+
+    fn stage_table_rename_snapshot(
+        kv: &mut FakeOrderedCatalogKv,
+        catalog: CatalogId,
+        rename: TableRenameSnapshot<'_>,
     ) {
-        let previous_order = CatalogOrderId::uuid_v7(previous_order_number);
-        let next_order = CatalogOrderId::uuid_v7(next_order_number);
-        let mut previous = table_with_columns(table_id, previous_name, previous_order);
+        let previous_order = CatalogOrderId::uuid_v7(rename.previous_order_number);
+        let next_order = CatalogOrderId::uuid_v7(rename.next_order_number);
+        let mut previous =
+            table_with_columns(rename.table_id, rename.previous_name, previous_order);
         previous.validity = ValidityWindow::new(previous_order, Some(next_order));
-        let mut next = table_with_columns(table_id, next_name, next_order);
+        let mut next = table_with_columns(rename.table_id, rename.next_name, next_order);
         next.validity = ValidityWindow::new(next_order, None);
         let mut batch = KvBatch::new();
         stage_snapshot(
             &mut batch,
             catalog,
-            &SnapshotRow::new(next_order, crate::RawSnapshotSequence(sequence)),
+            &SnapshotRow::new(next_order, crate::RawSnapshotSequence(rename.sequence)),
         );
         batch.put(
-            table_object_key(catalog, table_id, previous_order),
+            table_object_key(catalog, rename.table_id, previous_order),
             previous.encode(),
         );
         batch.put(
-            table_object_key(catalog, table_id, next_order),
+            table_object_key(catalog, rename.table_id, next_order),
             next.encode(),
         );
         kv.commit(batch).unwrap();

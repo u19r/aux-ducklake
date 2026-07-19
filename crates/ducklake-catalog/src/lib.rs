@@ -148,10 +148,9 @@ pub use data_file_store::{
     list_data_files_with_deletes_at, register_delete_file,
 };
 pub use data_mutation_store::{
-    DataMutationCommit, commit_data_mutation, commit_data_mutation_with_file_partitions,
+    DataMutationCommit, DataMutationInput, commit_data_mutation, commit_data_mutation_with_details,
+    commit_data_mutation_with_file_partitions,
     commit_data_mutation_with_file_partitions_and_inline_deletes,
-    commit_data_mutation_with_file_partitions_inline_deletes_and_dropped_files,
-    commit_data_mutation_with_file_partitions_inline_deletes_stats_and_dropped_files,
 };
 pub use debug_export::{
     CatalogDebugRow, list_catalog_debug_rows, list_inline_deletion_debug_chunks,
@@ -161,6 +160,10 @@ pub use delete_change_feed::list_table_deletion_scan_files;
 pub use error::{CatalogError, CatalogResult, FoundationDbErrorClass};
 #[cfg(feature = "foundationdb")]
 pub use fdb::FdbOrderedCatalogKv;
+#[cfg(feature = "foundationdb")]
+pub use fdb_data_mutations::FdbDataMutation;
+#[cfg(feature = "foundationdb")]
+pub use fdb_inline_tables::InlineTableCommitContext;
 #[cfg(feature = "foundationdb")]
 pub use fdb_runtime::shutdown_foundationdb_if_booted;
 pub use file_listing::{
@@ -265,7 +268,7 @@ pub use table_store::{
     commit_rename_tables, commit_rename_tables_with_conflict_check, create_table_version,
     list_tables_at, load_table_at,
 };
-pub use view_rows::ViewRow;
+pub use view_rows::{ViewDefinition, ViewRow};
 pub use view_store::{
     ChangedViewComment, DroppedView, RenamedView, ViewCommentChange, ViewRename,
     commit_change_view_comment, commit_create_view_row, commit_drop_views, commit_rename_views,

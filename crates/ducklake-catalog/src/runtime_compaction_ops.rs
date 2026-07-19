@@ -447,13 +447,16 @@ fn compaction_payload_values(
             ] => {
                 new_files.push(compaction_file_row(
                     operation,
-                    id,
-                    table_id,
-                    path,
-                    row_count,
-                    file_size_bytes,
-                    row_id_start,
-                    None,
+                    CompactionFileInput {
+                        id,
+                        table_id,
+                        path,
+                        row_count,
+                        file_size_bytes,
+                        row_id_start,
+                        mapping_id: None,
+                        encryption_key: None,
+                    },
                 )?);
             }
             [
@@ -468,49 +471,54 @@ fn compaction_payload_values(
             ] => {
                 new_files.push(compaction_file_row(
                     operation,
-                    id,
-                    table_id,
-                    path,
-                    row_count,
-                    file_size_bytes,
-                    row_id_start,
-                    Some(mapping_id),
+                    CompactionFileInput {
+                        id,
+                        table_id,
+                        path,
+                        row_count,
+                        file_size_bytes,
+                        row_id_start,
+                        mapping_id: Some(mapping_id),
+                        encryption_key: None,
+                    },
                 )?);
             }
-            [
-                "file",
-                id,
-                table_id,
-                path,
-                row_count,
-                file_size_bytes,
-                row_id_start,
-                mapping_id,
-                _begin_snapshot,
-                _max_partial_snapshot,
-            ] => {
+            fields @ ["file", ..] if matches!(fields.len(), 10 | 11) => {
+                let id = fields[1];
+                let table_id = fields[2];
+                let path = fields[3];
+                let row_count = fields[4];
+                let file_size_bytes = fields[5];
+                let row_id_start = fields[6];
+                let mapping_id = fields[7];
+                let begin_snapshot = fields[8];
+                let max_partial_snapshot = fields[9];
+                let encryption_key = fields.get(10).copied();
                 let data_file_id = DataFileId(parse_u64_field(operation, id, "data file id")?);
                 new_files.push(compaction_file_row(
                     operation,
-                    id,
-                    table_id,
-                    path,
-                    row_count,
-                    file_size_bytes,
-                    row_id_start,
-                    Some(mapping_id),
+                    CompactionFileInput {
+                        id,
+                        table_id,
+                        path,
+                        row_count,
+                        file_size_bytes,
+                        row_id_start,
+                        mapping_id: Some(mapping_id),
+                        encryption_key,
+                    },
                 )?);
-                if !_begin_snapshot.is_empty() || !_max_partial_snapshot.is_empty() {
+                if !begin_snapshot.is_empty() || !max_partial_snapshot.is_empty() {
                     file_visibility.push(CompactionFileVisibility {
                         data_file_id,
                         begin_snapshot: DuckLakeSnapshotId(parse_u64_field(
                             operation,
-                            _begin_snapshot,
+                            begin_snapshot,
                             "file begin snapshot",
                         )?),
                         max_partial_snapshot: optional_u64_field(
                             operation,
-                            _max_partial_snapshot,
+                            max_partial_snapshot,
                             "file max partial snapshot",
                         )?
                         .map(DuckLakeSnapshotId),
@@ -683,32 +691,42 @@ fn optional_string_field(value: &str) -> Option<String> {
     }
 }
 
+struct CompactionFileInput<'a> {
+    id: &'a str,
+    table_id: &'a str,
+    path: &'a str,
+    row_count: &'a str,
+    file_size_bytes: &'a str,
+    row_id_start: &'a str,
+    mapping_id: Option<&'a str>,
+    encryption_key: Option<&'a str>,
+}
+
 fn compaction_file_row(
     operation: &'static str,
-    id: &str,
-    table_id: &str,
-    path: &str,
-    row_count: &str,
-    file_size_bytes: &str,
-    row_id_start: &str,
-    mapping_id: Option<&str>,
+    input: CompactionFileInput<'_>,
 ) -> CatalogResult<DataFileRow> {
     let mut row = DataFileRow::new(
-        DataFileId(parse_u64_field(operation, id, "data file id")?),
-        TableId(parse_u64_field(operation, table_id, "table id")?),
-        path.to_owned(),
-        parse_u64_field(operation, row_count, "file row count")?,
-        parse_u64_field(operation, file_size_bytes, "file size bytes")?,
+        DataFileId(parse_u64_field(operation, input.id, "data file id")?),
+        TableId(parse_u64_field(operation, input.table_id, "table id")?),
+        input.path.to_owned(),
+        parse_u64_field(operation, input.row_count, "file row count")?,
+        parse_u64_field(operation, input.file_size_bytes, "file size bytes")?,
         crate::CatalogOrderId::uuid_v7(0),
     );
-    if !row_id_start.is_empty() {
-        row = row.with_row_id_start(parse_u64_field(operation, row_id_start, "row id start")?);
+    if !input.row_id_start.is_empty() {
+        row = row.with_row_id_start(parse_u64_field(
+            operation,
+            input.row_id_start,
+            "row id start",
+        )?);
     }
-    if let Some(mapping_id) = mapping_id
+    if let Some(mapping_id) = input.mapping_id
         && !mapping_id.is_empty()
     {
         row.mapping_id = Some(parse_u64_field(operation, mapping_id, "mapping id")?);
     }
+    row.encryption_key = input.encryption_key.unwrap_or_default().to_owned();
     Ok(row)
 }
 

@@ -3,6 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 #[cfg(not(test))]
+use crate::CatalogCacheNamespace;
+#[cfg(not(test))]
 use crate::bounded_cache::{BoundedCache, static_bounded_cache};
 #[cfg(feature = "runtime-metrics")]
 use crate::runtime_metrics::record_runtime_method_elapsed;
@@ -699,6 +701,7 @@ fn list_inline_table_payloads_for_visibility(
     #[cfg(not(test))]
     {
         let key = InlineTablePayloadCacheKey {
+            namespace: kv.catalog_cache_namespace(),
             catalog,
             table_id,
             schema_id,
@@ -763,14 +766,15 @@ fn list_inline_table_payloads_for_visibility_from_end_orders(
         usize::MAX,
     )? {
         let row = decode_inline_table_item(catalog, &item.key, &item.value)?;
-        if inline_chunk_visible_at(&row, &end_orders, snapshot_order) {
+        if inline_chunk_visible_at(&row, end_orders, snapshot_order) {
             visible
                 .entry(row.validity.begin_order)
                 .or_default()
                 .push(row);
         }
     }
-    let rows = visible
+
+    visible
         .into_iter()
         .map(|(begin_order, rows)| {
             assemble_inline_payload(rows).map(|payload| InlineTablePayloadRow {
@@ -780,8 +784,7 @@ fn list_inline_table_payloads_for_visibility_from_end_orders(
                 payload,
             })
         })
-        .collect();
-    rows
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -799,6 +802,7 @@ impl InlineTablePayloadVisibility {
 #[cfg(not(test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct InlineTablePayloadCacheKey {
+    namespace: CatalogCacheNamespace,
     catalog: CatalogId,
     table_id: TableId,
     schema_id: SchemaId,
@@ -834,6 +838,7 @@ pub(crate) fn invalidate_inline_table_payload_read_context(_catalog: CatalogId) 
 #[cfg(not(test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct InlineTableEndOrdersCacheKey {
+    namespace: CatalogCacheNamespace,
     catalog: CatalogId,
     table_id: TableId,
     schema_id: SchemaId,
@@ -894,6 +899,7 @@ fn inline_table_end_orders(
     #[cfg(not(test))]
     {
         let key = InlineTableEndOrdersCacheKey {
+            namespace: kv.catalog_cache_namespace(),
             catalog,
             table_id,
             schema_id,

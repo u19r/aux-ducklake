@@ -3,6 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 #[cfg(not(test))]
+use crate::CatalogCacheNamespace;
+#[cfg(not(test))]
 use crate::bounded_cache::{BoundedCache, static_bounded_cache};
 use crate::{
     AttachedDataFile, CatalogId, CatalogOrderId, CatalogResult, DataFileId, DuckLakeSnapshotId,
@@ -138,8 +140,12 @@ pub(crate) fn foundationdb_data_files_at_payload(
 ) -> CatalogResult<Vec<u8>> {
     let started = RuntimeMetricStage::start();
     #[cfg(not(test))]
-    let cache_key =
-        FileListingPayloadCacheKey::data_files_at(catalog, payload.table_id, payload.snapshot_id);
+    let cache_key = FileListingPayloadCacheKey::data_files_at(
+        kv.catalog_cache_namespace(),
+        catalog,
+        payload.table_id,
+        payload.snapshot_id,
+    );
     #[cfg(not(test))]
     if crate::store::runtime_read_context_enabled()
         && let Some(payload) = file_listing_payload_cache().get_ref(&cache_key)
@@ -211,6 +217,7 @@ pub(crate) fn foundationdb_current_partition_files_payload(
 ) -> CatalogResult<Vec<u8>> {
     #[cfg(not(test))]
     let cache_key = FileListingPayloadCacheKey::current_partition_files(
+        kv.catalog_cache_namespace(),
         catalog,
         payload.table_id,
         payload.partition_key_index,
@@ -317,6 +324,7 @@ pub(crate) fn foundationdb_partition_files_at_payload(
 ) -> CatalogResult<Vec<u8>> {
     #[cfg(not(test))]
     let cache_key = FileListingPayloadCacheKey::partition_files_at(
+        kv.catalog_cache_namespace(),
         catalog,
         payload.table_id,
         payload.snapshot_id,
@@ -339,6 +347,7 @@ pub(crate) fn foundationdb_partition_files_at_payload(
         &payload.partition_value,
     )?;
     let files = match foundationdb_cached_attached_visible_data_files_at(
+        kv,
         catalog,
         payload.table_id,
         snapshot.order,
@@ -380,6 +389,7 @@ pub(crate) fn foundationdb_partition_files_at_batch_payload(
     let mut request = FileListingRequestContext::for_current_catalog(kv, catalog)?;
     let snapshot = request.resolve_snapshot(kv, catalog, payload.snapshot_id)?;
     let attached_files = match foundationdb_cached_attached_visible_data_files_at(
+        kv,
         catalog,
         payload.table_id,
         snapshot.order,
@@ -575,6 +585,7 @@ fn foundationdb_visible_data_files_at(
 ) -> CatalogResult<Vec<crate::DataFileRow>> {
     #[cfg(not(test))]
     let cache_key = VisibleDataFilesAtCacheKey {
+        namespace: kv.catalog_cache_namespace(),
         catalog,
         table_id,
         snapshot_order,
@@ -612,6 +623,7 @@ fn foundationdb_attached_visible_data_files_at(
     let _ = table_id;
     #[cfg(not(test))]
     let cache_key = VisibleDataFilesAtCacheKey {
+        namespace: kv.catalog_cache_namespace(),
         catalog,
         table_id,
         snapshot_order,
@@ -635,6 +647,7 @@ fn foundationdb_attached_visible_data_files_at(
 
 #[cfg(all(feature = "foundationdb", not(test)))]
 fn foundationdb_cached_attached_visible_data_files_at(
+    kv: &crate::FdbOrderedCatalogKv,
     catalog: CatalogId,
     table_id: TableId,
     snapshot_order: CatalogOrderId,
@@ -643,6 +656,7 @@ fn foundationdb_cached_attached_visible_data_files_at(
         return None;
     }
     attached_visible_data_files_at_cache().get(VisibleDataFilesAtCacheKey {
+        namespace: kv.catalog_cache_namespace(),
         catalog,
         table_id,
         snapshot_order,
@@ -651,6 +665,7 @@ fn foundationdb_cached_attached_visible_data_files_at(
 
 #[cfg(all(feature = "foundationdb", test))]
 fn foundationdb_cached_attached_visible_data_files_at(
+    _kv: &crate::FdbOrderedCatalogKv,
     _catalog: CatalogId,
     _table_id: TableId,
     _snapshot_order: CatalogOrderId,
@@ -762,6 +777,7 @@ impl FileListingRequestContext {
 #[cfg(not(test))]
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct FileListingPayloadCacheKey {
+    namespace: CatalogCacheNamespace,
     catalog: CatalogId,
     table_id: TableId,
     kind: FileListingPayloadKind,
@@ -769,8 +785,14 @@ struct FileListingPayloadCacheKey {
 
 #[cfg(not(test))]
 impl FileListingPayloadCacheKey {
-    fn data_files_at(catalog: CatalogId, table_id: TableId, requested_snapshot_id: u64) -> Self {
+    fn data_files_at(
+        namespace: CatalogCacheNamespace,
+        catalog: CatalogId,
+        table_id: TableId,
+        requested_snapshot_id: u64,
+    ) -> Self {
         Self {
+            namespace,
             catalog,
             table_id,
             kind: FileListingPayloadKind::DataFilesAt {
@@ -780,12 +802,14 @@ impl FileListingPayloadCacheKey {
     }
 
     fn current_partition_files(
+        namespace: CatalogCacheNamespace,
         catalog: CatalogId,
         table_id: TableId,
         partition_key_index: PartitionKeyIndex,
         partition_value: String,
     ) -> Self {
         Self {
+            namespace,
             catalog,
             table_id,
             kind: FileListingPayloadKind::CurrentPartitionFiles {
@@ -796,6 +820,7 @@ impl FileListingPayloadCacheKey {
     }
 
     fn partition_files_at(
+        namespace: CatalogCacheNamespace,
         catalog: CatalogId,
         table_id: TableId,
         requested_snapshot_id: u64,
@@ -803,6 +828,7 @@ impl FileListingPayloadCacheKey {
         partition_value: String,
     ) -> Self {
         Self {
+            namespace,
             catalog,
             table_id,
             kind: FileListingPayloadKind::PartitionFilesAt {
@@ -834,6 +860,7 @@ enum FileListingPayloadKind {
 #[cfg(not(test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct VisibleDataFilesAtCacheKey {
+    namespace: CatalogCacheNamespace,
     catalog: CatalogId,
     table_id: TableId,
     snapshot_order: CatalogOrderId,
@@ -1014,6 +1041,7 @@ impl InlineSuppressionContext {
         #[cfg(not(test))]
         {
             let key = InlineSuppressionContextKey {
+                namespace: kv.catalog_cache_namespace(),
                 catalog,
                 table_id,
                 snapshot_order,
@@ -1024,7 +1052,7 @@ impl InlineSuppressionContext {
             }
             let context = Self::load(kv, catalog, table_id, snapshot_order)?;
             cache.insert(key, context.clone());
-            return Ok(context);
+            Ok(context)
         }
         #[cfg(test)]
         {
@@ -1082,6 +1110,7 @@ impl InlineSuppressionContext {
 #[cfg(not(test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct InlineSuppressionContextKey {
+    namespace: CatalogCacheNamespace,
     catalog: CatalogId,
     table_id: TableId,
     snapshot_order: CatalogOrderId,
@@ -1163,7 +1192,7 @@ fn push_files_payload(
                 .map_or(Ok(String::new()), |delete_file| {
                     render_context
                         .public_snapshot_id_for_order(delete_file.validity.begin_order)
-                        .and_then(|sequence| Ok(sequence.to_string()))
+                        .map(|sequence| sequence.to_string())
                 })?;
         let delete_max_partial_snapshot = attached
             .delete_file
@@ -1204,12 +1233,13 @@ fn push_files_payload(
             .unwrap_or_default();
         let schema_version =
             render_context.schema_version_for_order(kv, file_schema_order(&file))?;
-        let row_id_start = file
-            .row_id_start_known
-            .then(|| file.row_id_start.to_string())
-            .unwrap_or_default();
+        let row_id_start = if file.row_id_start_known {
+            file.row_id_start.to_string()
+        } else {
+            Default::default()
+        };
         out.push_str(&format!(
-            "file\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "file\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             file.data_file_id.0,
             file.table_id.0,
             file.path,
@@ -1228,7 +1258,12 @@ fn push_files_payload(
             footer_size,
             schema_version,
             delete_max_partial_snapshot,
-            snapshot_filter_max
+            snapshot_filter_max,
+            file.encryption_key,
+            attached
+                .delete_file
+                .as_ref()
+                .map_or("", |delete_file| delete_file.encryption_key.as_str())
         ));
     }
     record_list_data_files_at_render_stage("FormatRows", started);
@@ -1404,12 +1439,12 @@ impl FilePayloadRenderContext {
             .range(order..)
             .next()
             .map(|(_, version)| *version);
-        if let (Some(previous_version), Some(next_version)) = (previous, next) {
-            if previous_version != next_version {
-                let version = snapshot_schema_version(kv, self.catalog, order)?;
-                self.exact_schema_version_by_order.insert(order, version);
-                return Ok(version);
-            }
+        if let (Some(previous_version), Some(next_version)) = (previous, next)
+            && previous_version != next_version
+        {
+            let version = snapshot_schema_version(kv, self.catalog, order)?;
+            self.exact_schema_version_by_order.insert(order, version);
+            return Ok(version);
         }
         if let Some(version) = previous {
             return Ok(version);
@@ -1428,12 +1463,12 @@ impl FilePayloadRenderContext {
             .range(order..)
             .next()
             .map(|(_, version)| *version);
-        if let (Some(previous_version), Some(next_version)) = (previous, next) {
-            if previous_version != next_version {
-                let version = snapshot_schema_version(kv, self.catalog, order)?;
-                self.exact_schema_version_by_order.insert(order, version);
-                return Ok(version);
-            }
+        if let (Some(previous_version), Some(next_version)) = (previous, next)
+            && previous_version != next_version
+        {
+            let version = snapshot_schema_version(kv, self.catalog, order)?;
+            self.exact_schema_version_by_order.insert(order, version);
+            return Ok(version);
         }
         previous
             .or_else(|| {

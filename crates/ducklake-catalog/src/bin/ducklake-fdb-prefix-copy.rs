@@ -138,6 +138,10 @@ mod prefix_copy {
         }
     }
 
+    #[expect(
+        clippy::type_complexity,
+        reason = "the owned FoundationDB key/value batch matches the API boundary exactly"
+    )]
     fn read_batch(
         db: &Database,
         start: &[u8],

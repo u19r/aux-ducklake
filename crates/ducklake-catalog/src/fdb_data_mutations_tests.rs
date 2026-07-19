@@ -2,10 +2,14 @@ use super::*;
 use std::{cell::Cell, collections::BTreeSet};
 
 use crate::{
-    CatalogId, CatalogOrderId, ColumnId, DeleteFileId, FakeOrderedCatalogKv, FileColumnStatsRow,
-    InlineFileDeletionRow, InlineTableFlush, KvBatch, PartitionKeyIndex, RangeDirection, RangeItem,
-    RawSnapshotSequence, SchemaId, TableId, commit_append_data_files, commit_create_table,
-    commit_inline_file_deletions,
+    CatalogError, CatalogId, CatalogOrderId, CatalogResult, ColumnId, CommitAttemptRow,
+    DataMutationCommit, DeleteFileId, FakeOrderedCatalogKv, FileColumnStatsRow,
+    FoundationDbErrorClass, InlineFileDeletionRow, InlineTableFlush, KvBatch, PartitionKeyIndex,
+    RangeDirection, RangeItem, RawSnapshotSequence, SchemaId, SnapshotRow, TableId,
+    commit_append_data_files, commit_create_table, commit_inline_file_deletions,
+    conflict::commit_attempt_key,
+    data_mutation_intents::DeleteFileMaterialization,
+    fdb_versionstamp::incomplete_order,
     keys::{
         KeyFamily, current_data_file_key, current_table_row_prefix, data_file_key, family_prefix,
         inline_file_deletion_file_prefix, inline_file_deletion_table_prefix,
@@ -292,40 +296,34 @@ fn mutation_recovery_attempt_id_distinguishes_concurrent_commits_for_same_snapsh
     let first = mutation_recovery_attempt_id(
         snapshot,
         &crate::SnapshotCommitMetadata::default(),
-        &[DataFileRow::new(
-            DataFileId(10),
-            TableId(1),
-            "main/table-a.parquet",
-            1,
-            128,
-            CatalogOrderId::uuid_v7(0),
-        )],
-        &[],
-        &[],
-        &[],
-        &[],
-        &[],
-        &[],
+        &FdbDataMutation {
+            data_files: vec![DataFileRow::new(
+                DataFileId(10),
+                TableId(1),
+                "main/table-a.parquet",
+                1,
+                128,
+                CatalogOrderId::uuid_v7(0),
+            )],
+            ..FdbDataMutation::default()
+        },
         &[],
         &[],
     );
     let second = mutation_recovery_attempt_id(
         snapshot,
         &crate::SnapshotCommitMetadata::default(),
-        &[DataFileRow::new(
-            DataFileId(11),
-            TableId(1),
-            "main/table-b.parquet",
-            1,
-            128,
-            CatalogOrderId::uuid_v7(0),
-        )],
-        &[],
-        &[],
-        &[],
-        &[],
-        &[],
-        &[],
+        &FdbDataMutation {
+            data_files: vec![DataFileRow::new(
+                DataFileId(11),
+                TableId(1),
+                "main/table-b.parquet",
+                1,
+                128,
+                CatalogOrderId::uuid_v7(0),
+            )],
+            ..FdbDataMutation::default()
+        },
         &[],
         &[],
     );
@@ -340,34 +338,28 @@ fn mutation_recovery_attempt_id_distinguishes_inline_flushes_for_same_snapshot()
     let first = mutation_recovery_attempt_id(
         snapshot,
         &crate::SnapshotCommitMetadata::default(),
-        &[],
-        &[],
-        &[InlineTableFlush::new(
-            TableId(1),
-            crate::SchemaId(1),
-            RawSnapshotSequence(5),
-        )],
-        &[],
-        &[],
-        &[],
-        &[],
+        &FdbDataMutation {
+            inline_flushes: vec![InlineTableFlush::new(
+                TableId(1),
+                crate::SchemaId(1),
+                RawSnapshotSequence(5),
+            )],
+            ..FdbDataMutation::default()
+        },
         &[],
         &[],
     );
     let second = mutation_recovery_attempt_id(
         snapshot,
         &crate::SnapshotCommitMetadata::default(),
-        &[],
-        &[],
-        &[InlineTableFlush::new(
-            TableId(1),
-            crate::SchemaId(2),
-            RawSnapshotSequence(5),
-        )],
-        &[],
-        &[],
-        &[],
-        &[],
+        &FdbDataMutation {
+            inline_flushes: vec![InlineTableFlush::new(
+                TableId(1),
+                crate::SchemaId(2),
+                RawSnapshotSequence(5),
+            )],
+            ..FdbDataMutation::default()
+        },
         &[],
         &[],
     );
@@ -391,52 +383,54 @@ fn mutation_recovery_attempt_id_distinguishes_stats_and_inline_deletes_for_same_
     let first = mutation_recovery_attempt_id(
         snapshot,
         &crate::SnapshotCommitMetadata::default(),
-        std::slice::from_ref(&file),
-        &[],
-        &[],
-        &[],
-        &[InlineFileDeletionRow::new(
-            TableId(1),
-            DataFileId(1),
-            20,
-            CatalogOrderId::uuid_v7(0),
-        )],
-        &[FileColumnStatsRow::new(
-            DataFileId(7),
-            TableId(1),
-            ColumnId(1),
-            0,
-            Some("0".to_owned()),
-            Some("229".to_owned()),
-        )
-        .with_value_count(Some(120))],
-        &[],
+        &FdbDataMutation {
+            data_files: vec![file.clone()],
+            inline_file_deletions: vec![InlineFileDeletionRow::new(
+                TableId(1),
+                DataFileId(1),
+                20,
+                CatalogOrderId::uuid_v7(0),
+            )],
+            file_column_stats: vec![
+                FileColumnStatsRow::new(
+                    DataFileId(7),
+                    TableId(1),
+                    ColumnId(1),
+                    0,
+                    Some("0".to_owned()),
+                    Some("229".to_owned()),
+                )
+                .with_value_count(Some(120)),
+            ],
+            ..FdbDataMutation::default()
+        },
         &[],
         &[],
     );
     let second = mutation_recovery_attempt_id(
         snapshot,
         &crate::SnapshotCommitMetadata::default(),
-        &[file],
-        &[],
-        &[],
-        &[],
-        &[InlineFileDeletionRow::new(
-            TableId(1),
-            DataFileId(1),
-            21,
-            CatalogOrderId::uuid_v7(0),
-        )],
-        &[FileColumnStatsRow::new(
-            DataFileId(7),
-            TableId(1),
-            ColumnId(1),
-            0,
-            Some("0".to_owned()),
-            Some("230".to_owned()),
-        )
-        .with_value_count(Some(120))],
-        &[],
+        &FdbDataMutation {
+            data_files: vec![file],
+            inline_file_deletions: vec![InlineFileDeletionRow::new(
+                TableId(1),
+                DataFileId(1),
+                21,
+                CatalogOrderId::uuid_v7(0),
+            )],
+            file_column_stats: vec![
+                FileColumnStatsRow::new(
+                    DataFileId(7),
+                    TableId(1),
+                    ColumnId(1),
+                    0,
+                    Some("0".to_owned()),
+                    Some("230".to_owned()),
+                )
+                .with_value_count(Some(120)),
+            ],
+            ..FdbDataMutation::default()
+        },
         &[],
         &[],
     );
@@ -872,7 +866,7 @@ fn duplicate_proposed_data_file_ids_are_rejected_before_commit() {
 
 #[test]
 fn duplicate_proposed_delete_file_ids_are_rejected_before_commit() {
-    let rows = vec![
+    let rows = [
         DeleteFileRow::new(
             DeleteFileId(20),
             DataFileId(10),
@@ -1051,7 +1045,7 @@ fn mutation_metadata_estimate_accepts_borrowed_delete_materialization_rows() {
         1_024,
         incomplete_order(),
     )];
-    let delete_files = vec![DeleteFileRow::new(
+    let delete_files = [DeleteFileRow::new(
         DeleteFileId(20),
         DataFileId(10),
         "s3://warehouse/table/delete-00020.parquet",

@@ -374,7 +374,7 @@ fn table_schema_conflict_for_base_table(
     else {
         return Ok(None);
     };
-    Ok((!current_table.same_user_visible_schema_as(&table)).then_some(changed_at))
+    Ok((!current_table.same_user_visible_schema_as(table)).then_some(changed_at))
 }
 
 fn cached_through_table<'a>(

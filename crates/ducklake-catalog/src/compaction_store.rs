@@ -102,7 +102,7 @@ pub fn commit_merge_adjacent_data_files(
         &compaction.file_column_stats,
     )?;
     for row in &file_column_stats {
-        stage_file_column_stats(&mut batch, catalog, &row);
+        stage_file_column_stats(&mut batch, catalog, row);
     }
     stage_table_file_stats_versions_for_rows(&mut batch, catalog, &file_column_stats, order);
 
@@ -249,7 +249,7 @@ pub fn commit_rewrite_delete_data_files(
         &compaction.file_column_stats,
     )?;
     for row in &file_column_stats {
-        stage_file_column_stats(&mut batch, catalog, &row);
+        stage_file_column_stats(&mut batch, catalog, row);
     }
     stage_table_file_stats_versions_for_rows(&mut batch, catalog, &file_column_stats, order);
     stage_new_file_partition_values(
@@ -313,14 +313,11 @@ fn expire_compacted_source_file(
     delete_policy: DeleteFilePolicy,
 ) -> CatalogResult<ExpiredSourceFile> {
     let delete_file_id = current_delete_file_id(kv, catalog, data_file_id)?;
-    match (delete_policy, delete_file_id) {
-        (DeleteFilePolicy::Reject, Some(_)) => {
-            return Err(CatalogError::InvalidMutation(format!(
-                "data file {} has delete files and cannot be merge-adjacent compacted",
-                data_file_id.0
-            )));
-        }
-        _ => {}
+    if let (DeleteFilePolicy::Reject, Some(_)) = (delete_policy, delete_file_id) {
+        return Err(CatalogError::InvalidMutation(format!(
+            "data file {} has delete files and cannot be merge-adjacent compacted",
+            data_file_id.0
+        )));
     }
     let data_file = stage_expire_current_data_file(kv, batch, catalog, data_file_id, end_order)?;
     stage_scheduled_compacted_data_file_cleanup(batch, catalog, data_file_id);

@@ -127,10 +127,10 @@ mod tests {
         read_inline_rows_for_global_stats_batch_payload_values, register_inlined_table,
     };
     use crate::{
-        CatalogId, CatalogOrderId, DataFileId, DataFileRow, DuckLakeSnapshotId,
-        FakeOrderedCatalogKv, InlineFileDeletionRow, InlinedTableRow, TableId, TableRow,
-        commit_append_data_files, commit_inline_file_deletions, initialize_catalog_if_absent,
-        latest_snapshot,
+        CatalogId, CatalogOrderId, DataFileId, DataFileRow, DeleteFileId, DeleteFileRow,
+        DuckLakeSnapshotId, FakeOrderedCatalogKv, InlineFileDeletionRow, InlinedTableRow, TableId,
+        TableRow, commit_append_data_files, commit_inline_file_deletions,
+        commit_register_delete_files, initialize_catalog_if_absent, latest_snapshot,
     };
 
     #[test]
@@ -202,6 +202,22 @@ mod tests {
             ],
         )
         .unwrap();
+        commit_register_delete_files(
+            &mut kv,
+            catalog,
+            vec![
+                DeleteFileRow::new(
+                    DeleteFileId(9),
+                    DataFileId(42),
+                    "main/t/delete.parquet",
+                    1,
+                    100,
+                    initial.order,
+                )
+                .with_encryption_key("base64-key"),
+            ],
+        )
+        .unwrap();
         commit_inline_file_deletions(
             &mut kv,
             catalog,
@@ -225,13 +241,13 @@ mod tests {
         assert!(text.contains("inline_file_deletion_count=2\n"), "{text}");
         assert!(
             text.contains(
-                "inline_file_delete\t42\tmain/t/file.parquet\tfalse\t10\t2\t\t\tfalse\t\t\t\n"
+                "inline_file_delete\t42\tmain/t/file.parquet\tfalse\t10\t3\t9\tmain/t/delete.parquet\tfalse\t2\tbase64-key\tPARQUET\n"
             ),
             "{text}"
         );
         assert!(
             text.contains(
-                "inline_file_delete\t42\tmain/t/file.parquet\tfalse\t11\t2\t\t\tfalse\t\t\t\n"
+                "inline_file_delete\t42\tmain/t/file.parquet\tfalse\t11\t3\t9\tmain/t/delete.parquet\tfalse\t2\tbase64-key\tPARQUET\n"
             ),
             "{text}"
         );

@@ -18,11 +18,7 @@ mod tests {
             ViewRow::new(
                 TableId(2),
                 SchemaId(0),
-                "view-uuid",
-                "v",
-                "duckdb",
-                "SELECT 1",
-                Vec::new(),
+                crate::ViewDefinition::new("view-uuid", "v", "duckdb", "SELECT 1", Vec::new()),
                 CatalogOrderId::uuid_v7(0),
             ),
         )

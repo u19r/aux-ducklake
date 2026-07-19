@@ -63,22 +63,24 @@ fn given_inline_rows_flushed_to_file_when_snapshot_changes_are_read_then_flush_i
     kv.commit_data_mutation_versionstamped(
         catalog,
         None,
-        vec![DataFileRow::new(
-            DataFileId(840),
-            table_id,
-            "inline-flush-snapshot-changes.parquet",
-            1,
-            10,
-            CatalogOrderId::uuid_v7(0),
-        )],
-        Vec::new(),
-        vec![ducklake_catalog::InlineTableFlush::new(
-            table_id,
-            schema_id,
-            inline_snapshot.sequence,
-        )],
-        Vec::new(),
-        Vec::new(),
+        ducklake_catalog::FdbDataMutation::new(
+            vec![DataFileRow::new(
+                DataFileId(840),
+                table_id,
+                "inline-flush-snapshot-changes.parquet",
+                1,
+                10,
+                CatalogOrderId::uuid_v7(0),
+            )],
+            Vec::new(),
+            vec![ducklake_catalog::InlineTableFlush::new(
+                table_id,
+                schema_id,
+                inline_snapshot.sequence,
+            )],
+            Vec::new(),
+            Vec::new(),
+        ),
     )
     .unwrap();
     let flush_snapshot = latest_snapshot(&kv, catalog).unwrap().unwrap();
@@ -142,26 +144,28 @@ fn given_flushed_inline_file_compacted_when_historical_snapshot_is_read_then_one
     kv.commit_data_mutation_versionstamped(
         catalog,
         None,
-        vec![
-            DataFileRow::new(
-                DataFileId(850),
+        ducklake_catalog::FdbDataMutation::new(
+            vec![
+                DataFileRow::new(
+                    DataFileId(850),
+                    table_id,
+                    "inline-flush-source.parquet",
+                    1,
+                    10,
+                    inline_snapshot.order,
+                )
+                .with_row_id_start(0)
+                .with_max_partial_order(Some(inline_snapshot.order)),
+            ],
+            Vec::new(),
+            vec![ducklake_catalog::InlineTableFlush::new(
                 table_id,
-                "inline-flush-source.parquet",
-                1,
-                10,
-                inline_snapshot.order,
-            )
-            .with_row_id_start(0)
-            .with_max_partial_order(Some(inline_snapshot.order)),
-        ],
-        Vec::new(),
-        vec![ducklake_catalog::InlineTableFlush::new(
-            table_id,
-            schema_id,
-            inline_snapshot.sequence,
-        )],
-        Vec::new(),
-        Vec::new(),
+                schema_id,
+                inline_snapshot.sequence,
+            )],
+            Vec::new(),
+            Vec::new(),
+        ),
     )
     .unwrap();
     kv.append_data_files_versionstamped(
@@ -265,26 +269,28 @@ fn given_versionstamped_inline_file_materialized_when_listing_insertions_then_in
     kv.commit_data_mutation_versionstamped(
         catalog,
         None,
-        vec![
-            DataFileRow::new(
-                DataFileId(860),
+        ducklake_catalog::FdbDataMutation::new(
+            vec![
+                DataFileRow::new(
+                    DataFileId(860),
+                    table_id,
+                    "inline-flush-cdf-suppression.parquet",
+                    1,
+                    10,
+                    inline_snapshot.order,
+                )
+                .with_row_id_start(0)
+                .with_max_partial_order(Some(inline_snapshot.order)),
+            ],
+            Vec::new(),
+            vec![ducklake_catalog::InlineTableFlush::new(
                 table_id,
-                "inline-flush-cdf-suppression.parquet",
-                1,
-                10,
-                inline_snapshot.order,
-            )
-            .with_row_id_start(0)
-            .with_max_partial_order(Some(inline_snapshot.order)),
-        ],
-        Vec::new(),
-        vec![ducklake_catalog::InlineTableFlush::new(
-            table_id,
-            schema_id,
-            inline_snapshot.sequence,
-        )],
-        Vec::new(),
-        Vec::new(),
+                schema_id,
+                inline_snapshot.sequence,
+            )],
+            Vec::new(),
+            Vec::new(),
+        ),
     )
     .unwrap();
     let _flush_snapshot = latest_snapshot(&kv, catalog).unwrap().unwrap();

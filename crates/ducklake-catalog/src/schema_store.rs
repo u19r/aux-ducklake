@@ -2,6 +2,8 @@
 use std::sync::OnceLock;
 
 #[cfg(not(test))]
+use crate::CatalogCacheNamespace;
+#[cfg(not(test))]
 use crate::bounded_cache::{BoundedCache, static_bounded_cache};
 use crate::{
     CatalogError, CatalogId, CatalogResult, KvBatch, MutableCatalogKv, OrderedCatalogKv,
@@ -14,8 +16,9 @@ use crate::{
 };
 
 #[cfg(not(test))]
-static SCHEMA_ROWS_CACHE: OnceLock<BoundedCache<(CatalogId, CatalogOrderId), Vec<SchemaRow>>> =
-    OnceLock::new();
+static SCHEMA_ROWS_CACHE: OnceLock<
+    BoundedCache<(CatalogCacheNamespace, CatalogId, CatalogOrderId), Vec<SchemaRow>>,
+> = OnceLock::new();
 
 pub fn commit_create_schema_rows(
     kv: &mut impl MutableCatalogKv,
@@ -99,14 +102,14 @@ pub(crate) fn list_schema_rows(
 ) -> CatalogResult<Vec<SchemaRow>> {
     #[cfg(test)]
     {
-        return list_schema_rows_uncached(kv, catalog);
+        list_schema_rows_uncached(kv, catalog)
     }
     #[cfg(not(test))]
     {
         let Some(latest) = latest_snapshot(kv, catalog)? else {
             return list_schema_rows_uncached(kv, catalog);
         };
-        let key = (catalog, latest.order);
+        let key = (kv.catalog_cache_namespace(), catalog, latest.order);
         let cache = static_bounded_cache(&SCHEMA_ROWS_CACHE, 1024);
         if let Some(rows) = cache.get(key) {
             return Ok(rows);
@@ -125,11 +128,11 @@ pub(crate) fn list_schema_rows_for_snapshot_cache(
     #[cfg(test)]
     {
         let _ = snapshot_order;
-        return list_schema_rows_uncached(kv, catalog);
+        list_schema_rows_uncached(kv, catalog)
     }
     #[cfg(not(test))]
     {
-        let key = (catalog, snapshot_order);
+        let key = (kv.catalog_cache_namespace(), catalog, snapshot_order);
         let cache = static_bounded_cache(&SCHEMA_ROWS_CACHE, 1024);
         if let Some(rows) = cache.get(key) {
             return Ok(rows);

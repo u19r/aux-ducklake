@@ -123,11 +123,13 @@ fn partition_sort_stats(
             .commit_data_mutation_versionstamped(
                 catalog,
                 None,
-                data_files,
-                Vec::new(),
-                Vec::new(),
-                partition_values,
-                Vec::new(),
+                ducklake_catalog::FdbDataMutation::new(
+                    data_files,
+                    Vec::new(),
+                    Vec::new(),
+                    partition_values,
+                    Vec::new(),
+                ),
             )?
             .data_files;
         let mut stats_rows = Vec::with_capacity(appended.len() * 2);
@@ -237,11 +239,13 @@ fn historical_partition_pruning(
         kv.commit_data_mutation_versionstamped(
             catalog,
             None,
-            partitioned,
-            Vec::new(),
-            Vec::new(),
-            partition_values,
-            Vec::new(),
+            ducklake_catalog::FdbDataMutation::new(
+                partitioned,
+                Vec::new(),
+                Vec::new(),
+                partition_values,
+                Vec::new(),
+            ),
         )?;
         let current_even = list_current_data_files_for_partition_scan_with_deletes(
             kv,
@@ -374,16 +378,18 @@ fn compaction_cleanup(
         kv.commit_data_mutation_versionstamped(
             catalog,
             None,
-            vec![data_file(
-                50_999,
-                COMPACTION_TABLE,
-                "compact-replacement.parquet",
-                4,
-            )],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            source_ids.clone(),
+            ducklake_catalog::FdbDataMutation::new(
+                vec![data_file(
+                    50_999,
+                    COMPACTION_TABLE,
+                    "compact-replacement.parquet",
+                    4,
+                )],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                source_ids.clone(),
+            ),
         )?;
         let current = list_current_data_files(kv, catalog, COMPACTION_TABLE)?;
         let mut compaction_kv = mutable_handle(kv)?;

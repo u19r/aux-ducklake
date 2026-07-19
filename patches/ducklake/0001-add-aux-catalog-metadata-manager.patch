@@ -1,8 +1,22 @@
+diff --git a/.github/config/extensions/postgres_scanner.cmake b/.github/config/extensions/postgres_scanner.cmake
+index 5cd371ef..992dc083 100644
+--- a/.github/config/extensions/postgres_scanner.cmake
++++ b/.github/config/extensions/postgres_scanner.cmake
+@@ -2,8 +2,8 @@ if (NOT MINGW AND NOT ${WASM_ENABLED})
+     duckdb_extension_load(postgres_scanner
+             DONT_LINK
+             GIT_URL https://github.com/duckdb/duckdb-postgres
+-            GIT_TAG f77b0cb511748fd70fb8a4eb265e2990599d286c
++            GIT_TAG a4e03aad76a002e913e676cce1fc2600f64a614f
+             SUBMODULES database-connector
+             APPLY_PATCHES
+             )
+ endif()
 diff --git a/src/functions/ducklake_compaction_functions.cpp b/src/functions/ducklake_compaction_functions.cpp
-index 42f9cf3..00a2108 100644
+index 0ebcd2e0..abb84e17 100644
 --- a/src/functions/ducklake_compaction_functions.cpp
 +++ b/src/functions/ducklake_compaction_functions.cpp
-@@ -416,16 +416,15 @@ void DuckLakeCompactor::GenerateCompactions(DuckLakeTableEntry &table,
+@@ -412,16 +412,15 @@ void DuckLakeCompactor::GenerateCompactions(DuckLakeTableEntry &table,
  	}
  }
  
@@ -25,7 +39,7 @@ index 42f9cf3..00a2108 100644
  	}
  
  	// Validate all column references in sort expressions exist in the table
-@@ -434,6 +433,7 @@ unique_ptr<LogicalOperator> DuckLakeCompactor::InsertSort(Binder &binder, unique
+@@ -430,6 +429,7 @@ unique_ptr<LogicalOperator> DuckLakeCompactor::InsertSort(Binder &binder, unique
  	// Resolve types for the input plan (could be LogicalGet or LogicalProjection)
  	plan->ResolveOperatorTypes();
  
@@ -33,7 +47,7 @@ index 42f9cf3..00a2108 100644
  	D_ASSERT(!bindings.empty());
  	auto table_index = bindings[0].table_index;
  
-@@ -475,6 +475,17 @@ unique_ptr<LogicalOperator> DuckLakeCompactor::InsertSort(Binder &binder, unique
+@@ -471,6 +471,17 @@ unique_ptr<LogicalOperator> DuckLakeCompactor::InsertSort(Binder &binder, unique
  		                    make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, bindings[snapshot_id_pos]));
  	}
  
@@ -52,7 +66,7 @@ index 42f9cf3..00a2108 100644
  	auto order = make_uniq<LogicalOrder>(std::move(orders));
  	order->children.push_back(std::move(plan));
 diff --git a/src/functions/ducklake_flush_inlined_data.cpp b/src/functions/ducklake_flush_inlined_data.cpp
-index d663cd5..48b3c41 100644
+index d663cd52..48b3c41b 100644
 --- a/src/functions/ducklake_flush_inlined_data.cpp
 +++ b/src/functions/ducklake_flush_inlined_data.cpp
 @@ -303,6 +303,7 @@ unique_ptr<LogicalOperator> DuckLakeDataFlusher::GenerateFlushCommand() {
@@ -150,8 +164,20 @@ index d663cd5..48b3c41 100644
  	}
  	// try to compact all tables
  	vector<unique_ptr<LogicalOperator>> flushes;
+diff --git a/src/functions/ducklake_set_option.cpp b/src/functions/ducklake_set_option.cpp
+index 16e43030..57ccc5f7 100644
+--- a/src/functions/ducklake_set_option.cpp
++++ b/src/functions/ducklake_set_option.cpp
+@@ -4,6 +4,7 @@
+ #include "storage/ducklake_catalog.hpp"
+ #include "storage/ducklake_table_entry.hpp"
+ #include "storage/ducklake_schema_entry.hpp"
++#include "duckdb/main/config.hpp"
+ 
+ namespace duckdb {
+ // -------------------------------------------------------------------------//
 diff --git a/src/include/functions/ducklake_compaction_functions.hpp b/src/include/functions/ducklake_compaction_functions.hpp
-index c6128cf..35fa543 100644
+index 5d7eba12..9982c18c 100644
 --- a/src/include/functions/ducklake_compaction_functions.hpp
 +++ b/src/include/functions/ducklake_compaction_functions.hpp
 @@ -92,6 +92,9 @@ public:
@@ -164,9 +190,9 @@ index c6128cf..35fa543 100644
  	static vector<OrderByNode> ParseSortOrders(const DuckLakeSort &sort_data);
  	static vector<BoundOrderByNode> BindSortOrders(Binder &binder, DuckLakeTableEntry &table, TableIndex table_index,
  	                                               vector<OrderByNode> &pre_bound_orders);
-diff --git a/var/folders/kp/vm2n0mqj06d5rl92ncdc4d780000gn/T/tmp.zYS5fLdKEX/current/src/include/metadata_manager/aux_catalog_metadata_manager.hpp b/src/include/metadata_manager/aux_catalog_metadata_manager.hpp
+diff --git a/src/include/metadata_manager/aux_catalog_metadata_manager.hpp b/src/include/metadata_manager/aux_catalog_metadata_manager.hpp
 new file mode 100644
-index 0000000..4e8930d
+index 00000000..4e8930d4
 --- /dev/null
 +++ b/src/include/metadata_manager/aux_catalog_metadata_manager.hpp
 @@ -0,0 +1,259 @@
@@ -429,9 +455,9 @@ index 0000000..4e8930d
 +};
 +
 +} // namespace duckdb
-diff --git a/var/folders/kp/vm2n0mqj06d5rl92ncdc4d780000gn/T/tmp.zYS5fLdKEX/current/src/include/metadata_manager/aux_catalog_runtime_bridge.hpp b/src/include/metadata_manager/aux_catalog_runtime_bridge.hpp
+diff --git a/src/include/metadata_manager/aux_catalog_runtime_bridge.hpp b/src/include/metadata_manager/aux_catalog_runtime_bridge.hpp
 new file mode 100644
-index 0000000..aa96e9e
+index 00000000..aa96e9ec
 --- /dev/null
 +++ b/src/include/metadata_manager/aux_catalog_runtime_bridge.hpp
 @@ -0,0 +1,22 @@
@@ -457,9 +483,9 @@ index 0000000..aa96e9e
 +};
 +
 +} // namespace duckdb
-diff --git a/var/folders/kp/vm2n0mqj06d5rl92ncdc4d780000gn/T/tmp.zYS5fLdKEX/current/src/include/metadata_manager/aux_catalog_schema_payload.hpp b/src/include/metadata_manager/aux_catalog_schema_payload.hpp
+diff --git a/src/include/metadata_manager/aux_catalog_schema_payload.hpp b/src/include/metadata_manager/aux_catalog_schema_payload.hpp
 new file mode 100644
-index 0000000..95c7731
+index 00000000..95c77316
 --- /dev/null
 +++ b/src/include/metadata_manager/aux_catalog_schema_payload.hpp
 @@ -0,0 +1,22 @@
@@ -485,16 +511,17 @@ index 0000000..95c7731
 +                                  const vector<DuckLakeNewColumn> &new_columns);
 +
 +} // namespace duckdb
-diff --git a/var/folders/kp/vm2n0mqj06d5rl92ncdc4d780000gn/T/tmp.zYS5fLdKEX/current/src/include/metadata_manager/aux_catalog_tabular_payload.hpp b/src/include/metadata_manager/aux_catalog_tabular_payload.hpp
+diff --git a/src/include/metadata_manager/aux_catalog_tabular_payload.hpp b/src/include/metadata_manager/aux_catalog_tabular_payload.hpp
 new file mode 100644
-index 0000000..33c7ed5
+index 00000000..6e7a5d3a
 --- /dev/null
 +++ b/src/include/metadata_manager/aux_catalog_tabular_payload.hpp
-@@ -0,0 +1,123 @@
+@@ -0,0 +1,140 @@
 +#pragma once
 +
 +#include "duckdb/common/exception.hpp"
 +#include "duckdb/common/types.hpp"
++#include "duckdb/common/types/blob.hpp"
 +#include "duckdb/common/types/column/column_data_collection.hpp"
 +#include "duckdb/common/types/data_chunk.hpp"
 +#include "duckdb/main/client_context.hpp"
@@ -519,9 +546,17 @@ index 0000000..33c7ed5
 +	return result;
 +}
 +
++inline uint64_t AuxCatalogParseUInt64(const string &value, const char *field_name) {
++	try {
++		return std::stoull(value);
++	} catch (std::exception &ex) {
++		throw IOException("aux_catalog runtime returned invalid %s '%s': %s", field_name, value, ex.what());
++	}
++}
++
 +inline idx_t AuxCatalogParseIndex(const string &value, const char *field_name) {
 +	try {
-+		return NumericCast<idx_t>(std::stoull(value));
++		return NumericCast<idx_t>(AuxCatalogParseUInt64(value, field_name));
 +	} catch (std::exception &ex) {
 +		throw IOException("aux_catalog runtime returned invalid %s '%s': %s", field_name, value, ex.what());
 +	}
@@ -542,6 +577,14 @@ index 0000000..33c7ed5
 +		return false;
 +	}
 +	throw IOException("aux_catalog runtime returned invalid %s '%s'", field_name, value);
++}
++
++inline string AuxCatalogEncodeEncryptionKey(const string &encryption_key) {
++	return encryption_key.empty() ? string() : Blob::ToBase64(string_t(encryption_key));
++}
++
++inline string AuxCatalogDecodeEncryptionKey(const string &encryption_key) {
++	return encryption_key.empty() ? string() : Blob::FromBase64(encryption_key);
 +}
 +
 +inline bool AuxCatalogFieldCountIs(idx_t count, std::initializer_list<idx_t> allowed) {
@@ -615,7 +658,7 @@ index 0000000..33c7ed5
 +
 +} // namespace duckdb
 diff --git a/src/include/storage/ducklake_inlined_data.hpp b/src/include/storage/ducklake_inlined_data.hpp
-index 226b8cb..fe05094 100644
+index 226b8cba..fe050946 100644
 --- a/src/include/storage/ducklake_inlined_data.hpp
 +++ b/src/include/storage/ducklake_inlined_data.hpp
 @@ -21,16 +21,21 @@ struct DuckLakeInlinedData {
@@ -641,7 +684,7 @@ index 226b8cb..fe05094 100644
  
  struct DuckLakeInlinedDataDeletes {
 diff --git a/src/include/storage/ducklake_inlined_data_reader.hpp b/src/include/storage/ducklake_inlined_data_reader.hpp
-index f8cf4d3..89b7d9a 100644
+index f8cf4d31..89b7d9aa 100644
 --- a/src/include/storage/ducklake_inlined_data_reader.hpp
 +++ b/src/include/storage/ducklake_inlined_data_reader.hpp
 @@ -17,7 +17,7 @@ namespace duckdb {
@@ -653,8 +696,23 @@ index f8cf4d3..89b7d9a 100644
  
  class DuckLakeInlinedDataReader : public BaseFileReader {
  public:
+diff --git a/src/include/storage/ducklake_insert.hpp b/src/include/storage/ducklake_insert.hpp
+index b9f4f5f6..f078c0d6 100644
+--- a/src/include/storage/ducklake_insert.hpp
++++ b/src/include/storage/ducklake_insert.hpp
+@@ -10,7 +10,10 @@
+ 
+ #include "duckdb/execution/operator/persistent/physical_copy_to_file.hpp"
+ 
++#include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
+ #include "duckdb/execution/physical_operator.hpp"
++#include "duckdb/execution/physical_plan_generator.hpp"
++#include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
+ #include "duckdb/common/index_vector.hpp"
+ #include "storage/ducklake_stats.hpp"
+ #include "common/ducklake_data_file.hpp"
 diff --git a/src/include/storage/ducklake_metadata_manager.hpp b/src/include/storage/ducklake_metadata_manager.hpp
-index 5b1dee6..4a4a90f 100644
+index 5b1dee6c..4a4a90fe 100644
 --- a/src/include/storage/ducklake_metadata_manager.hpp
 +++ b/src/include/storage/ducklake_metadata_manager.hpp
 @@ -128,6 +128,12 @@ public:
@@ -771,8 +829,39 @@ index 5b1dee6..4a4a90f 100644
  	virtual bool IsColumnCreatedWithTable(const string &table_name, const string &column_name);
  	virtual void MigrateV01();
  	virtual void MigrateV02(bool allow_failures = false);
+diff --git a/src/include/storage/ducklake_multi_file_reader.hpp b/src/include/storage/ducklake_multi_file_reader.hpp
+index cca8210f..5a4e56d0 100644
+--- a/src/include/storage/ducklake_multi_file_reader.hpp
++++ b/src/include/storage/ducklake_multi_file_reader.hpp
+@@ -63,11 +63,10 @@ public:
+ 	                                   const MultiFileReaderBindData &bind_data,
+ 	                                   const virtual_column_map_t &virtual_columns) override;
+ 
+-	unique_ptr<Expression>
++	MultiFileReaderVirtualColumnBinding
+ 	GetVirtualColumnExpression(ClientContext &context, MultiFileReaderData &reader_data,
+-	                           const vector<MultiFileColumnDefinition> &local_columns, idx_t &column_id,
+-	                           const LogicalType &type, MultiFileLocalIndex local_index,
+-	                           optional_ptr<MultiFileColumnDefinition> &global_column_reference) override;
++	                           const vector<MultiFileColumnDefinition> &local_columns, idx_t column_id,
++	                           const LogicalType &type, MultiFileLocalIndex local_index) override;
+ 
+ 	unique_ptr<MultiFileReader> Copy() const override;
+ 
+diff --git a/src/include/storage/ducklake_scan.hpp b/src/include/storage/ducklake_scan.hpp
+index 331ad798..09efd143 100644
+--- a/src/include/storage/ducklake_scan.hpp
++++ b/src/include/storage/ducklake_scan.hpp
+@@ -17,6 +17,7 @@ namespace duckdb {
+ class DuckLakeMultiFileList;
+ class DuckLakeTableEntry;
+ class DuckLakeTransaction;
++class CopyFunctionCatalogEntry;
+ class Serializer;
+ class Deserializer;
+ 
 diff --git a/src/include/storage/ducklake_schema_entry.hpp b/src/include/storage/ducklake_schema_entry.hpp
-index b07a72e..df724f4 100644
+index b07a72e3..df724f42 100644
 --- a/src/include/storage/ducklake_schema_entry.hpp
 +++ b/src/include/storage/ducklake_schema_entry.hpp
 @@ -58,6 +58,7 @@ public:
@@ -784,7 +873,7 @@ index b07a72e..df724f4 100644
  
  	static bool CatalogTypeIsSupported(CatalogType type);
 diff --git a/src/include/storage/ducklake_table_entry.hpp b/src/include/storage/ducklake_table_entry.hpp
-index 4e7ce53..7d86344 100644
+index 4e7ce537..7d863444 100644
 --- a/src/include/storage/ducklake_table_entry.hpp
 +++ b/src/include/storage/ducklake_table_entry.hpp
 @@ -43,6 +43,7 @@ public:
@@ -796,10 +885,10 @@ index 4e7ce53..7d86344 100644
  		return table_uuid;
  	}
 diff --git a/src/include/storage/ducklake_transaction.hpp b/src/include/storage/ducklake_transaction.hpp
-index 559fb00..21dcf24 100644
+index d962d176..f2f2d673 100644
 --- a/src/include/storage/ducklake_transaction.hpp
 +++ b/src/include/storage/ducklake_transaction.hpp
-@@ -74,6 +74,7 @@ public:
+@@ -76,6 +76,7 @@ public:
  	bool HasChanges() const;
  	LocalTableChangeIterationHelper Changes() const;
  	void CleanupFiles(DatabaseInstance &db);
@@ -807,7 +896,7 @@ index 559fb00..21dcf24 100644
  	void CleanupFiles(ClientContext &context, TableIndex table_id);
  	bool HasTransactionLocalInserts(TableIndex table_id) const;
  	bool HasTransactionInlinedData(TableIndex table_id) const;
-@@ -311,11 +312,15 @@ protected:
+@@ -316,11 +317,15 @@ protected:
  	}
  
  public:
@@ -829,7 +918,7 @@ index 559fb00..21dcf24 100644
  	static DuckLakeGlobalStatsInfo ConvertNewGlobalStats(TableIndex table_id,
  	                                                     const DuckLakeNewGlobalStats &new_global_stats);
 diff --git a/src/include/storage/ducklake_transaction_state.hpp b/src/include/storage/ducklake_transaction_state.hpp
-index 6a6d54c..a59b1d7 100644
+index 6a6d54ca..a59b1d74 100644
 --- a/src/include/storage/ducklake_transaction_state.hpp
 +++ b/src/include/storage/ducklake_transaction_state.hpp
 @@ -47,6 +47,91 @@ struct DuckLakeCommitContext {
@@ -983,7 +1072,7 @@ index 6a6d54c..a59b1d7 100644
  };
  
 diff --git a/src/metadata_manager/CMakeLists.txt b/src/metadata_manager/CMakeLists.txt
-index a8e3448..c4f48ce 100644
+index a8e34486..c4f48ce4 100644
 --- a/src/metadata_manager/CMakeLists.txt
 +++ b/src/metadata_manager/CMakeLists.txt
 @@ -1,7 +1,15 @@
@@ -1004,9 +1093,9 @@ index a8e3448..c4f48ce 100644
  set(ALL_OBJECT_FILES
      ${ALL_OBJECT_FILES} $<TARGET_OBJECTS:ducklake_metadata_manager>
      PARENT_SCOPE)
-diff --git a/var/folders/kp/vm2n0mqj06d5rl92ncdc4d780000gn/T/tmp.zYS5fLdKEX/current/src/metadata_manager/aux_catalog_catalog_snapshot.cpp b/src/metadata_manager/aux_catalog_catalog_snapshot.cpp
+diff --git a/src/metadata_manager/aux_catalog_catalog_snapshot.cpp b/src/metadata_manager/aux_catalog_catalog_snapshot.cpp
 new file mode 100644
-index 0000000..d37e686
+index 00000000..d37e6861
 --- /dev/null
 +++ b/src/metadata_manager/aux_catalog_catalog_snapshot.cpp
 @@ -0,0 +1,305 @@
@@ -1315,9 +1404,9 @@ index 0000000..d37e686
 +}
 +
 +} // namespace duckdb
-diff --git a/var/folders/kp/vm2n0mqj06d5rl92ncdc4d780000gn/T/tmp.zYS5fLdKEX/current/src/metadata_manager/aux_catalog_change_feed.cpp b/src/metadata_manager/aux_catalog_change_feed.cpp
+diff --git a/src/metadata_manager/aux_catalog_change_feed.cpp b/src/metadata_manager/aux_catalog_change_feed.cpp
 new file mode 100644
-index 0000000..fb34c18
+index 00000000..fb34c187
 --- /dev/null
 +++ b/src/metadata_manager/aux_catalog_change_feed.cpp
 @@ -0,0 +1,160 @@
@@ -1481,9 +1570,9 @@ index 0000000..fb34c18
 +}
 +
 +} // namespace duckdb
-diff --git a/var/folders/kp/vm2n0mqj06d5rl92ncdc4d780000gn/T/tmp.zYS5fLdKEX/current/src/metadata_manager/aux_catalog_cleanup.cpp b/src/metadata_manager/aux_catalog_cleanup.cpp
+diff --git a/src/metadata_manager/aux_catalog_cleanup.cpp b/src/metadata_manager/aux_catalog_cleanup.cpp
 new file mode 100644
-index 0000000..48d5b7b
+index 00000000..48d5b7be
 --- /dev/null
 +++ b/src/metadata_manager/aux_catalog_cleanup.cpp
 @@ -0,0 +1,219 @@
@@ -1706,9 +1795,9 @@ index 0000000..48d5b7b
 +}
 +
 +} // namespace duckdb
-diff --git a/var/folders/kp/vm2n0mqj06d5rl92ncdc4d780000gn/T/tmp.zYS5fLdKEX/current/src/metadata_manager/aux_catalog_column_mappings.cpp b/src/metadata_manager/aux_catalog_column_mappings.cpp
+diff --git a/src/metadata_manager/aux_catalog_column_mappings.cpp b/src/metadata_manager/aux_catalog_column_mappings.cpp
 new file mode 100644
-index 0000000..6d0f7e0
+index 00000000..6d0f7e0c
 --- /dev/null
 +++ b/src/metadata_manager/aux_catalog_column_mappings.cpp
 @@ -0,0 +1,463 @@
@@ -2175,9 +2264,9 @@ index 0000000..6d0f7e0
 +}
 +
 +} // namespace duckdb
-diff --git a/var/folders/kp/vm2n0mqj06d5rl92ncdc4d780000gn/T/tmp.zYS5fLdKEX/current/src/metadata_manager/aux_catalog_column_probe.cpp b/src/metadata_manager/aux_catalog_column_probe.cpp
+diff --git a/src/metadata_manager/aux_catalog_column_probe.cpp b/src/metadata_manager/aux_catalog_column_probe.cpp
 new file mode 100644
-index 0000000..f092699
+index 00000000..f0926999
 --- /dev/null
 +++ b/src/metadata_manager/aux_catalog_column_probe.cpp
 @@ -0,0 +1,23 @@
@@ -2204,12 +2293,12 @@ index 0000000..f092699
 +}
 +
 +} // namespace duckdb
-diff --git a/var/folders/kp/vm2n0mqj06d5rl92ncdc4d780000gn/T/tmp.zYS5fLdKEX/current/src/metadata_manager/aux_catalog_compaction.cpp b/src/metadata_manager/aux_catalog_compaction.cpp
+diff --git a/src/metadata_manager/aux_catalog_compaction.cpp b/src/metadata_manager/aux_catalog_compaction.cpp
 new file mode 100644
-index 0000000..924c026
+index 00000000..048411fd
 --- /dev/null
 +++ b/src/metadata_manager/aux_catalog_compaction.cpp
-@@ -0,0 +1,368 @@
+@@ -0,0 +1,382 @@
 +#include "metadata_manager/aux_catalog_metadata_manager.hpp"
 +#include "metadata_manager/aux_catalog_tabular_payload.hpp"
 +
@@ -2237,6 +2326,7 @@ index 0000000..924c026
 +	optional_idx begin_snapshot;
 +	optional_idx max_partial_snapshot;
 +	optional_idx schema_version;
++	string data_encryption_key;
 +	vector<Value> partition_values;
 +	bool has_delete_file = false;
 +	DataFileIndex delete_file_id;
@@ -2244,23 +2334,24 @@ index 0000000..924c026
 +	idx_t delete_count = 0;
 +	idx_t delete_file_size_bytes = 0;
 +	idx_t delete_begin_snapshot = 0;
++	string delete_encryption_key;
 +	set<idx_t> inlined_file_deletions;
 +};
 +
 +static bool IsCompactionFileRowFieldCount(idx_t count) {
-+	return AuxCatalogFieldCountIs(count, {12, 13, 14, 16, 17, 18, 19, 20});
++	return AuxCatalogFieldCountIs(count, {12, 13, 14, 16, 17, 18, 19, 20, 22});
 +}
 +
 +static bool CompactionFileRowHasMapping(idx_t count) {
-+	return AuxCatalogFieldCountIs(count, {14, 16, 17, 18, 19, 20});
++	return AuxCatalogFieldCountIs(count, {14, 16, 17, 18, 19, 20, 22});
 +}
 +
 +static bool CompactionFileRowHasInlineDeletions(idx_t count) {
-+	return AuxCatalogFieldCountIs(count, {13, 14, 16, 17, 18, 19, 20});
++	return AuxCatalogFieldCountIs(count, {13, 14, 16, 17, 18, 19, 20, 22});
 +}
 +
 +static bool CompactionFileRowHasSnapshotBounds(idx_t count) {
-+	return AuxCatalogFieldCountIs(count, {16, 17, 18, 19, 20});
++	return AuxCatalogFieldCountIs(count, {16, 17, 18, 19, 20, 22});
 +}
 +
 +static set<idx_t> ParseInlinedFileDeletions(const string &value) {
@@ -2331,8 +2422,12 @@ index 0000000..924c026
 +				file.max_partial_snapshot = AuxCatalogParseIndex(fields[15], "data file partial max snapshot");
 +			}
 +		}
-+		if ((fields.size() == 18 || fields.size() == 19 || fields.size() == 20) && !fields[17].empty()) {
++		if (fields.size() >= 18 && !fields[17].empty()) {
 +			file.schema_version = AuxCatalogParseIndex(fields[17], "data file schema version");
++		}
++		if (fields.size() == 22) {
++			file.data_encryption_key = AuxCatalogDecodeEncryptionKey(fields[20]);
++			file.delete_encryption_key = AuxCatalogDecodeEncryptionKey(fields[21]);
 +		}
 +		files.push_back(std::move(file));
 +	}
@@ -2425,13 +2520,15 @@ index 0000000..924c026
 +		// The Rust catalog derives the metadata row range from the source files.
 +	}
 +	auto row_id_start = file.row_id_start.IsValid() ? std::to_string(file.row_id_start.GetIndex()) : string();
-+	payload += StringUtil::Format("file\t%d\t%d\t%s\t%d\t%d\t%s\t%s\t%s\t%s\n", file.id.index, file.table_id.index,
++	payload += StringUtil::Format("file\t%d\t%d\t%s\t%d\t%d\t%s\t%s\t%s\t%s\t%s\n", file.id.index,
++	                              file.table_id.index,
 +	                              resolved_path, file.row_count, file.file_size_bytes, row_id_start,
 +	                              file.mapping_id.IsValid() ? std::to_string(file.mapping_id.index) : "",
 +	                              file.begin_snapshot.IsValid() ? std::to_string(file.begin_snapshot.GetIndex()) : "",
 +	                              file.max_partial_file_snapshot.IsValid()
 +	                                  ? std::to_string(file.max_partial_file_snapshot.GetIndex())
-+	                                  : "");
++	                                  : "",
++	                              AuxCatalogEncodeEncryptionKey(file.encryption_key));
 +	for (auto &partition_value : file.partition_values) {
 +		auto value = partition_value.partition_value.IsNull() ? string("__HIVE_DEFAULT_PARTITION__")
 +		                                                     : partition_value.partition_value.ToString();
@@ -2446,6 +2543,10 @@ index 0000000..924c026
 +		}
 +		auto min_value = SqlLiteralToCompactionPayloadValue(column_stats.min_val);
 +		auto max_value = SqlLiteralToCompactionPayloadValue(column_stats.max_val);
++		if (column_stats.contains_nan == "true") {
++			min_value.clear();
++			max_value.clear();
++		}
 +		auto extra_stats = SqlLiteralToCompactionPayloadValue(column_stats.extra_stats);
 +		RejectCompactionField(min_value, "compaction file column stats min values");
 +		RejectCompactionField(max_value, "compaction file column stats max values");
@@ -2505,6 +2606,7 @@ index 0000000..924c026
 +		entry.max_partial_file_snapshot = row.max_partial_snapshot;
 +		entry.file.data.path = row.path;
 +		entry.file.data.file_size_bytes = row.file_size_bytes;
++		entry.file.data.encryption_key = row.data_encryption_key;
 +		entry.schema_version = row.schema_version.IsValid() ? row.schema_version.GetIndex() : snapshot.schema_version;
 +		if (type == CompactionType::REWRITE_DELETES) {
 +			if (row.has_delete_file) {
@@ -2515,6 +2617,7 @@ index 0000000..924c026
 +				delete_file.begin_snapshot = row.delete_begin_snapshot;
 +				delete_file.data.path = row.delete_path;
 +				delete_file.data.file_size_bytes = row.delete_file_size_bytes;
++				delete_file.data.encryption_key = row.delete_encryption_key;
 +				entry.delete_files.push_back(std::move(delete_file));
 +			}
 +			entry.inlined_file_deletions = row.inlined_file_deletions;
@@ -2578,13 +2681,14 @@ index 0000000..924c026
 +}
 +
 +} // namespace duckdb
-diff --git a/var/folders/kp/vm2n0mqj06d5rl92ncdc4d780000gn/T/tmp.zYS5fLdKEX/current/src/metadata_manager/aux_catalog_delete_files.cpp b/src/metadata_manager/aux_catalog_delete_files.cpp
+diff --git a/src/metadata_manager/aux_catalog_delete_files.cpp b/src/metadata_manager/aux_catalog_delete_files.cpp
 new file mode 100644
-index 0000000..ff65b81
+index 00000000..718ee992
 --- /dev/null
 +++ b/src/metadata_manager/aux_catalog_delete_files.cpp
 @@ -0,0 +1,66 @@
 +#include "metadata_manager/aux_catalog_metadata_manager.hpp"
++#include "metadata_manager/aux_catalog_tabular_payload.hpp"
 +
 +#include "common/ducklake_data_file.hpp"
 +#include "duckdb/common/exception.hpp"
@@ -2604,18 +2708,17 @@ index 0000000..ff65b81
 +	if (file.format != DeleteFileFormat::PARQUET) {
 +		throw NotImplementedException("aux_catalog only supports Parquet positional delete files currently");
 +	}
-+	if (!file.encryption_key.empty()) {
-+		throw NotImplementedException("aux_catalog encrypted delete files are not implemented yet");
-+	}
 +}
 +
 +static void AppendDeleteFilePayload(string &payload, const DuckLakeDeleteFileInfo &file, const string &resolved_path) {
 +	ValidateDeleteFile(file);
 +	RejectDeleteField(resolved_path, "delete file paths");
 +	auto begin_snapshot = file.begin_snapshot.IsValid() ? std::to_string(file.begin_snapshot.GetIndex()) : string();
-+	payload += StringUtil::Format("delete_file\t%d\t%d\t%d\t%s\t%d\t%d\t%s\n", file.id.index, file.table_id.index,
++	auto max_snapshot = file.max_snapshot.IsValid() ? std::to_string(file.max_snapshot.GetIndex()) : string();
++	payload += StringUtil::Format("delete_file\t%d\t%d\t%d\t%s\t%d\t%d\t%s\t%s\t%s\n", file.id.index,
++	                              file.table_id.index,
 +	                              file.data_file_id.index, resolved_path, file.delete_count, file.file_size_bytes,
-+	                              begin_snapshot);
++	                              begin_snapshot, max_snapshot, AuxCatalogEncodeEncryptionKey(file.encryption_key));
 +}
 +
 +} // namespace
@@ -2650,12 +2753,12 @@ index 0000000..ff65b81
 +}
 +
 +} // namespace duckdb
-diff --git a/var/folders/kp/vm2n0mqj06d5rl92ncdc4d780000gn/T/tmp.zYS5fLdKEX/current/src/metadata_manager/aux_catalog_file_listing.cpp b/src/metadata_manager/aux_catalog_file_listing.cpp
+diff --git a/src/metadata_manager/aux_catalog_file_listing.cpp b/src/metadata_manager/aux_catalog_file_listing.cpp
 new file mode 100644
-index 0000000..1de526c
+index 00000000..f1b8ff53
 --- /dev/null
 +++ b/src/metadata_manager/aux_catalog_file_listing.cpp
-@@ -0,0 +1,869 @@
+@@ -0,0 +1,880 @@
 +#include "metadata_manager/aux_catalog_metadata_manager.hpp"
 +#include "metadata_manager/aux_catalog_tabular_payload.hpp"
 +
@@ -2694,28 +2797,30 @@ index 0000000..1de526c
 +	optional_idx begin_snapshot;
 +	optional_idx max_partial_snapshot;
 +	optional_idx snapshot_filter_max;
++	string data_encryption_key;
 +	DataFileIndex delete_file_id;
 +	string delete_path;
 +	idx_t delete_count = 0;
 +	idx_t delete_file_size_bytes = 0;
 +	optional_idx delete_begin_snapshot;
++	string delete_encryption_key;
 +	set<idx_t> inlined_file_deletions;
 +};
 +
 +static bool IsFileRowFieldCount(idx_t count) {
-+	return AuxCatalogFieldCountIs(count, {6, 12, 13, 14, 16, 17, 18, 19, 20});
++	return AuxCatalogFieldCountIs(count, {6, 12, 13, 14, 16, 17, 18, 19, 20, 22});
 +}
 +
 +static bool FileRowHasMapping(idx_t count) {
-+	return AuxCatalogFieldCountIs(count, {14, 16, 17, 18, 19, 20});
++	return AuxCatalogFieldCountIs(count, {14, 16, 17, 18, 19, 20, 22});
 +}
 +
 +static bool FileRowHasInlineDeletions(idx_t count) {
-+	return AuxCatalogFieldCountIs(count, {13, 14, 16, 17, 18, 19, 20});
++	return AuxCatalogFieldCountIs(count, {13, 14, 16, 17, 18, 19, 20, 22});
 +}
 +
 +static bool FileRowHasFooterSize(idx_t count) {
-+	return AuxCatalogFieldCountIs(count, {17, 18, 19, 20});
++	return AuxCatalogFieldCountIs(count, {17, 18, 19, 20, 22});
 +}
 +
 +struct AuxFileColumnStatsRow {
@@ -2793,8 +2898,12 @@ index 0000000..1de526c
 +	if (FileRowHasFooterSize(fields.size())) {
 +		file.data_file_footer_size = AuxCatalogParseOptionalIndex(fields[16], "data file footer size");
 +	}
-+	if (fields.size() == 20) {
++	if (fields.size() >= 20) {
 +		file.snapshot_filter_max = AuxCatalogParseOptionalIndex(fields[19], "data file snapshot filter max");
++	}
++	if (fields.size() == 22) {
++		file.data_encryption_key = AuxCatalogDecodeEncryptionKey(fields[20]);
++		file.delete_encryption_key = AuxCatalogDecodeEncryptionKey(fields[21]);
 +	}
 +	return file;
 +}
@@ -3180,10 +3289,11 @@ index 0000000..1de526c
 +}
 +
 +static void PopulateFileData(DuckLakeFileData &target, const string &path, idx_t file_size_bytes,
-+                             optional_idx footer_size = optional_idx()) {
++                             optional_idx footer_size, const string &encryption_key) {
 +	target.path = path;
 +	target.file_size_bytes = file_size_bytes;
 +	target.footer_size = footer_size;
++	target.encryption_key = encryption_key;
 +}
 +
 +static bool HasDeleteFile(const AuxCatalogFileRow &row) {
@@ -3488,9 +3598,11 @@ index 0000000..1de526c
 +		entry.snapshot_filter_max = row.snapshot_filter_max;
 +		entry.mapping_id = row.mapping_id;
 +		entry.inlined_file_deletions = row.inlined_file_deletions;
-+		PopulateFileData(entry.file, row.path, row.file_size_bytes, row.data_file_footer_size);
++		PopulateFileData(entry.file, row.path, row.file_size_bytes, row.data_file_footer_size,
++		                 row.data_encryption_key);
 +		if (HasDeleteFile(row)) {
-+			PopulateFileData(entry.delete_file, row.delete_path, row.delete_file_size_bytes);
++			PopulateFileData(entry.delete_file, row.delete_path, row.delete_file_size_bytes, optional_idx(),
++			                 row.delete_encryption_key);
 +		}
 +		files.push_back(std::move(entry));
 +	}
@@ -3512,12 +3624,14 @@ index 0000000..1de526c
 +		entry.row_count = row.row_count;
 +		entry.row_id_start = row.row_id_start;
 +		entry.mapping_id = row.mapping_id;
-+		PopulateFileData(entry.file, row.path, row.file_size_bytes, row.data_file_footer_size);
++		PopulateFileData(entry.file, row.path, row.file_size_bytes, row.data_file_footer_size,
++		                 row.data_encryption_key);
 +		if (HasDeleteFile(row)) {
 +			entry.delete_file_id = row.delete_file_id;
 +			entry.delete_count = row.delete_count;
 +			entry.delete_file_begin_snapshot = row.delete_begin_snapshot;
-+			PopulateFileData(entry.delete_file, row.delete_path, row.delete_file_size_bytes);
++			PopulateFileData(entry.delete_file, row.delete_path, row.delete_file_size_bytes, optional_idx(),
++			                 row.delete_encryption_key);
 +		}
 +		files.push_back(std::move(entry));
 +	}
@@ -3525,9 +3639,9 @@ index 0000000..1de526c
 +}
 +
 +} // namespace duckdb
-diff --git a/var/folders/kp/vm2n0mqj06d5rl92ncdc4d780000gn/T/tmp.zYS5fLdKEX/current/src/metadata_manager/aux_catalog_inline.cpp b/src/metadata_manager/aux_catalog_inline.cpp
+diff --git a/src/metadata_manager/aux_catalog_inline.cpp b/src/metadata_manager/aux_catalog_inline.cpp
 new file mode 100644
-index 0000000..dd9dbc8
+index 00000000..dd9dbc8c
 --- /dev/null
 +++ b/src/metadata_manager/aux_catalog_inline.cpp
 @@ -0,0 +1,468 @@
@@ -3999,9 +4113,9 @@ index 0000000..dd9dbc8
 +}
 +
 +} // namespace duckdb
-diff --git a/var/folders/kp/vm2n0mqj06d5rl92ncdc4d780000gn/T/tmp.zYS5fLdKEX/current/src/metadata_manager/aux_catalog_inline_read.cpp b/src/metadata_manager/aux_catalog_inline_read.cpp
+diff --git a/src/metadata_manager/aux_catalog_inline_read.cpp b/src/metadata_manager/aux_catalog_inline_read.cpp
 new file mode 100644
-index 0000000..8ff33f4
+index 00000000..8ff33f44
 --- /dev/null
 +++ b/src/metadata_manager/aux_catalog_inline_read.cpp
 @@ -0,0 +1,505 @@
@@ -4510,9 +4624,9 @@ index 0000000..8ff33f4
 +}
 +
 +} // namespace duckdb
-diff --git a/var/folders/kp/vm2n0mqj06d5rl92ncdc4d780000gn/T/tmp.zYS5fLdKEX/current/src/metadata_manager/aux_catalog_inline_stats.cpp b/src/metadata_manager/aux_catalog_inline_stats.cpp
+diff --git a/src/metadata_manager/aux_catalog_inline_stats.cpp b/src/metadata_manager/aux_catalog_inline_stats.cpp
 new file mode 100644
-index 0000000..e771565
+index 00000000..e771565b
 --- /dev/null
 +++ b/src/metadata_manager/aux_catalog_inline_stats.cpp
 @@ -0,0 +1,488 @@
@@ -5004,9 +5118,9 @@ index 0000000..e771565
 +}
 +
 +} // namespace duckdb
-diff --git a/var/folders/kp/vm2n0mqj06d5rl92ncdc4d780000gn/T/tmp.zYS5fLdKEX/current/src/metadata_manager/aux_catalog_macros.cpp b/src/metadata_manager/aux_catalog_macros.cpp
+diff --git a/src/metadata_manager/aux_catalog_macros.cpp b/src/metadata_manager/aux_catalog_macros.cpp
 new file mode 100644
-index 0000000..9124f42
+index 00000000..9124f424
 --- /dev/null
 +++ b/src/metadata_manager/aux_catalog_macros.cpp
 @@ -0,0 +1,74 @@
@@ -5084,12 +5198,12 @@ index 0000000..9124f42
 +}
 +
 +} // namespace duckdb
-diff --git a/var/folders/kp/vm2n0mqj06d5rl92ncdc4d780000gn/T/tmp.zYS5fLdKEX/current/src/metadata_manager/aux_catalog_metadata_manager.cpp b/src/metadata_manager/aux_catalog_metadata_manager.cpp
+diff --git a/src/metadata_manager/aux_catalog_metadata_manager.cpp b/src/metadata_manager/aux_catalog_metadata_manager.cpp
 new file mode 100644
-index 0000000..3842ba2
+index 00000000..6c9a5c8c
 --- /dev/null
 +++ b/src/metadata_manager/aux_catalog_metadata_manager.cpp
-@@ -0,0 +1,1268 @@
+@@ -0,0 +1,1281 @@
 +#include "metadata_manager/aux_catalog_metadata_manager.hpp"
 +#include "metadata_manager/aux_catalog_tabular_payload.hpp"
 +#include "metadata_manager/aux_catalog_runtime_bridge.hpp"
@@ -5132,6 +5246,10 @@ index 0000000..3842ba2
 +
 +static idx_t RequireRuntimeIndex(const string &output, const string &key) {
 +	return AuxCatalogParseIndex(AuxCatalogRequireValue(output, key), key.c_str());
++}
++
++static uint64_t RequireRuntimeUInt64(const string &output, const string &key) {
++	return AuxCatalogParseUInt64(AuxCatalogRequireValue(output, key), key.c_str());
 +}
 +
 +static vector<TableIndex> OptionalRuntimeTableIndexList(const string &output, const string &key) {
@@ -5685,14 +5803,16 @@ index 0000000..3842ba2
 +	if (file.partition_id.IsValid() == file.partition_values.empty()) {
 +		throw IOException("aux_catalog data file %d has inconsistent partition metadata", file.id.index);
 +	}
-+	payload += StringUtil::Format("file\t%d\t%d\t%s\t%d\t%d\t%d\t%s\t%s\t%s\t%s\n", file.id.index, file.table_id.index,
++	payload += StringUtil::Format("file\t%d\t%d\t%s\t%d\t%d\t%d\t%s\t%s\t%s\t%s\t%s\n", file.id.index,
++	                              file.table_id.index,
 +	                              resolved_path, file.row_count, file.file_size_bytes, file.row_id_start.GetIndex(),
 +	                              file.mapping_id.IsValid() ? std::to_string(file.mapping_id.index) : "",
 +	                              file.footer_size.IsValid() ? std::to_string(file.footer_size.GetIndex()) : "",
 +	                              file.begin_snapshot.IsValid() ? std::to_string(file.begin_snapshot.GetIndex()) : "",
 +	                              file.max_partial_file_snapshot.IsValid()
 +	                                  ? std::to_string(file.max_partial_file_snapshot.GetIndex())
-+	                                  : "");
++	                                  : "",
++	                              AuxCatalogEncodeEncryptionKey(file.encryption_key));
 +	if (file.partition_id.IsValid()) {
 +		payload += StringUtil::Format("file_partition_set\t%d\t%d\t%d\n", file.id.index, file.table_id.index,
 +		                              file.partition_id.GetIndex());
@@ -5711,6 +5831,10 @@ index 0000000..3842ba2
 +		}
 +		auto min_value = SqlLiteralToPayloadValue(column_stats.min_val);
 +		auto max_value = SqlLiteralToPayloadValue(column_stats.max_val);
++		if (column_stats.contains_nan == "true") {
++			min_value.clear();
++			max_value.clear();
++		}
 +		auto extra_stats = SqlLiteralToPayloadValue(column_stats.extra_stats);
 +		RejectRuntimeField(min_value, "file column stats min values");
 +		RejectRuntimeField(max_value, "file column stats max values");
@@ -5730,7 +5854,7 @@ index 0000000..3842ba2
 +		return runtime_catalog_id;
 +	}
 +	auto output = AuxCatalogRuntimeBridge::Execute("ResolveCatalogId", RuntimeAttachPayload(), 1);
-+	runtime_catalog_id = RequireRuntimeIndex(output, "runtime_catalog_id");
++	runtime_catalog_id = RequireRuntimeUInt64(output, "runtime_catalog_id");
 +	return runtime_catalog_id;
 +}
 +
@@ -5759,7 +5883,7 @@ index 0000000..3842ba2
 +
 +unique_ptr<QueryResult> AuxCatalogMetadataManager::AttachMetadata(const string &attach_query) {
 +	auto output = AuxCatalogRuntimeBridge::Execute("AttachMetadata", RuntimeAttachPayload(), RuntimeCatalogId());
-+	runtime_catalog_id = RequireRuntimeIndex(output, "runtime_catalog_id");
++	runtime_catalog_id = RequireRuntimeUInt64(output, "runtime_catalog_id");
 +	std::fwrite(output.data(), 1, output.size(), stdout);
 +	auto query = attach_query;
 +	SubstituteCatalogPlaceholders(query);
@@ -5770,6 +5894,12 @@ index 0000000..3842ba2
 +	if (result->HasError()) {
 +		return result;
 +	}
++	return result;
++}
++
++bool AuxCatalogMetadataManager::MetadataExists() {
++	// DuckLake resolves the implicit metadata schema after AttachMetadata returns.
++	// Create the SQL mirrors here so their qualified names use that resolved schema.
 +	EnsureCatalogObjectMirrorTables();
 +	EnsureColumnMappingMirrorTables();
 +	EnsureDataFileMirrorTable();
@@ -5778,10 +5908,6 @@ index 0000000..3842ba2
 +	EnsurePartitionValueMirrorTable();
 +	EnsureFileColumnStatsMirrorTable();
 +	EnsureTableColumnStatsMirrorTable();
-+	return result;
-+}
-+
-+bool AuxCatalogMetadataManager::MetadataExists() {
 +	auto output = RuntimeExecute("MetadataExists", string());
 +	auto value = AuxCatalogRequireValue(output, "metadata_exists");
 +	if (value == "true") {
@@ -5793,8 +5919,13 @@ index 0000000..3842ba2
 +	throw IOException("aux_catalog runtime returned invalid metadata_exists value: %s", value);
 +}
 +
-+void AuxCatalogMetadataManager::InitializeDuckLake(bool, DuckLakeEncryption) {
-+	auto output = RuntimeExecute("InitializeDuckLake", string());
++void AuxCatalogMetadataManager::InitializeDuckLake(bool, DuckLakeEncryption encryption) {
++	auto data_path = StorePath(transaction.GetCatalog().DataPath());
++	RejectRuntimeField(data_path, "data path");
++	auto encrypted = encryption == DuckLakeEncryption::ENCRYPTED ? "true" : "false";
++	auto payload = StringUtil::Format("version=%s\ncreated_by=DuckDB %s\ndata_path=%s\nencrypted=%s\n", GetVersionString(),
++	                                  DuckDB::SourceID(), data_path, encrypted);
++	auto output = RuntimeExecute("InitializeDuckLake", payload);
 +	std::fwrite(output.data(), 1, output.size(), stdout);
 +}
 +
@@ -6129,10 +6260,6 @@ index 0000000..3842ba2
 +
 +void AuxCatalogMetadataManager::CommitPendingMetadataPayloads(DuckLakeSnapshot commit_snapshot,
 +                                                             bool same_attempt_table_or_partition_metadata) {
-+	if (!pending_create_schemas_payload.empty()) {
-+		RuntimeExecute("CreateSchemas", pending_create_schemas_payload);
-+		pending_create_schemas_payload.clear();
-+	}
 +	if (!pending_drop_tables_payload.empty()) {
 +		RemovePendingMetadataForDroppedTables(pending_drop_tables_payload, pending_add_columns_payload,
 +		                                      pending_change_column_defaults_payload,
@@ -6358,9 +6485,9 @@ index 0000000..3842ba2
 +}
 +
 +} // namespace duckdb
-diff --git a/var/folders/kp/vm2n0mqj06d5rl92ncdc4d780000gn/T/tmp.zYS5fLdKEX/current/src/metadata_manager/aux_catalog_metadata_options.cpp b/src/metadata_manager/aux_catalog_metadata_options.cpp
+diff --git a/src/metadata_manager/aux_catalog_metadata_options.cpp b/src/metadata_manager/aux_catalog_metadata_options.cpp
 new file mode 100644
-index 0000000..a271072
+index 00000000..a2710728
 --- /dev/null
 +++ b/src/metadata_manager/aux_catalog_metadata_options.cpp
 @@ -0,0 +1,79 @@
@@ -6443,9 +6570,9 @@ index 0000000..a271072
 +}
 +
 +} // namespace duckdb
-diff --git a/var/folders/kp/vm2n0mqj06d5rl92ncdc4d780000gn/T/tmp.zYS5fLdKEX/current/src/metadata_manager/aux_catalog_runtime_bridge.cpp b/src/metadata_manager/aux_catalog_runtime_bridge.cpp
+diff --git a/src/metadata_manager/aux_catalog_runtime_bridge.cpp b/src/metadata_manager/aux_catalog_runtime_bridge.cpp
 new file mode 100644
-index 0000000..8d1aeee
+index 00000000..8d1aeee2
 --- /dev/null
 +++ b/src/metadata_manager/aux_catalog_runtime_bridge.cpp
 @@ -0,0 +1,206 @@
@@ -6655,9 +6782,9 @@ index 0000000..8d1aeee
 +}
 +
 +} // namespace duckdb
-diff --git a/var/folders/kp/vm2n0mqj06d5rl92ncdc4d780000gn/T/tmp.zYS5fLdKEX/current/src/metadata_manager/aux_catalog_schema_changes.cpp b/src/metadata_manager/aux_catalog_schema_changes.cpp
+diff --git a/src/metadata_manager/aux_catalog_schema_changes.cpp b/src/metadata_manager/aux_catalog_schema_changes.cpp
 new file mode 100644
-index 0000000..4b80031
+index 00000000..4b800316
 --- /dev/null
 +++ b/src/metadata_manager/aux_catalog_schema_changes.cpp
 @@ -0,0 +1,294 @@
@@ -6955,9 +7082,9 @@ index 0000000..4b80031
 +}
 +
 +} // namespace duckdb
-diff --git a/var/folders/kp/vm2n0mqj06d5rl92ncdc4d780000gn/T/tmp.zYS5fLdKEX/current/src/metadata_manager/aux_catalog_schema_payload.cpp b/src/metadata_manager/aux_catalog_schema_payload.cpp
+diff --git a/src/metadata_manager/aux_catalog_schema_payload.cpp b/src/metadata_manager/aux_catalog_schema_payload.cpp
 new file mode 100644
-index 0000000..2bde928
+index 00000000..2bde9286
 --- /dev/null
 +++ b/src/metadata_manager/aux_catalog_schema_payload.cpp
 @@ -0,0 +1,216 @@
@@ -7177,9 +7304,9 @@ index 0000000..2bde928
 +}
 +
 +} // namespace duckdb
-diff --git a/var/folders/kp/vm2n0mqj06d5rl92ncdc4d780000gn/T/tmp.zYS5fLdKEX/current/src/metadata_manager/aux_catalog_snapshots.cpp b/src/metadata_manager/aux_catalog_snapshots.cpp
+diff --git a/src/metadata_manager/aux_catalog_snapshots.cpp b/src/metadata_manager/aux_catalog_snapshots.cpp
 new file mode 100644
-index 0000000..7c7c0b1
+index 00000000..7c7c0b15
 --- /dev/null
 +++ b/src/metadata_manager/aux_catalog_snapshots.cpp
 @@ -0,0 +1,168 @@
@@ -7351,9 +7478,9 @@ index 0000000..7c7c0b1
 +}
 +
 +} // namespace duckdb
-diff --git a/var/folders/kp/vm2n0mqj06d5rl92ncdc4d780000gn/T/tmp.zYS5fLdKEX/current/src/metadata_manager/aux_catalog_tags.cpp b/src/metadata_manager/aux_catalog_tags.cpp
+diff --git a/src/metadata_manager/aux_catalog_tags.cpp b/src/metadata_manager/aux_catalog_tags.cpp
 new file mode 100644
-index 0000000..d567a65
+index 00000000..d567a651
 --- /dev/null
 +++ b/src/metadata_manager/aux_catalog_tags.cpp
 @@ -0,0 +1,91 @@
@@ -7448,9 +7575,9 @@ index 0000000..d567a65
 +}
 +
 +} // namespace duckdb
-diff --git a/var/folders/kp/vm2n0mqj06d5rl92ncdc4d780000gn/T/tmp.zYS5fLdKEX/current/src/metadata_manager/aux_catalog_views.cpp b/src/metadata_manager/aux_catalog_views.cpp
+diff --git a/src/metadata_manager/aux_catalog_views.cpp b/src/metadata_manager/aux_catalog_views.cpp
 new file mode 100644
-index 0000000..316f5d1
+index 00000000..316f5d11
 --- /dev/null
 +++ b/src/metadata_manager/aux_catalog_views.cpp
 @@ -0,0 +1,124 @@
@@ -7579,7 +7706,7 @@ index 0000000..316f5d1
 +
 +} // namespace duckdb
 diff --git a/src/metadata_manager/ducklake_metadata_manager_v1_1.cpp b/src/metadata_manager/ducklake_metadata_manager_v1_1.cpp
-index 8f8d820..1b58b68 100644
+index 8f8d8200..1b58b681 100644
 --- a/src/metadata_manager/ducklake_metadata_manager_v1_1.cpp
 +++ b/src/metadata_manager/ducklake_metadata_manager_v1_1.cpp
 @@ -1,4 +1,5 @@
@@ -7596,8 +7723,94 @@ index 8f8d820..1b58b68 100644
  template class DuckLakeMetadataManagerV1_1<SQLiteMetadataManager>;
  template class DuckLakeMetadataManagerV1_1<PostgresMetadataManager>;
  template class DuckLakeMetadataManagerV1_1<QuackMetadataManager>;
+diff --git a/src/storage/ducklake_catalog.cpp b/src/storage/ducklake_catalog.cpp
+index f7cb5863..e86acfe3 100644
+--- a/src/storage/ducklake_catalog.cpp
++++ b/src/storage/ducklake_catalog.cpp
+@@ -6,6 +6,8 @@
+ #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+ #include "duckdb/main/attached_database.hpp"
+ #include "duckdb/main/config.hpp"
++#include "duckdb/main/database.hpp"
++#include "duckdb/main/database_manager.hpp"
+ #include "duckdb/parser/constraints/not_null_constraint.hpp"
+ #include "duckdb/parser/parsed_data/create_schema_info.hpp"
+ #include "duckdb/parser/parsed_data/create_table_info.hpp"
+@@ -259,18 +261,19 @@ string DuckLakeCatalog::GeneratePathFromName(const string &uuid, const string &n
+ }
+ 
+ optional_ptr<CatalogEntry> DuckLakeCatalog::CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) {
+-	auto schema = GetSchema(transaction, info.schema, OnEntryNotFound::RETURN_NULL);
++	auto &schema_name = info.SchemaName();
++	auto schema = GetSchema(transaction, schema_name, OnEntryNotFound::RETURN_NULL);
+ 	if (schema) {
+ 		if (info.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {
+ 			return nullptr;
+ 		}
+ 		if (info.on_conflict == OnCreateConflict::ERROR_ON_CONFLICT) {
+-			throw CatalogException::EntryAlreadyExists(CatalogType::SCHEMA_ENTRY, info.schema);
++			throw CatalogException::EntryAlreadyExists(CatalogType::SCHEMA_ENTRY, schema_name);
+ 		}
+ 		// drop the existing entry
+ 		DropInfo drop_info;
+ 		drop_info.type = CatalogType::SCHEMA_ENTRY;
+-		drop_info.name = info.schema;
++		drop_info.SetName(schema_name);
+ 		DropSchema(transaction.GetContext(), drop_info);
+ 	}
+ 	auto &duck_transaction = transaction.transaction->Cast<DuckLakeTransaction>();
+@@ -278,7 +281,7 @@ optional_ptr<CatalogEntry> DuckLakeCatalog::CreateSchema(CatalogTransaction tran
+ 	auto schema_id = SchemaIndex(duck_transaction.GetLocalCatalogId());
+ 	auto schema_uuid = duck_transaction.GenerateUUID();
+ 	auto schema_data_path =
+-	    DataPath() + DuckLakeCatalog::GeneratePathFromName(schema_uuid, info.schema.GetIdentifierName());
++	    DataPath() + DuckLakeCatalog::GeneratePathFromName(schema_uuid, schema_name.GetIdentifierName());
+ 	auto schema_entry =
+ 	    make_uniq<DuckLakeSchemaEntry>(*this, info, schema_id, std::move(schema_uuid), std::move(schema_data_path));
+ 	auto result = schema_entry.get();
+@@ -287,7 +290,7 @@ optional_ptr<CatalogEntry> DuckLakeCatalog::CreateSchema(CatalogTransaction tran
+ }
+ 
+ void DuckLakeCatalog::DropSchema(ClientContext &context, DropInfo &info) {
+-	auto schema = GetSchema(GetCatalogTransaction(context), info.name, info.if_not_found);
++	auto schema = GetSchema(GetCatalogTransaction(context), info.GetQualifiedName().Name(), info.if_not_found);
+ 	if (!schema) {
+ 		return;
+ 	}
+@@ -458,8 +461,8 @@ unique_ptr<CreateMacroInfo> CreateMacroInfoFromDucklake(ClientContext &context,
+ 		throw NotImplementedException("Macro type %s is not implemented", macro.implementations.front().type);
+ 	}
+ 	auto macro_info = make_uniq<CreateMacroInfo>(type);
+-	macro_info->name = Identifier(macro.macro_name);
+-	macro_info->schema = Identifier(schema_name);
++	macro_info->SetFunctionName(Identifier(macro.macro_name));
++	macro_info->SetSchema(Identifier(schema_name));
+ 	macro_info->temporary = false;
+ 	macro_info->internal = false;
+ 	for (auto &impl : macro.implementations) {
+@@ -509,7 +512,7 @@ unique_ptr<DuckLakeCatalogSet> DuckLakeCatalog::LoadSchemaForSnapshot(DuckLakeTr
+ 	ducklake_entries_map_t schema_map;
+ 	for (auto &schema : catalog.schemas) {
+ 		CreateSchemaInfo schema_info;
+-		schema_info.schema = Identifier(schema.name);
++		schema_info.SetSchema(Identifier(schema.name));
+ 		auto schema_entry = make_uniq<DuckLakeSchemaEntry>(*this, schema_info, schema.id, std::move(schema.uuid),
+ 		                                                   std::move(schema.path));
+ 		schema_map.insert(make_pair(std::move(schema.name), std::move(schema_entry)));
+diff --git a/src/storage/ducklake_delete_filter.cpp b/src/storage/ducklake_delete_filter.cpp
+index 966e312c..cca3ae0d 100644
+--- a/src/storage/ducklake_delete_filter.cpp
++++ b/src/storage/ducklake_delete_filter.cpp
+@@ -3,6 +3,7 @@
+ #include "storage/ducklake_puffin.hpp"
+ #include "common/parquet_file_scanner.hpp"
+ #include "duckdb/common/algorithm.hpp"
++#include "duckdb/common/file_system.hpp"
+ #include "duckdb/common/map.hpp"
+ #include "duckdb/planner/filter/constant_filter.hpp"
+ #include "duckdb/planner/table_filter.hpp"
 diff --git a/src/storage/ducklake_initializer.cpp b/src/storage/ducklake_initializer.cpp
-index 41d3ff6..94a7127 100644
+index 41d3ff6b..94a7127e 100644
 --- a/src/storage/ducklake_initializer.cpp
 +++ b/src/storage/ducklake_initializer.cpp
 @@ -11,6 +11,7 @@
@@ -7618,7 +7831,7 @@ index 41d3ff6..94a7127 100644
  			new_manager = make_uniq<DuckLakeMetadataManagerV1_1<PostgresMetadataManager>>(transaction);
  		} else if (dynamic_cast<SQLiteMetadataManager *>(&current)) {
 diff --git a/src/storage/ducklake_inline_data.cpp b/src/storage/ducklake_inline_data.cpp
-index dc94377..f5c89f1 100644
+index dc94377f..f5c89f1e 100644
 --- a/src/storage/ducklake_inline_data.cpp
 +++ b/src/storage/ducklake_inline_data.cpp
 @@ -372,6 +372,7 @@ OperatorFinalResultType DuckLakeInlineData::OperatorFinalize(Pipeline &pipeline,
@@ -7651,7 +7864,7 @@ index dc94377..f5c89f1 100644
  			phys_chunk.InitializeEmpty(phys_types);
  			for (idx_t i = 0; i < physical_col_count; i++) {
 diff --git a/src/storage/ducklake_inlined_data.cpp b/src/storage/ducklake_inlined_data.cpp
-index a9c6bef..3d72908 100644
+index a9c6bef2..3d729080 100644
 --- a/src/storage/ducklake_inlined_data.cpp
 +++ b/src/storage/ducklake_inlined_data.cpp
 @@ -15,6 +15,10 @@ bool DuckLakeInlinedData::HasPreservedRowIds() const {
@@ -7706,7 +7919,7 @@ index a9c6bef..3d72908 100644
 +
  } // namespace duckdb
 diff --git a/src/storage/ducklake_inlined_data_reader.cpp b/src/storage/ducklake_inlined_data_reader.cpp
-index 14ab942..e95c19a 100644
+index 14ab9428..cffc1c13 100644
 --- a/src/storage/ducklake_inlined_data_reader.cpp
 +++ b/src/storage/ducklake_inlined_data_reader.cpp
 @@ -11,6 +11,17 @@
@@ -7759,6 +7972,15 @@ index 14ab942..e95c19a 100644
  			scan_types.push_back(types[col_id]);
  			scan_column_ids.push_back(col_id);
  			virtual_columns.emplace_back(InlinedVirtualColumn::NONE);
+@@ -178,7 +200,7 @@ bool DuckLakeInlinedDataReader::TryInitializeScan(ClientContext &context, Global
+ 		data->data->InitializeScan(state, scan_column_ids);
+ 	}
+ 	for (auto &entry : expression_map) {
+-		expression_executors[entry.first] = make_uniq<ExpressionExecutor>(context, *entry.second);
++		expression_executors[entry.first] = make_uniq<ExpressionExecutor>(context, *entry.second.expression);
+ 	}
+ 	return true;
+ }
 @@ -226,32 +248,50 @@ AsyncResult DuckLakeInlinedDataReader::Scan(ClientContext &context, GlobalTableF
  				break;
  			}
@@ -7876,8 +8098,38 @@ index 14ab942..e95c19a 100644
  				                                                      chunk.size(), approved_tuple_count);
  			}
  		}
+diff --git a/src/storage/ducklake_insert.cpp b/src/storage/ducklake_insert.cpp
+index 22df554b..ee887134 100644
+--- a/src/storage/ducklake_insert.cpp
++++ b/src/storage/ducklake_insert.cpp
+@@ -271,7 +271,7 @@ string DuckLakeInsert::GetName() const {
+ 
+ InsertionOrderPreservingMap<string> DuckLakeInsert::ParamsToString() const {
+ 	InsertionOrderPreservingMap<string> result;
+-	result["Table Name"] = (table ? table->name : info->Base().table).GetIdentifierName();
++	result["Table Name"] = (table ? table->name : info->Base().GetTableName()).GetIdentifierName();
+ 	return result;
+ }
+ 
+@@ -859,12 +859,12 @@ PhysicalOperator &DuckLakeCatalog::PlanCreateTableAs(ClientContext &context, Phy
+ 		root = planner.Make<DuckLakeInlineData>(root.get(), data_inlining_row_limit);
+ 		inline_data = root.get().Cast<DuckLakeInlineData>();
+ 	}
+-	for (auto &col : op.info->Base().columns.Logical()) {
+-		DuckLakeTypes::CheckSupportedType(col.Type());
++	for (auto &column : columns.Logical()) {
++		DuckLakeTypes::CheckSupportedType(column.Type());
+ 	}
+ 	auto table_uuid = duck_transaction.GenerateUUID();
+-	auto table_data_path = duck_schema.DataPath() +
+-	                       DuckLakeCatalog::GeneratePathFromName(table_uuid, create_info.table.GetIdentifierName());
++	auto table_data_path = duck_schema.DataPath() + DuckLakeCatalog::GeneratePathFromName(
++	                                                    table_uuid, create_info.GetTableName().GetIdentifierName());
+ 
+ 	DuckLakeCopyInput copy_input(context, duck_schema, columns, table_data_path);
+ 	auto &physical_copy = DuckLakeInsert::PlanCopyForInsert(context, planner, copy_input, root.get());
 diff --git a/src/storage/ducklake_metadata_manager.cpp b/src/storage/ducklake_metadata_manager.cpp
-index f464359..55f4feb 100644
+index 2ac100ec..4f82d147 100644
 --- a/src/storage/ducklake_metadata_manager.cpp
 +++ b/src/storage/ducklake_metadata_manager.cpp
 @@ -10,6 +10,7 @@
@@ -7912,7 +8164,7 @@ index f464359..55f4feb 100644
  string DuckLakeMetadataManager::GetTableColumnSchemaSql(TableIndex table_id) {
  	// Return the full flattened schema: top-level roots (parent_column IS NULL) and every nested leaf, each with its
  	// own column_id (== FieldIndex) and its own leaf column_type. Callers distinguish roots from leaves via
-@@ -2948,6 +2959,10 @@ string DuckLakeMetadataManager::FormatInlinedDataInsert(const string &inlined_ta
+@@ -2964,6 +2975,10 @@ string DuckLakeMetadataManager::FormatInlinedDataInsert(const string &inlined_ta
  }
  
  string DuckLakeMetadataManager::WriteNewInlinedDeletes(const vector<DuckLakeDeletedInlinedDataInfo> &new_deletes) {
@@ -7923,7 +8175,7 @@ index f464359..55f4feb 100644
  	string batch_queries;
  	if (new_deletes.empty()) {
  		return batch_queries;
-@@ -3544,6 +3559,12 @@ string DuckLakeMetadataManager::GetPathForSchema(SchemaIndex schema_id,
+@@ -3560,6 +3575,12 @@ string DuckLakeMetadataManager::GetPathForSchema(SchemaIndex schema_id,
  			return FromRelativePath(path, base_data_path, separator);
  		}
  	}
@@ -7936,7 +8188,7 @@ index f464359..55f4feb 100644
  	auto query = StringUtil::Format(R"(
  SELECT path, path_is_relative
  FROM {METADATA_CATALOG}.ducklake_schema
-@@ -3886,6 +3907,113 @@ bool DuckLakeMetadataManager::TryAppendDataFiles(DuckLakeSnapshot &commit_snapsh
+@@ -3902,6 +3923,113 @@ bool DuckLakeMetadataManager::TryAppendDataFiles(DuckLakeSnapshot &commit_snapsh
  	return true;
  }
  
@@ -8051,7 +8303,7 @@ index f464359..55f4feb 100644
                                                    const vector<DuckLakeFileInfo> &new_files,
                                                    const vector<DuckLakeTableInfo> &new_tables,
 diff --git a/src/storage/ducklake_multi_file_list.cpp b/src/storage/ducklake_multi_file_list.cpp
-index bd557b5..2d864f3 100644
+index bd557b54..2d864f37 100644
 --- a/src/storage/ducklake_multi_file_list.cpp
 +++ b/src/storage/ducklake_multi_file_list.cpp
 @@ -16,6 +16,33 @@
@@ -8221,8 +8473,73 @@ index bd557b5..2d864f3 100644
  	}
  	return transaction_row_start;
  }
+diff --git a/src/storage/ducklake_multi_file_reader.cpp b/src/storage/ducklake_multi_file_reader.cpp
+index af76480d..7d4ddc95 100644
+--- a/src/storage/ducklake_multi_file_reader.cpp
++++ b/src/storage/ducklake_multi_file_reader.cpp
+@@ -569,17 +569,17 @@ ReaderInitializeType DuckLakeMultiFileReader::CreateMapping(
+ 	                                      multi_file_list, bind_data, virtual_columns);
+ }
+ 
+-unique_ptr<Expression> DuckLakeMultiFileReader::GetVirtualColumnExpression(
++MultiFileReaderVirtualColumnBinding DuckLakeMultiFileReader::GetVirtualColumnExpression(
+     ClientContext &context, MultiFileReaderData &reader_data, const vector<MultiFileColumnDefinition> &local_columns,
+-    idx_t &column_id, const LogicalType &type, MultiFileLocalIndex local_idx,
+-    optional_ptr<MultiFileColumnDefinition> &global_column_reference) {
++    idx_t column_id, const LogicalType &type, MultiFileLocalIndex local_idx) {
+ 	if (column_id == COLUMN_IDENTIFIER_ROW_ID) {
+ 		// row id column
+ 		// this is computed as row_id_start + file_row_number OR read from the file
+ 		// first check if the row id is explicitly defined in this file
++		optional_ptr<MultiFileColumnDefinition> global_column_reference;
+ 		if (TryFindColumnByFieldId(local_columns, MultiFileReader::ROW_ID_FIELD_ID, row_id_column.get(),
+ 		                           global_column_reference)) {
+-			return nullptr;
++			return MultiFileReaderVirtualColumnBinding(*global_column_reference);
+ 		}
+ 		// get the row id start for this file
+ 		if (!reader_data.file_to_be_opened.extended_info) {
+@@ -597,8 +597,6 @@ unique_ptr<Expression> DuckLakeMultiFileReader::GetVirtualColumnExpression(
+ 		auto file_row_number = make_uniq<BoundReferenceExpression>(type, local_idx.GetIndex());
+ 
+ 		// transform this virtual column to file_row_number
+-		column_id = MultiFileReader::COLUMN_IDENTIFIER_FILE_ROW_NUMBER;
+-
+ 		// generate the addition
+ 		vector<unique_ptr<Expression>> children;
+ 		children.push_back(std::move(row_id_expr));
+@@ -610,12 +608,14 @@ unique_ptr<Expression> DuckLakeMultiFileReader::GetVirtualColumnExpression(
+ 		if (error.HasError()) {
+ 			error.Throw();
+ 		}
+-		return function_expr;
++		return MultiFileReaderVirtualColumnBinding(
++		    std::move(function_expr), {MultiFileReader::COLUMN_IDENTIFIER_FILE_ROW_NUMBER});
+ 	}
+ 	if (column_id == COLUMN_IDENTIFIER_SNAPSHOT_ID) {
++		optional_ptr<MultiFileColumnDefinition> global_column_reference;
+ 		if (TryFindColumnByFieldId(local_columns, MultiFileReader::LAST_UPDATED_SEQUENCE_NUMBER_ID,
+ 		                           snapshot_id_column.get(), global_column_reference)) {
+-			return nullptr;
++			return MultiFileReaderVirtualColumnBinding(*global_column_reference);
+ 		}
+ 		// get the row id start for this file
+ 		if (!reader_data.file_to_be_opened.extended_info) {
+@@ -626,10 +626,9 @@ unique_ptr<Expression> DuckLakeMultiFileReader::GetVirtualColumnExpression(
+ 		if (entry == options.end()) {
+ 			throw InternalException("snapshot_id not found for reading snapshot_id column");
+ 		}
+-		return make_uniq<BoundConstantExpression>(entry->second);
++		return MultiFileReaderVirtualColumnBinding(entry->second);
+ 	}
+-	return MultiFileReader::GetVirtualColumnExpression(context, reader_data, local_columns, column_id, type, local_idx,
+-	                                                   global_column_reference);
++	return MultiFileReader::GetVirtualColumnExpression(context, reader_data, local_columns, column_id, type, local_idx);
+ }
+ 
+ // Map a global_column_ids index to its output_chunk position by matching the expression pointer (handles
 diff --git a/src/storage/ducklake_scan.cpp b/src/storage/ducklake_scan.cpp
-index 9fc173b..73e95df 100644
+index 9fc173bb..269313cd 100644
 --- a/src/storage/ducklake_scan.cpp
 +++ b/src/storage/ducklake_scan.cpp
 @@ -96,8 +96,6 @@ unique_ptr<BaseStatistics> DuckLakeStatistics(ClientContext &context, const Func
@@ -8234,11 +8551,53 @@ index 9fc173b..73e95df 100644
  		return nullptr;
  	}
  	auto &table = file_list.GetTable();
+@@ -152,9 +150,13 @@ struct DuckLakePartitionRowGroup : public PartitionRowGroup {
+ 		return table.GetStatistics(context, storage_index.GetPrimaryIndex());
+ 	}
+ 
+-	bool MinMaxIsExact(const BaseStatistics &stats, const StorageIndex &storage_index) override {
++	bool MinMaxIsExact(const StorageIndex &storage_index) override {
+ 		return min_max_exact;
+ 	}
++
++	bool HasPendingWrites() override {
++		return false;
++	}
+ };
+ 
+ vector<PartitionStatistics> DuckLakeGetPartitionStats(ClientContext &context, GetPartitionStatsInput &input) {
 diff --git a/src/storage/ducklake_schema_entry.cpp b/src/storage/ducklake_schema_entry.cpp
-index 8208f1e..6b9ab88 100644
+index 8208f1e8..cae994e5 100644
 --- a/src/storage/ducklake_schema_entry.cpp
 +++ b/src/storage/ducklake_schema_entry.cpp
-@@ -119,12 +119,14 @@ optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateFunction(CatalogTransactio
+@@ -51,7 +51,7 @@ bool DuckLakeSchemaEntry::HandleCreateConflict(CatalogTransaction transaction, C
+ 		// try to drop the entry prior to creating
+ 		DropInfo info;
+ 		info.type = catalog_type;
+-		info.name = Identifier(entry_name);
++		info.SetName(Identifier(entry_name));
+ 		DropEntry(transaction.GetContext(), info);
+ 		break;
+ 	}
+@@ -67,7 +67,7 @@ optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateTableExtended(CatalogTrans
+ 	auto &duck_transaction = transaction.transaction->Cast<DuckLakeTransaction>();
+ 	auto &base_info = info.Base();
+ 	// check if we have an existing entry with this name
+-	if (!HandleCreateConflict(transaction, CatalogType::TABLE_ENTRY, base_info.table.GetIdentifierName(),
++	if (!HandleCreateConflict(transaction, CatalogType::TABLE_ENTRY, base_info.GetTableName().GetIdentifierName(),
+ 	                          base_info.on_conflict)) {
+ 		return nullptr;
+ 	}
+@@ -97,7 +97,7 @@ optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateTable(CatalogTransaction t
+ 	auto &base_info = info.Base();
+ 	auto table_uuid = duck_transaction.GenerateUUID();
+ 	auto table_data_path =
+-	    DataPath() + duck_catalog.GeneratePathFromName(table_uuid, base_info.table.GetIdentifierName());
++	    DataPath() + duck_catalog.GeneratePathFromName(table_uuid, base_info.GetTableName().GetIdentifierName());
+ 	return CreateTableExtended(transaction, info, std::move(table_uuid), std::move(table_data_path));
+ }
+ 
+@@ -119,21 +119,22 @@ optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateFunction(CatalogTransactio
                                                                 CreateFunctionInfo &info) {
  	unique_ptr<CatalogEntry> macro_entry;
  	auto &create_macro_info = info.Cast<CreateMacroInfo>();
@@ -8255,15 +8614,130 @@ index 8208f1e..6b9ab88 100644
  		break;
  	default:
  		throw NotImplementedException("DuckLake does not support %s functions", CatalogTypeToString(info.type));
-@@ -133,7 +135,6 @@ optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateFunction(CatalogTransactio
- 	if (!HandleCreateConflict(transaction, info.type, info.name.GetIdentifierName(), info.on_conflict)) {
+ 	}
+ 	// We check if there is a conflict, as multi-macro implementations are only supported if they do not exist yet
+-	if (!HandleCreateConflict(transaction, info.type, info.name.GetIdentifierName(), info.on_conflict)) {
++	if (!HandleCreateConflict(transaction, info.type, info.GetFunctionName().GetIdentifierName(), info.on_conflict)) {
  		return nullptr;
  	}
 -	auto &duck_transaction = transaction.transaction->Cast<DuckLakeTransaction>();
  	auto result = macro_entry.get();
  	duck_transaction.CreateEntry(std::move(macro_entry));
  	return result;
-@@ -417,6 +418,13 @@ void DuckLakeSchemaEntry::AddEntry(CatalogType type, unique_ptr<CatalogEntry> en
+@@ -146,7 +147,7 @@ optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateIndex(CatalogTransaction t
+ 
+ optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateView(CatalogTransaction transaction, CreateViewInfo &info) {
+ 	// check if we have an existing entry with this name
+-	if (!HandleCreateConflict(transaction, CatalogType::VIEW_ENTRY, info.view_name.GetIdentifierName(),
++	if (!HandleCreateConflict(transaction, CatalogType::VIEW_ENTRY, info.GetViewName().GetIdentifierName(),
+ 	                          info.on_conflict)) {
+ 		return nullptr;
+ 	}
+@@ -202,17 +203,18 @@ void DuckLakeSchemaEntry::Alter(CatalogTransaction catalog_transaction, AlterInf
+ 	switch (info.type) {
+ 	case AlterType::ALTER_TABLE: {
+ 		auto &alter = info.Cast<AlterTableInfo>();
+-		auto table_entry = GetEntry(catalog_transaction, CatalogType::TABLE_ENTRY, alter.name);
++		auto &alter_name = alter.GetQualifiedName().Name();
++		auto table_entry = GetEntry(catalog_transaction, CatalogType::TABLE_ENTRY, alter_name);
+ 		if (table_entry->type != CatalogType::TABLE_ENTRY) {
+-			throw BinderException("Cannot use ALTER TABLE on entry %s - it is not a table", alter.name);
++			throw BinderException("Cannot use ALTER TABLE on entry %s - it is not a table", alter_name);
+ 		}
+ 		auto &table = table_entry->Cast<DuckLakeTableEntry>();
+ 		auto new_table = table.Alter(context, transaction, alter);
+ 		if (alter.alter_table_type == AlterTableType::RENAME_TABLE) {
+ 			// We must check if this view name does not yet exist.
+ 			auto existing_table = GetEntry(catalog_transaction, CatalogType::TABLE_ENTRY, new_table->name);
+-			if (alter.name != new_table->name && existing_table) {
+-				throw BinderException("Cannot rename table %s to %s, since %s already exists.", alter.name,
++			if (alter_name != new_table->name && existing_table) {
++				throw BinderException("Cannot rename table %s to %s, since %s already exists.", alter_name,
+ 				                      new_table->name, new_table->name);
+ 			}
+ 		}
+@@ -221,19 +223,20 @@ void DuckLakeSchemaEntry::Alter(CatalogTransaction catalog_transaction, AlterInf
+ 	}
+ 	case AlterType::ALTER_VIEW: {
+ 		auto &alter = info.Cast<AlterViewInfo>();
+-		auto view_entry = GetEntry(catalog_transaction, CatalogType::VIEW_ENTRY, alter.name);
++		auto &alter_name = alter.GetQualifiedName().Name();
++		auto view_entry = GetEntry(catalog_transaction, CatalogType::VIEW_ENTRY, alter_name);
+ 		if (view_entry->type != CatalogType::VIEW_ENTRY) {
+-			throw BinderException("Cannot use ALTER VIEW on entry %s - it is not a view", alter.name);
++			throw BinderException("Cannot use ALTER VIEW on entry %s - it is not a view", alter_name);
+ 		}
+ 		auto &view = view_entry->Cast<DuckLakeViewEntry>();
+ 		auto new_view = view.AlterEntry(context, alter);
+ 		if (alter.alter_view_type == AlterViewType::RENAME_VIEW) {
+ 			// We must check if this view name does not yet exist.
+ 			auto existing_view = GetEntry(catalog_transaction, CatalogType::VIEW_ENTRY, new_view->name);
+-			if (alter.name != new_view->name && existing_view) {
++			if (alter_name != new_view->name && existing_view) {
+ 				throw CatalogException(
+ 				    "Could not rename view \"%s\" to \"%s\": another entry with this name already exists!",
+-				    alter.name.GetIdentifierName(), new_view->name.GetIdentifierName());
++				    alter_name.GetIdentifierName(), new_view->name.GetIdentifierName());
+ 			}
+ 		}
+ 		transaction.AlterEntry(view, std::move(new_view));
+@@ -241,11 +244,12 @@ void DuckLakeSchemaEntry::Alter(CatalogTransaction catalog_transaction, AlterInf
+ 	}
+ 	case AlterType::SET_COMMENT: {
+ 		auto &alter = info.Cast<SetCommentInfo>();
++		auto &alter_name = alter.GetQualifiedName().Name();
+ 		switch (alter.entry_catalog_type) {
+ 		case CatalogType::TABLE_ENTRY: {
+-			auto table_entry = GetEntry(catalog_transaction, CatalogType::TABLE_ENTRY, alter.name);
++			auto table_entry = GetEntry(catalog_transaction, CatalogType::TABLE_ENTRY, alter_name);
+ 			if (table_entry->type != CatalogType::TABLE_ENTRY) {
+-				throw BinderException("Cannot use ALTER TABLE on entry %s - it is not a table", alter.name);
++				throw BinderException("Cannot use ALTER TABLE on entry %s - it is not a table", alter_name);
+ 			}
+ 			auto &table = table_entry->Cast<DuckLakeTableEntry>();
+ 			auto new_table = table.Alter(transaction, alter);
+@@ -253,9 +257,9 @@ void DuckLakeSchemaEntry::Alter(CatalogTransaction catalog_transaction, AlterInf
+ 			break;
+ 		}
+ 		case CatalogType::VIEW_ENTRY: {
+-			auto view_entry = GetEntry(catalog_transaction, CatalogType::VIEW_ENTRY, alter.name);
++			auto view_entry = GetEntry(catalog_transaction, CatalogType::VIEW_ENTRY, alter_name);
+ 			if (view_entry->type != CatalogType::VIEW_ENTRY) {
+-				throw BinderException("Cannot use ALTER VIEW on entry %s - it is not a view", alter.name);
++				throw BinderException("Cannot use ALTER VIEW on entry %s - it is not a view", alter_name);
+ 			}
+ 			auto &view = view_entry->Cast<DuckLakeViewEntry>();
+ 			auto new_view = view.AlterEntry(context, alter);
+@@ -269,9 +273,10 @@ void DuckLakeSchemaEntry::Alter(CatalogTransaction catalog_transaction, AlterInf
+ 	}
+ 	case AlterType::SET_COLUMN_COMMENT: {
+ 		auto &alter = info.Cast<SetColumnCommentInfo>();
+-		auto table_entry = GetEntry(catalog_transaction, CatalogType::TABLE_ENTRY, alter.name);
++		auto &alter_name = alter.GetQualifiedName().Name();
++		auto table_entry = GetEntry(catalog_transaction, CatalogType::TABLE_ENTRY, alter_name);
+ 		if (table_entry->type != CatalogType::TABLE_ENTRY) {
+-			throw BinderException("Cannot comment on columns for entry %s - it is not a table", alter.name);
++			throw BinderException("Cannot comment on columns for entry %s - it is not a table", alter_name);
+ 		}
+ 		auto &table = table_entry->Cast<DuckLakeTableEntry>();
+ 		auto new_table = table.Alter(transaction, alter);
+@@ -328,12 +333,13 @@ void DuckLakeSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
+ 	if (info.cascade) {
+ 		throw NotImplementedException("Cascade Drop not supported in DuckLake");
+ 	}
+-	auto catalog_entry = GetEntry(GetCatalogTransaction(context), info.type, info.name);
++	auto &entry_name = info.GetQualifiedName().Name();
++	auto catalog_entry = GetEntry(GetCatalogTransaction(context), info.type, entry_name);
+ 	if (!catalog_entry) {
+ 		if (info.if_not_found == OnEntryNotFound::RETURN_NULL) {
+ 			return;
+ 		}
+-		throw InternalException("Failed to drop entry \"%s\" - could not find entry", info.name.GetIdentifierName());
++		throw InternalException("Failed to drop entry \"%s\" - could not find entry", entry_name.GetIdentifierName());
+ 	}
+ 	if (catalog_entry->type != info.type) {
+ 		throw CatalogException("Existing object %s is of type %s, trying to drop type %s", catalog_entry->name,
+@@ -417,6 +423,13 @@ void DuckLakeSchemaEntry::AddEntry(CatalogType type, unique_ptr<CatalogEntry> en
  	catalog_set.CreateEntry(std::move(entry));
  }
  
@@ -8278,10 +8752,10 @@ index 8208f1e..6b9ab88 100644
  	auto local_tables = transaction.GetTransactionLocalEntries(CatalogType::TABLE_ENTRY, name.GetIdentifierName());
  	auto local_scalar_macros =
 diff --git a/src/storage/ducklake_server_side_commit.cpp b/src/storage/ducklake_server_side_commit.cpp
-index 6558e32..63b59f6 100644
+index 711af421..8c53581e 100644
 --- a/src/storage/ducklake_server_side_commit.cpp
 +++ b/src/storage/ducklake_server_side_commit.cpp
-@@ -765,7 +765,7 @@ DuckLakeCommitContext DuckLakeServerSideCommit::BuildContext(idx_t &committed_sn
+@@ -764,7 +764,7 @@ DuckLakeCommitContext DuckLakeServerSideCommit::BuildContext(idx_t &committed_sn
  	                                const vector<DuckLakeTableInfo> &, const vector<DuckLakeTableInfo> &) -> string {
  		return BuildInlinedDataInserts(new_data);
  	};
@@ -8290,8 +8764,19 @@ index 6558e32..63b59f6 100644
  		bool created_new_table = false;
  		return DuckLakeMetadataManager::WriteNewInlinedFileDeletesSql(new_deletes, created_new_table);
  	};
+diff --git a/src/storage/ducklake_storage.cpp b/src/storage/ducklake_storage.cpp
+index 662d3ef4..f209a478 100644
+--- a/src/storage/ducklake_storage.cpp
++++ b/src/storage/ducklake_storage.cpp
+@@ -1,4 +1,6 @@
+ #include "duckdb.hpp"
++#include "duckdb/main/attached_database.hpp"
++#include "duckdb/parser/parsed_data/attach_info.hpp"
+ 
+ #include "storage/ducklake_storage.hpp"
+ #include "storage/ducklake_catalog.hpp"
 diff --git a/src/storage/ducklake_table_entry.cpp b/src/storage/ducklake_table_entry.cpp
-index b324b06..d86d3eb 100644
+index b324b067..4497ffc6 100644
 --- a/src/storage/ducklake_table_entry.cpp
 +++ b/src/storage/ducklake_table_entry.cpp
 @@ -74,6 +74,15 @@ struct DuckLakeColumnScan {
@@ -8347,7 +8832,7 @@ index b324b06..d86d3eb 100644
  	return dl_catalog.GetTableStats(transaction, GetTableId());
  }
  
-@@ -467,11 +492,14 @@ idx_t DuckLakeTableEntry::GetNetDataFileRowCount(DuckLakeTransaction &transactio
+@@ -467,17 +492,20 @@ idx_t DuckLakeTableEntry::GetNetDataFileRowCount(DuckLakeTransaction &transactio
  idx_t DuckLakeTableEntry::GetNetInlinedRowCount(DuckLakeTransaction &transaction) {
  	auto &metadata_manager = transaction.GetMetadataManager();
  	auto snapshot = transaction.GetSnapshot();
@@ -8366,8 +8851,26 @@ index b324b06..d86d3eb 100644
  }
  
  unique_ptr<CatalogEntry> DuckLakeTableEntry::AlterTable(DuckLakeTransaction &transaction, RenameTableInfo &info) {
+ 	auto create_info = GetInfo();
+ 	auto &table_info = create_info->Cast<CreateTableInfo>();
+-	table_info.table = info.new_table_name;
++	table_info.SetTableName(info.new_table_name);
+ 	// create a complete copy of this table with only the name changed
+ 	return make_uniq<DuckLakeTableEntry>(*this, table_info, LocalChangeType::RENAMED);
+ }
+@@ -1310,8 +1338,8 @@ unique_ptr<CatalogEntry> DuckLakeTableEntry::AlterTable(DuckLakeTransaction &tra
+ 	auto &col = table_info.columns.GetColumnMutable(info.column_name);
+ 	auto &field_id = GetFieldId(col.Physical());
+ 	col.SetDefaultValue(std::move(info.expression));
+-	bool new_column = !transaction.GetMetadataManager().IsColumnCreatedWithTable(table_info.table.GetIdentifierName(),
+-	                                                                             col.GetName().GetIdentifierName());
++	bool new_column = !transaction.GetMetadataManager().IsColumnCreatedWithTable(
++	    table_info.GetTableName().GetIdentifierName(), col.GetName().GetIdentifierName());
+ 
+ 	auto new_entry = make_uniq<DuckLakeTableEntry>(
+ 	    *this, table_info, SetDefaultLocalChange::SetDefault(field_id.GetFieldIndex(), new_column));
 diff --git a/src/storage/ducklake_transaction.cpp b/src/storage/ducklake_transaction.cpp
-index 5406a70..c8ddc54 100644
+index 07a93048..cfb0120a 100644
 --- a/src/storage/ducklake_transaction.cpp
 +++ b/src/storage/ducklake_transaction.cpp
 @@ -32,6 +32,23 @@
@@ -8394,7 +8897,7 @@ index 5406a70..c8ddc54 100644
  bool LocalTableDataChanges::IsEmpty() const {
  	if (!new_data_files.empty()) {
  		return false;
-@@ -87,6 +104,24 @@ void LocalTableChanges::CleanupFiles(DatabaseInstance &db) {
+@@ -93,6 +110,24 @@ void LocalTableChanges::CleanupFiles(DatabaseInstance &db) {
  	}
  }
  
@@ -8419,7 +8922,7 @@ index 5406a70..c8ddc54 100644
  bool LocalTableChanges::HasTransactionLocalInserts(TableIndex table_id) const {
  	lock_guard<mutex> guard(lock);
  	auto entry = changes.find(table_id);
-@@ -134,6 +169,7 @@ shared_ptr<DuckLakeInlinedData> LocalTableChanges::GetTransactionLocalInlinedDat
+@@ -140,6 +175,7 @@ shared_ptr<DuckLakeInlinedData> LocalTableChanges::GetTransactionLocalInlinedDat
  		result->data->Append(chunk);
  	}
  	result->row_ids = inlined.row_ids;
@@ -8427,7 +8930,7 @@ index 5406a70..c8ddc54 100644
  	return result;
  }
  
-@@ -233,8 +269,8 @@ void LocalTableChanges::AppendInlinedData(ClientContext &context, TableIndex tab
+@@ -239,8 +275,8 @@ void LocalTableChanges::AppendInlinedData(ClientContext &context, TableIndex tab
  		for (auto &chunk : new_data->data->Chunks()) {
  			existing_data.data->Append(chunk);
  		}
@@ -8437,7 +8940,7 @@ index 5406a70..c8ddc54 100644
  		for (auto &entry : new_data->column_stats) {
  			auto stats_entry = existing_data.column_stats.find(entry.first);
  			if (stats_entry == existing_data.column_stats.end()) {
-@@ -276,11 +312,14 @@ void LocalTableChanges::DeleteFromLocalInlinedData(ClientContext &context, Table
+@@ -282,11 +318,14 @@ void LocalTableChanges::DeleteFromLocalInlinedData(ClientContext &context, Table
  	auto &table_changes = entry->second;
  	auto &inlined_data = *table_changes.new_inlined_data;
  	auto &existing = *inlined_data.data;
@@ -8452,7 +8955,7 @@ index 5406a70..c8ddc54 100644
  	ColumnDataAppendState append_state;
  	new_data->InitializeAppend(append_state);
  	for (auto &chunk : existing.Chunks()) {
-@@ -290,13 +329,17 @@ void LocalTableChanges::DeleteFromLocalInlinedData(ClientContext &context, Table
+@@ -296,13 +335,17 @@ void LocalTableChanges::DeleteFromLocalInlinedData(ClientContext &context, Table
  
  		for (idx_t r = 0; r < chunk.size(); r++) {
  			idx_t position = base_row_id + r;
@@ -8473,7 +8976,7 @@ index 5406a70..c8ddc54 100644
  		}
  		base_row_id += chunk.size();
  		if (selected_rows == 0) {
-@@ -309,6 +352,7 @@ void LocalTableChanges::DeleteFromLocalInlinedData(ClientContext &context, Table
+@@ -315,6 +358,7 @@ void LocalTableChanges::DeleteFromLocalInlinedData(ClientContext &context, Table
  	// override the existing collection and row_ids
  	inlined_data.data = std::move(new_data);
  	inlined_data.row_ids = std::move(new_row_ids);
@@ -8481,7 +8984,18 @@ index 5406a70..c8ddc54 100644
  }
  
  static void RemoveFieldStats(map<FieldIndex, DuckLakeColumnStats> &column_stats, const DuckLakeFieldId &field_id) {
-@@ -1339,6 +1383,8 @@ void DuckLakeTransaction::FlushChanges() {
+@@ -802,8 +846,8 @@ Connection &DuckLakeTransaction::GetConnection() {
+ 		// ensure we are only looking in the ducklake catalog schema during querying
+ 		CatalogSearchEntry metadata_entry(Identifier(ducklake_catalog.MetadataDatabaseName()),
+ 		                                  Identifier(ducklake_catalog.MetadataSchemaName()));
+-		if (metadata_entry.schema.empty()) {
+-			metadata_entry.schema = "main";
++		if (metadata_entry.GetSchema().empty()) {
++			metadata_entry.SetSchema("main");
+ 		}
+ 		client_data.catalog_search_path->Set(metadata_entry, CatalogSetPathType::SET_DIRECTLY);
+ 
+@@ -1377,6 +1421,8 @@ void DuckLakeTransaction::FlushChanges() {
  			RunCommitLoop(transaction_snapshot, transaction_changes, retry_config);
  		}
  	}
@@ -8490,7 +9004,7 @@ index 5406a70..c8ddc54 100644
  }
  
  void DuckLakeTransaction::ApplyServerSideCommit(idx_t schema_version) {
-@@ -1351,6 +1397,49 @@ void DuckLakeTransaction::ApplyServerSideCommit(idx_t schema_version) {
+@@ -1389,6 +1435,49 @@ void DuckLakeTransaction::ApplyServerSideCommit(idx_t schema_version) {
  	if (connection) {
  		connection->Commit();
  	}
@@ -8540,7 +9054,7 @@ index 5406a70..c8ddc54 100644
  }
  
  void DuckLakeTransaction::DropEmptySupersededInlinedTablesClientSide() {
-@@ -1368,6 +1457,16 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
+@@ -1406,6 +1495,16 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
                                          const TransactionChangeInformation &transaction_changes,
                                          const DuckLakeRetryConfig &retry_config) {
  	DuckLakeCommitContext context;
@@ -8557,7 +9071,7 @@ index 5406a70..c8ddc54 100644
  	context.conflict_query_executor = [&](string q) -> unique_ptr<QueryResult> {
  		auto result = metadata_manager->Query(transaction_snapshot, q);
  		if (result->HasError()) {
-@@ -1380,6 +1479,8 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
+@@ -1418,6 +1517,8 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
  		return GetSnapshot();
  	};
  	context.execute_commit_batch = [&](DuckLakeSnapshot snapshot, string &query) {
@@ -8566,7 +9080,7 @@ index 5406a70..c8ddc54 100644
  		return metadata_manager->Execute(snapshot, query);
  	};
  	context.flush_cache_if_pending = [&]() {
-@@ -1388,16 +1489,32 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
+@@ -1426,16 +1527,32 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
  		}
  	};
  	context.commit_connection = [&]() {
@@ -8603,7 +9117,7 @@ index 5406a70..c8ddc54 100644
  		snapshot.reset();
  	};
  	context.query_metadata = [&](string q) {
-@@ -1406,16 +1523,110 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
+@@ -1444,16 +1561,110 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
  	context.query_metadata_with_snapshot = [&](DuckLakeSnapshot s, string q) {
  		return metadata_manager->Query(s, q);
  	};
@@ -8716,7 +9230,7 @@ index 5406a70..c8ddc54 100644
  	};
  	context.write_inlined_data = [&](DuckLakeSnapshot &snapshot, const vector<DuckLakeInlinedDataInfo> &new_data,
  	                                 const vector<DuckLakeTableInfo> &new_tables,
-@@ -1484,6 +1695,9 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
+@@ -1522,6 +1733,9 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
  	};
  	context.set_committed_snapshot_id = [&](idx_t snapshot_id) {
  		ducklake_catalog.SetCommittedSnapshotId(snapshot_id);
@@ -8726,7 +9240,7 @@ index 5406a70..c8ddc54 100644
  	};
  	context.invalidate_table_stats_cache = [&](idx_t next_file_id, TableIndex table_id) {
  		ducklake_catalog.InvalidateTableStatsCache(next_file_id, table_id);
-@@ -1525,6 +1739,7 @@ void DuckLakeTransaction::DeleteFlushedInlinedData(const DuckLakeInlinedTableInf
+@@ -1563,6 +1777,7 @@ void DuckLakeTransaction::DeleteFlushedInlinedData(const DuckLakeInlinedTableInf
  }
  
  void DuckLakeTransaction::MarkInlinedDataForDeletion(DuckLakeInlinedTableInfo inlined_table, idx_t flush_snapshot_id) {
@@ -8735,7 +9249,7 @@ index 5406a70..c8ddc54 100644
  }
  
 diff --git a/src/storage/ducklake_transaction_state.cpp b/src/storage/ducklake_transaction_state.cpp
-index cdf9905..3c7e55f 100644
+index f17b8b9e..5ff0e609 100644
 --- a/src/storage/ducklake_transaction_state.cpp
 +++ b/src/storage/ducklake_transaction_state.cpp
 @@ -25,6 +25,28 @@
@@ -8840,7 +9354,7 @@ index cdf9905..3c7e55f 100644
  		if (check_for_matches) {
  			// If we have deletes on the tables, check for files being deleted
  			const auto deleted_files = GetFilesDeletedOrDroppedAfterSnapshot(executor);
-@@ -1495,45 +1567,50 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
+@@ -1515,45 +1587,50 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
  	string batch_queries;
  	// drop entries
  	if (!dropped_tables.empty()) {
@@ -8913,7 +9427,7 @@ index cdf9905..3c7e55f 100644
  	}
  
  	// write new tables
-@@ -1541,31 +1618,97 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
+@@ -1561,31 +1638,97 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
  	vector<DuckLakeTableInfo> new_inlined_data_tables_result;
  	if (!new_tables.empty()) {
  		auto result = GetNewTables(commit_state, transaction_changes);
@@ -9027,7 +9541,7 @@ index cdf9905..3c7e55f 100644
  	}
  
  	// write new name maps
-@@ -1593,14 +1736,15 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
+@@ -1613,14 +1756,15 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
  		return DuckLakeMetadataManager::WriteNewDataFilesSqlBatch(files, resolved_paths, context.write_row_group_count);
  	};
  
@@ -9051,7 +9565,7 @@ index cdf9905..3c7e55f 100644
  
  	// in case of a retry, we generate the deletion of inlined data from the tables
  	if (!flushed_inlined_tables.empty()) {
-@@ -1613,7 +1757,9 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
+@@ -1633,7 +1777,9 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
  		for (auto &entry : dropped_files) {
  			dropped_indexes.insert(entry.second);
  		}
@@ -9062,7 +9576,7 @@ index cdf9905..3c7e55f 100644
  		batch_queries += UpdateStatsForDroppedFiles(stats, context, attempt_dropped_file_stats);
  	}
  
-@@ -1628,55 +1774,70 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
+@@ -1648,55 +1794,70 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
  		}
  		batch_queries +=
  		    DuckLakeMetadataManager::DeleteOverwrittenDeleteFiles(overwritten_delete_files, resolved_overwritten_paths);
@@ -9172,7 +9686,7 @@ index cdf9905..3c7e55f 100644
  			}
  		}
  	}
-@@ -1796,6 +1957,7 @@ DuckLakeTransactionState::CheckForConflicts(DuckLakeSnapshot transaction_snapsho
+@@ -1816,6 +1977,7 @@ DuckLakeTransactionState::CheckForConflicts(DuckLakeSnapshot transaction_snapsho
  	auto changes_made = DuckLakeMetadataManager::GetSnapshotAndStatsAndChanges(snapshot_and_stats, executor);
  	// parse changes made by other transactions
  	auto other_changes = SnapshotChangeInformation::ParseChangesMade(changes_made.changes_made);
@@ -9180,7 +9694,7 @@ index cdf9905..3c7e55f 100644
  
  	// now check for conflicts
  	CheckForConflicts(changes, other_changes, transaction_snapshot, executor);
-@@ -1829,22 +1991,47 @@ void DuckLakeTransactionState::Commit(DuckLakeSnapshot transaction_snapshot,
+@@ -1849,22 +2011,47 @@ void DuckLakeTransactionState::Commit(DuckLakeSnapshot transaction_snapshot,
  				// we changed the schema - need to get a new schema version
  				commit_snapshot.schema_version++;
  			}
@@ -9241,12 +9755,31 @@ index cdf9905..3c7e55f 100644
  			if (flushed_inlined && !context.skip_drop_empty_inlined) {
  				DropEmptySupersededInlinedTables(context);
  			}
-diff --git a/var/folders/kp/vm2n0mqj06d5rl92ncdc4d780000gn/T/tmp.zYS5fLdKEX/current/test/configs/aux_fdb.json b/test/configs/aux_fdb.json
+diff --git a/src/storage/ducklake_view_entry.cpp b/src/storage/ducklake_view_entry.cpp
+index fe1706fa..c069fd3a 100644
+--- a/src/storage/ducklake_view_entry.cpp
++++ b/src/storage/ducklake_view_entry.cpp
+@@ -1,4 +1,5 @@
+ #include "storage/ducklake_view_entry.hpp"
++#include "duckdb/catalog/catalog.hpp"
+ #include "duckdb/parser/parsed_data/create_view_info.hpp"
+ #include "duckdb/parser/parser.hpp"
+ #include "duckdb/parser/parsed_data/alter_info.hpp"
+@@ -38,7 +39,7 @@ unique_ptr<CatalogEntry> DuckLakeViewEntry::AlterEntry(ClientContext &context, A
+ 			auto &rename_view = alter_view.Cast<RenameViewInfo>();
+ 			auto create_info = GetInfo();
+ 			auto &view_info = create_info->Cast<CreateViewInfo>();
+-			view_info.view_name = rename_view.new_view_name;
++			view_info.SetViewName(rename_view.new_view_name);
+ 			// create a complete copy of this view with only the name changed
+ 			return make_uniq<DuckLakeViewEntry>(*this, view_info, LocalChangeType::RENAMED);
+ 		}
+diff --git a/test/configs/aux_fdb.json b/test/configs/aux_fdb.json
 new file mode 100644
-index 0000000..cfc31d2
+index 00000000..86844944
 --- /dev/null
 +++ b/test/configs/aux_fdb.json
-@@ -0,0 +1,221 @@
+@@ -0,0 +1,230 @@
 +{
 +  "description": "Run DuckLake tests using the aux FoundationDB catalog runtime.",
 +  "autoloading": "none",
@@ -9312,6 +9845,12 @@ index 0000000..cfc31d2
 +      ]
 +    },
 +    {
++      "reason": "The aux runtime detects concurrent inline flush conflicts at DuckDB commit; this test requires the native SQL catalog's earlier CALL-time lock error.",
++      "paths": [
++        "test/sql/transaction/transaction_conflict_inlining.test"
++      ]
++    },
++    {
 +      "reason": "Direct SQL metadata-catalog mutation is outside the aux catalog product boundary.",
 +      "paths": [
 +        "test/sql/delete/delete_legacy_missing_mapping_after_rename_add_files.test"
@@ -9324,6 +9863,7 @@ index 0000000..cfc31d2
 +        "test/sql/delete/deletion_vector.test",
 +        "test/sql/delete/deletion_vector_inlined_flush.test",
 +        "test/sql/delete/deletion_vector_multi_snapshot.test",
++        "test/sql/remove_orphans/puffin_orphan.test",
 +        "test/sql/rewrite_data_files/rewrite_deletion_vectors.test"
 +      ]
 +    },
@@ -9343,6 +9883,7 @@ index 0000000..cfc31d2
 +    {
 +      "reason": "Assert hidden physical metadata table contents rather than the supported DuckLake user-facing contract for aux_catalog.",
 +      "paths": [
++        "test/sql/add_files/add_files_equivalent_path_duplicate.test",
 +        "test/sql/add_files/add_files_hive_many_columns.test",
 +        "test/sql/add_files/add_files_hive_partition_cast.test",
 +        "test/sql/alter/expire_snapshot_bug.test",
@@ -9401,6 +9942,7 @@ index 0000000..cfc31d2
 +        "test/sql/metadata/appender_partition_values.test",
 +        "test/sql/metadata/appender_variant_stats.test",
 +        "test/sql/metadata/row_group_count.test",
++        "test/sql/issues/issue_852_cache_growth.test",
 +        "test/sql/migration/v10_row_group_count.test",
 +        "test/sql/geo/ducklake_geometry.test",
 +        "test/sql/partitioning/bucket_partitioning.test",
@@ -9469,7 +10011,7 @@ index 0000000..cfc31d2
 +  ]
 +}
 diff --git a/test/configs/postgres.json b/test/configs/postgres.json
-index a44def9..5794848 100644
+index a44def95..57948484 100644
 --- a/test/configs/postgres.json
 +++ b/test/configs/postgres.json
 @@ -60,7 +60,17 @@
@@ -9498,3 +10040,258 @@ index a44def9..5794848 100644
 -}
 \ No newline at end of file
 +}
+diff --git a/test/sql/data_inlining/data_inlining_types.test b/test/sql/data_inlining/data_inlining_types.test
+index f8c13219..2b4fee99 100644
+--- a/test/sql/data_inlining/data_inlining_types.test
++++ b/test/sql/data_inlining/data_inlining_types.test
+@@ -29,7 +29,7 @@ double_array,
+ date_array,
+ timestamp_array,
+ timestamptz_array,
+-timestamp,
++timestamp, empty_struct, tuple,
+ list_of_fixed_int_array, hugeint, uhugeint, interval, time_tz, date, blob, varchar, timestamp_s, timestamp_ms, timestamp_ns,timestamp_tz, time_ns) FROM test_all_types();
+ 
+ query I nosort alltypes
+@@ -91,4 +91,4 @@ COMMIT
+ 
+ query I nosort extra_types
+ FROM ducklake.extra_types
+-----
+\ No newline at end of file
++----
+diff --git a/test/sql/stats/global_stats.test b/test/sql/stats/global_stats.test
+index 7ff14168..c7fdc3f3 100644
+--- a/test/sql/stats/global_stats.test
++++ b/test/sql/stats/global_stats.test
+@@ -202,24 +202,24 @@ SELECT stats(d) FROM ducklake.timestamps LIMIT 1
+ query II
+ EXPLAIN ANALYZE SELECT * FROM ducklake.test WHERE i = -1;
+ ----
+-analyzed_plan	<REGEX>:.*EMPTY_RESULT.*
++analyzed_plan	<REGEX>:.*Empty Result.*
+ 
+ query II
+ EXPLAIN ANALYZE SELECT * FROM ducklake.tinyints WHERE d = -1;
+ ----
+-analyzed_plan	<REGEX>:.*EMPTY_RESULT.*
++analyzed_plan	<REGEX>:.*Empty Result.*
+ 
+ query II
+ EXPLAIN ANALYZE SELECT * FROM ducklake.decimals WHERE d = -1;
+ ----
+-analyzed_plan	<REGEX>:.*EMPTY_RESULT.*
++analyzed_plan	<REGEX>:.*Empty Result.*
+ 
+ query II
+ EXPLAIN ANALYZE SELECT * FROM ducklake.dates WHERE d = DATE '1900-01-01';
+ ----
+-analyzed_plan	<REGEX>:.*EMPTY_RESULT.*
++analyzed_plan	<REGEX>:.*Empty Result.*
+ 
+ query II
+ EXPLAIN ANALYZE SELECT * FROM ducklake.timestamps WHERE d = TIMESTAMP '1900-01-01';
+ ----
+-analyzed_plan	<REGEX>:.*EMPTY_RESULT.*
++analyzed_plan	<REGEX>:.*Empty Result.*
+diff --git a/test/sql/stats/min_max_optimization_basic.test b/test/sql/stats/min_max_optimization_basic.test
+index a47b6e7b..e462e7b6 100644
+--- a/test/sql/stats/min_max_optimization_basic.test
++++ b/test/sql/stats/min_max_optimization_basic.test
+@@ -32,17 +32,17 @@ SELECT MIN(i), MAX(i), COUNT(*) FROM ducklake.test;
+ query II
+ EXPLAIN ANALYZE SELECT MIN(i), MAX(i), COUNT(*) FROM ducklake.test;
+ ----
+-analyzed_plan	<!REGEX>:.*TABLE_SCAN.*
++analyzed_plan	<!REGEX>:.*Table Scan.*
+ 
+ query II
+ EXPLAIN ANALYZE SELECT MIN(i) FROM ducklake.test;
+ ----
+-analyzed_plan	<!REGEX>:.*TABLE_SCAN.*
++analyzed_plan	<!REGEX>:.*Table Scan.*
+ 
+ query II
+ EXPLAIN ANALYZE SELECT MAX(i) FROM ducklake.test;
+ ----
+-analyzed_plan	<!REGEX>:.*TABLE_SCAN.*
++analyzed_plan	<!REGEX>:.*Table Scan.*
+ 
+ # the optimization still holds after additional inserts (stats widen)
+ statement ok
+@@ -56,7 +56,7 @@ SELECT MIN(i), MAX(i), COUNT(*) FROM ducklake.test;
+ query II
+ EXPLAIN ANALYZE SELECT MIN(i), MAX(i) FROM ducklake.test;
+ ----
+-analyzed_plan	<!REGEX>:.*TABLE_SCAN.*
++analyzed_plan	<!REGEX>:.*Table Scan.*
+ 
+ # ============================================
+ # 2. String MIN/MAX
+@@ -95,7 +95,7 @@ SELECT MIN(i) FROM ducklake.test WHERE i > 50;
+ query II
+ EXPLAIN ANALYZE SELECT MIN(i) FROM ducklake.test WHERE i > 50;
+ ----
+-analyzed_plan	<REGEX>:.*TABLE_SCAN.*
++analyzed_plan	<REGEX>:.*Table Scan.*
+ 
+ # always-false filter -> empty result, must be NULL (and must not crash)
+ query I
+diff --git a/test/sql/stats/min_max_optimization_compaction.test b/test/sql/stats/min_max_optimization_compaction.test
+index 2bcc5b53..79a066ed 100644
+--- a/test/sql/stats/min_max_optimization_compaction.test
++++ b/test/sql/stats/min_max_optimization_compaction.test
+@@ -38,7 +38,7 @@ SELECT MIN(i), MAX(i), COUNT(*) FROM ducklake.t;
+ query II
+ EXPLAIN ANALYZE SELECT MIN(i) FROM ducklake.t;
+ ----
+-analyzed_plan	<REGEX>:.*TABLE_SCAN.*
++analyzed_plan	<REGEX>:.*Table Scan.*
+ 
+ # rewrite the deletes away
+ statement ok
+@@ -54,7 +54,7 @@ SELECT MIN(i), MAX(i), COUNT(*) FROM ducklake.t;
+ query II
+ EXPLAIN ANALYZE SELECT MIN(i), MAX(i) FROM ducklake.t;
+ ----
+-analyzed_plan	<!REGEX>:.*TABLE_SCAN.*
++analyzed_plan	<!REGEX>:.*Table Scan.*
+ 
+ # ============================================
+ # 2. Inlined data is folded into the recompute (parquet + inlined coexisting)
+@@ -95,7 +95,7 @@ SELECT MIN(i), MAX(i), COUNT(*) FROM ducklake.mixed;
+ query II
+ EXPLAIN ANALYZE SELECT MIN(i), MAX(i) FROM ducklake.mixed;
+ ----
+-analyzed_plan	<!REGEX>:.*TABLE_SCAN.*
++analyzed_plan	<!REGEX>:.*Table Scan.*
+ 
+ # ============================================
+ # 3. Partial rewrite (deletes remain) -> recompute is skipped, MIN/MAX stay correct via fallback
+@@ -127,7 +127,7 @@ SELECT MIN(i), MAX(i), COUNT(*) FROM ducklake.partial;
+ query II
+ EXPLAIN ANALYZE SELECT MIN(i) FROM ducklake.partial;
+ ----
+-analyzed_plan	<REGEX>:.*TABLE_SCAN.*
++analyzed_plan	<REGEX>:.*Table Scan.*
+ 
+ # ============================================
+ # 4. Nested columns: scalar MIN/MAX still fold after a rewrite; nested column stays correct
+@@ -156,7 +156,7 @@ SELECT MIN(i), MAX(i), COUNT(*) FROM ducklake.nested;
+ query II
+ EXPLAIN ANALYZE SELECT MIN(i) FROM ducklake.nested;
+ ----
+-analyzed_plan	<!REGEX>:.*TABLE_SCAN.*
++analyzed_plan	<!REGEX>:.*Table Scan.*
+ 
+ # filter on the nested field still returns correct results
+ query I
+@@ -200,4 +200,4 @@ SELECT MIN(i), MAX(i), COUNT(*) FROM ducklake.single_tx;
+ query II
+ EXPLAIN ANALYZE SELECT MIN(i) FROM ducklake.single_tx;
+ ----
+-analyzed_plan	<REGEX>:.*TABLE_SCAN.*
++analyzed_plan	<REGEX>:.*Table Scan.*
+diff --git a/test/sql/stats/min_max_optimization_deletes.test b/test/sql/stats/min_max_optimization_deletes.test
+index 0e29ddff..4aad0bb7 100644
+--- a/test/sql/stats/min_max_optimization_deletes.test
++++ b/test/sql/stats/min_max_optimization_deletes.test
+@@ -36,7 +36,7 @@ SELECT MIN(i), MAX(i), COUNT(*) FROM ducklake.big;
+ query II
+ EXPLAIN ANALYZE SELECT MIN(i) FROM ducklake.big;
+ ----
+-analyzed_plan	<!REGEX>:.*TABLE_SCAN.*
++analyzed_plan	<!REGEX>:.*Table Scan.*
+ 
+ # delete the current minimum value
+ statement ok
+@@ -52,13 +52,13 @@ SELECT MIN(i), MAX(i), COUNT(*) FROM ducklake.big;
+ query II
+ EXPLAIN ANALYZE SELECT MIN(i) FROM ducklake.big;
+ ----
+-analyzed_plan	<REGEX>:.*TABLE_SCAN.*
++analyzed_plan	<REGEX>:.*Table Scan.*
+ 
+ # ...but COUNT(*) is NOT regressed - it still folds from metadata
+ query II
+ EXPLAIN ANALYZE SELECT COUNT(*) FROM ducklake.big;
+ ----
+-analyzed_plan	<!REGEX>:.*TABLE_SCAN.*
++analyzed_plan	<!REGEX>:.*Table Scan.*
+ 
+ # deleting the maximum is reflected too
+ statement ok
+@@ -85,7 +85,7 @@ SELECT MIN(i), MAX(i), COUNT(*) FROM ducklake.big;
+ query II
+ EXPLAIN ANALYZE SELECT MIN(i), MAX(i) FROM ducklake.big;
+ ----
+-analyzed_plan	<!REGEX>:.*TABLE_SCAN.*
++analyzed_plan	<!REGEX>:.*Table Scan.*
+ 
+ # ============================================
+ # 3. Inlined deletes
+@@ -101,7 +101,7 @@ INSERT INTO ducklake.small FROM range(1, 51);
+ query II
+ EXPLAIN ANALYZE SELECT MIN(i) FROM ducklake.small;
+ ----
+-analyzed_plan	<!REGEX>:.*TABLE_SCAN.*
++analyzed_plan	<!REGEX>:.*Table Scan.*
+ 
+ statement ok
+ DELETE FROM ducklake.small WHERE i = 1;
+@@ -115,9 +115,9 @@ SELECT MIN(i), MAX(i), COUNT(*) FROM ducklake.small;
+ query II
+ EXPLAIN ANALYZE SELECT MIN(i) FROM ducklake.small;
+ ----
+-analyzed_plan	<REGEX>:.*TABLE_SCAN.*
++analyzed_plan	<REGEX>:.*Table Scan.*
+ 
+ query II
+ EXPLAIN ANALYZE SELECT COUNT(*) FROM ducklake.small;
+ ----
+-analyzed_plan	<!REGEX>:.*TABLE_SCAN.*
++analyzed_plan	<!REGEX>:.*Table Scan.*
+diff --git a/test/sql/stats/min_max_optimization_time_travel.test b/test/sql/stats/min_max_optimization_time_travel.test
+index 6deb3d81..10b989cf 100644
+--- a/test/sql/stats/min_max_optimization_time_travel.test
++++ b/test/sql/stats/min_max_optimization_time_travel.test
+@@ -44,7 +44,7 @@ SELECT MIN(i), MAX(i) FROM ducklake.tt AT (VERSION => 2);
+ query II
+ EXPLAIN ANALYZE SELECT MAX(i) FROM ducklake.tt AT (VERSION => 2);
+ ----
+-analyzed_plan	<REGEX>:.*TABLE_SCAN.*
++analyzed_plan	<REGEX>:.*Table Scan.*
+ 
+ # ============================================
+ # Transaction-local changes
+@@ -66,7 +66,7 @@ SELECT MIN(i), MAX(i) FROM ducklake.tt;
+ query II
+ EXPLAIN ANALYZE SELECT MIN(i), MAX(i) FROM ducklake.tt;
+ ----
+-analyzed_plan	<REGEX>:.*TABLE_SCAN.*
++analyzed_plan	<REGEX>:.*Table Scan.*
+ 
+ statement ok
+ ROLLBACK;
+@@ -80,7 +80,7 @@ SELECT MIN(i), MAX(i) FROM ducklake.tt;
+ query II
+ EXPLAIN ANALYZE SELECT MIN(i), MAX(i) FROM ducklake.tt;
+ ----
+-analyzed_plan	<!REGEX>:.*TABLE_SCAN.*
++analyzed_plan	<!REGEX>:.*Table Scan.*
+ 
+ # uncommitted delete of the current minimum
+ statement ok
+diff --git a/test/sql/types/all_types.test b/test/sql/types/all_types.test
+index 2bcfc4f2..ecc51705 100644
+--- a/test/sql/types/all_types.test
++++ b/test/sql/types/all_types.test
+@@ -26,7 +26,7 @@ fixed_nested_varchar_array,
+ fixed_struct_array,
+ struct_of_fixed_array,
+ fixed_array_of_int_list,
+-list_of_fixed_int_array, hugeint, uhugeint, interval, time_tz, time_ns) FROM test_all_types();
++list_of_fixed_int_array, empty_struct, tuple, hugeint, uhugeint, interval, time_tz, time_ns) FROM test_all_types();
+ 
+ query I nosort alltypes
+ FROM all_types

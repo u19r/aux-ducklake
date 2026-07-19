@@ -1,0 +1,27 @@
+diff --git a/src/storage/postgres_catalog.cpp b/src/storage/postgres_catalog.cpp
+index cd649fa..9222a49 100644
+--- a/src/storage/postgres_catalog.cpp
++++ b/src/storage/postgres_catalog.cpp
+@@ -23,8 +23,8 @@ unique_ptr<TableRef> PostgresCatalog::RemoteExecute(ClientContext &context, const
+ 	vector<unique_ptr<ParsedExpression>> args;
+ 	args.push_back(make_uniq<ConstantExpression>(Value(GetName())));
+ 	args.push_back(make_uniq<ConstantExpression>(Value(sql)));
+-	auto func_ref = make_uniq<TableFunctionRef>();
+-	func_ref->function = make_uniq<FunctionExpression>("postgres_query", std::move(args));
++	auto func_ref = make_uniq_base<TableRef, TableFunctionRef>();
++	func_ref->Cast<TableFunctionRef>().function = make_uniq<FunctionExpression>("postgres_query", std::move(args));
+ 	return func_ref;
+ }
+ 
+diff --git a/src/storage/postgres_secret_storage.cpp b/src/storage/postgres_secret_storage.cpp
+--- a/src/storage/postgres_secret_storage.cpp
++++ b/src/storage/postgres_secret_storage.cpp
+@@ -172,7 +172,7 @@ unique_ptr<const BaseSecret> PostgresSecretStorage::DeserializeSecret(PostgresCa
+ 	auto secret = secret_manager.DeserializeSecret(deserializer, secret_name);
+ 	deserializer.End();
+ 
+-	return secret;
++	return unique_ptr<const BaseSecret>(secret.release());
+ }
+ 
+ unique_ptr<SecretEntry> PostgresSecretStorage::StoreSecret(unique_ptr<const BaseSecret> secret,

@@ -24,14 +24,14 @@ pub(crate) fn payload_str_value<'a>(
     key: &str,
     missing: &str,
 ) -> CatalogResult<&'a str> {
-    for value in payload_values(payload, key)? {
+    if let Some(value) = payload_values(payload, key)?.next() {
         return Ok(value);
     }
     Err(crate::CatalogError::Decode(missing.to_owned()))
 }
 
 pub(crate) fn payload_u64_value(payload: &[u8], key: &str, missing: &str) -> CatalogResult<u64> {
-    for value in payload_values(payload, key)? {
+    if let Some(value) = payload_values(payload, key)?.next() {
         return value.parse::<u64>().map_err(|error| {
             crate::CatalogError::Decode(format!("invalid runtime {key} {value}: {error}"))
         });
@@ -40,7 +40,7 @@ pub(crate) fn payload_u64_value(payload: &[u8], key: &str, missing: &str) -> Cat
 }
 
 pub(crate) fn payload_i64_value(payload: &[u8], key: &str, missing: &str) -> CatalogResult<i64> {
-    for value in payload_values(payload, key)? {
+    if let Some(value) = payload_values(payload, key)?.next() {
         return value.parse::<i64>().map_err(|error| {
             crate::CatalogError::Decode(format!("invalid runtime {key} {value}: {error}"))
         });
@@ -49,7 +49,7 @@ pub(crate) fn payload_i64_value(payload: &[u8], key: &str, missing: &str) -> Cat
 }
 
 pub(crate) fn optional_payload_u64_value(payload: &[u8], key: &str) -> CatalogResult<Option<u64>> {
-    for value in payload_values(payload, key)? {
+    if let Some(value) = payload_values(payload, key)?.next() {
         let parsed = value.parse::<u64>().map_err(|error| {
             crate::CatalogError::Decode(format!("invalid runtime {key} {value}: {error}"))
         })?;
@@ -69,14 +69,14 @@ pub(crate) fn optional_payload_str_value<'a>(
     payload: &'a [u8],
     key: &str,
 ) -> CatalogResult<Option<&'a str>> {
-    for value in payload_values(payload, key)? {
+    if let Some(value) = payload_values(payload, key)?.next() {
         return Ok(Some(value));
     }
     Ok(None)
 }
 
 pub(crate) fn optional_payload_i64_value(payload: &[u8], key: &str) -> CatalogResult<Option<i64>> {
-    for value in payload_values(payload, key)? {
+    if let Some(value) = payload_values(payload, key)?.next() {
         let parsed = value.parse::<i64>().map_err(|error| {
             crate::CatalogError::Decode(format!("invalid runtime {key} {value}: {error}"))
         })?;

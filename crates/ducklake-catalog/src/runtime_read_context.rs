@@ -4,6 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 #[cfg(not(test))]
+use crate::CatalogCacheNamespace;
+#[cfg(not(test))]
 use crate::bounded_cache::{BoundedCache, static_bounded_cache};
 use crate::runtime_snapshots::SnapshotReadContext;
 #[cfg(not(test))]
@@ -100,12 +102,13 @@ impl CatalogInlineDeletionReadContext {
     ) -> CatalogResult<Self> {
         #[cfg(not(test))]
         {
+            let key = (kv.catalog_cache_namespace(), catalog);
             let cache = catalog_inline_deletion_context_cache();
-            if let Some(context) = cache.get(catalog) {
+            if let Some(context) = cache.get(key) {
                 return Ok(context);
             }
             let context = Self::load(kv, catalog)?;
-            cache.insert(catalog, context.clone());
+            cache.insert(key, context.clone());
             Ok(context)
         }
         #[cfg(test)]
@@ -151,7 +154,11 @@ impl InlineDeletionReadContext {
     ) -> CatalogResult<Self> {
         #[cfg(not(test))]
         {
-            let key = InlineDeletionContextKey { catalog, table_id };
+            let key = InlineDeletionContextKey {
+                namespace: kv.catalog_cache_namespace(),
+                catalog,
+                table_id,
+            };
             let cache = inline_deletion_context_cache();
             if let Some(context) = cache.get(key) {
                 return Ok(context);
@@ -208,6 +215,7 @@ pub(crate) fn inline_file_deletions_at(
     #[cfg(not(test))]
     {
         let key = InlineDeletionSnapshotContextKey {
+            namespace: kv.catalog_cache_namespace(),
             catalog,
             table_id,
             snapshot_order,
@@ -259,7 +267,7 @@ impl CatalogCurrentFilesContext {
         let _ = latest;
         #[cfg(not(test))]
         {
-            let key = (catalog, latest.order);
+            let key = (kv.catalog_cache_namespace(), catalog, latest.order);
             let cache = current_files_context_cache();
             if let Some(context) = cache.get(key) {
                 return Ok(context);
@@ -385,7 +393,7 @@ impl CatalogCurrentFilePartitionValuesContext {
         let _ = latest;
         #[cfg(not(test))]
         {
-            let key = (catalog, latest.order);
+            let key = (kv.catalog_cache_namespace(), catalog, latest.order);
             let cache = current_file_partition_values_context_cache();
             if let Some(context) = cache.get(key) {
                 return Ok(context);
@@ -428,7 +436,7 @@ impl CatalogReadContext {
         };
         #[cfg(not(test))]
         {
-            let key = (catalog, latest_row.order);
+            let key = (kv.catalog_cache_namespace(), catalog, latest_row.order);
             let cache = current_metadata_context_cache();
             if let Some(context) = cache.get(key) {
                 return Ok(context);
@@ -788,16 +796,16 @@ fn visible_rows_at<Row: CatalogVisibleRow>(
 #[cfg(not(test))]
 pub(crate) fn invalidate_catalog_read_context(catalog: CatalogId) {
     if let Some(cache) = CURRENT_METADATA_CONTEXT_CACHE.get() {
-        cache.retain(|key, _| key.0 != catalog);
+        cache.retain(|key, _| key.1 != catalog);
     }
     if let Some(cache) = CURRENT_FILES_CONTEXT_CACHE.get() {
-        cache.retain(|key, _| key.0 != catalog);
+        cache.retain(|key, _| key.1 != catalog);
     }
     // This context is keyed by current file membership plus table stats version keys, so generic
     // snapshot churn must not discard it. Mutations that change files or stats produce a different
     // key and naturally miss the cache.
     if let Some(cache) = CURRENT_FILE_PARTITION_VALUES_CONTEXT_CACHE.get() {
-        cache.retain(|key, _| key.0 != catalog);
+        cache.retain(|key, _| key.1 != catalog);
     }
     crate::data_file_store::invalidate_data_file_read_context(catalog);
 }
@@ -811,7 +819,7 @@ pub(crate) fn invalidate_inline_deletion_read_context(catalog: CatalogId) {
         cache.retain(|key, _| key.catalog != catalog);
     }
     if let Some(cache) = CATALOG_INLINE_DELETION_CONTEXT_CACHE.get() {
-        cache.remove(catalog);
+        cache.retain(|(_, cached_catalog), _| *cached_catalog != catalog);
     }
 }
 
@@ -872,6 +880,7 @@ fn columns_by_table(current_tables: &[TableRow]) -> BTreeMap<TableId, Vec<Column
 #[cfg(not(test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct CatalogSnapshotFactsContextKey {
+    namespace: CatalogCacheNamespace,
     catalog: CatalogId,
     version: CatalogSnapshotFactsVersion,
     latest_order: Option<CatalogOrderId>,
@@ -918,6 +927,7 @@ fn catalog_snapshot_facts_context_key(
         }),
     };
     Ok(CatalogSnapshotFactsContextKey {
+        namespace: kv.catalog_cache_namespace(),
         catalog,
         version,
         latest_order: latest.map(|row| row.order),
@@ -959,6 +969,7 @@ fn current_file_column_stats_context_key(
     table_columns.sort_unstable_by_key(|(table_id, _)| *table_id);
     table_columns.dedup_by_key(|(table_id, _)| *table_id);
     Ok(CurrentFileColumnStatsContextKey {
+        namespace: kv.catalog_cache_namespace(),
         catalog,
         current_file_ids,
         table_columns,
@@ -986,12 +997,15 @@ fn schemas_with_implicit_main_if_needed(
 
 #[cfg(not(test))]
 static CURRENT_METADATA_CONTEXT_CACHE: OnceLock<
-    BoundedCache<(CatalogId, crate::CatalogOrderId), CatalogReadContext>,
+    BoundedCache<(CatalogCacheNamespace, CatalogId, crate::CatalogOrderId), CatalogReadContext>,
 > = OnceLock::new();
 
 #[cfg(not(test))]
 static CURRENT_FILES_CONTEXT_CACHE: OnceLock<
-    BoundedCache<(CatalogId, crate::CatalogOrderId), CatalogCurrentFilesContext>,
+    BoundedCache<
+        (CatalogCacheNamespace, CatalogId, crate::CatalogOrderId),
+        CatalogCurrentFilesContext,
+    >,
 > = OnceLock::new();
 
 #[cfg(not(test))]
@@ -1001,12 +1015,16 @@ static CURRENT_FILE_COLUMN_STATS_CONTEXT_CACHE: OnceLock<
 
 #[cfg(not(test))]
 static CURRENT_FILE_PARTITION_VALUES_CONTEXT_CACHE: OnceLock<
-    BoundedCache<(CatalogId, crate::CatalogOrderId), CatalogCurrentFilePartitionValuesContext>,
+    BoundedCache<
+        (CatalogCacheNamespace, CatalogId, crate::CatalogOrderId),
+        CatalogCurrentFilePartitionValuesContext,
+    >,
 > = OnceLock::new();
 
 #[cfg(not(test))]
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct CurrentFileColumnStatsContextKey {
+    namespace: CatalogCacheNamespace,
     catalog: CatalogId,
     current_file_ids: Vec<DataFileId>,
     table_columns: Vec<(TableId, Vec<ColumnId>)>,
@@ -1016,6 +1034,7 @@ struct CurrentFileColumnStatsContextKey {
 #[cfg(not(test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct InlineDeletionContextKey {
+    namespace: CatalogCacheNamespace,
     catalog: CatalogId,
     table_id: TableId,
 }
@@ -1028,6 +1047,7 @@ static INLINE_DELETION_CONTEXT_CACHE: OnceLock<
 #[cfg(not(test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct InlineDeletionSnapshotContextKey {
+    namespace: CatalogCacheNamespace,
     catalog: CatalogId,
     table_id: TableId,
     snapshot_order: CatalogOrderId,
@@ -1040,18 +1060,22 @@ static INLINE_DELETION_SNAPSHOT_CONTEXT_CACHE: OnceLock<
 
 #[cfg(not(test))]
 static CATALOG_INLINE_DELETION_CONTEXT_CACHE: OnceLock<
-    BoundedCache<CatalogId, CatalogInlineDeletionReadContext>,
+    BoundedCache<(CatalogCacheNamespace, CatalogId), CatalogInlineDeletionReadContext>,
 > = OnceLock::new();
 
 #[cfg(not(test))]
-fn current_metadata_context_cache()
--> &'static BoundedCache<(CatalogId, crate::CatalogOrderId), CatalogReadContext> {
+fn current_metadata_context_cache() -> &'static BoundedCache<
+    (CatalogCacheNamespace, CatalogId, crate::CatalogOrderId),
+    CatalogReadContext,
+> {
     static_bounded_cache(&CURRENT_METADATA_CONTEXT_CACHE, 32)
 }
 
 #[cfg(not(test))]
-fn current_files_context_cache()
--> &'static BoundedCache<(CatalogId, crate::CatalogOrderId), CatalogCurrentFilesContext> {
+fn current_files_context_cache() -> &'static BoundedCache<
+    (CatalogCacheNamespace, CatalogId, crate::CatalogOrderId),
+    CatalogCurrentFilesContext,
+> {
     static_bounded_cache(&CURRENT_FILES_CONTEXT_CACHE, 32)
 }
 
@@ -1063,7 +1087,7 @@ fn current_file_column_stats_context_cache()
 
 #[cfg(not(test))]
 fn current_file_partition_values_context_cache() -> &'static BoundedCache<
-    (CatalogId, crate::CatalogOrderId),
+    (CatalogCacheNamespace, CatalogId, crate::CatalogOrderId),
     CatalogCurrentFilePartitionValuesContext,
 > {
     static_bounded_cache(&CURRENT_FILE_PARTITION_VALUES_CONTEXT_CACHE, 32)
@@ -1083,7 +1107,7 @@ fn inline_deletion_snapshot_context_cache()
 
 #[cfg(not(test))]
 fn catalog_inline_deletion_context_cache()
--> &'static BoundedCache<CatalogId, CatalogInlineDeletionReadContext> {
+-> &'static BoundedCache<(CatalogCacheNamespace, CatalogId), CatalogInlineDeletionReadContext> {
     static_bounded_cache(&CATALOG_INLINE_DELETION_CONTEXT_CACHE, 16)
 }
 

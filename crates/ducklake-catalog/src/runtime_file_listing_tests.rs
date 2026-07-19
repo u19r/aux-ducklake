@@ -10,13 +10,13 @@ mod tests {
     use crate::file_partitions::stage_file_partition_value;
     use crate::{
         AttachedDataFile, CatalogId, CatalogOrderId, ColumnDrop, ColumnId, DataFileId, DataFileRow,
-        FakeOrderedCatalogKv, InlineFileDeletionRow, InlineTableFlush, InlinedTableRow,
-        OrderedCatalogKv, RangeDirection, RangeItem, RawSnapshotSequence, SchemaId, TableColumnRow,
-        TableId, TablePartitionChange, TablePartitionFieldRow, TablePartitionRow, TableRow,
-        append_data_file, commit_append_data_files, commit_append_table_columns,
-        commit_change_table_partition, commit_create_table_row, commit_data_mutation,
-        commit_drop_table_columns, commit_inline_file_deletions, expire_snapshots,
-        initialize_catalog_if_absent,
+        DeleteFileId, DeleteFileRow, FakeOrderedCatalogKv, InlineFileDeletionRow, InlineTableFlush,
+        InlinedTableRow, OrderedCatalogKv, RangeDirection, RangeItem, RawSnapshotSequence,
+        SchemaId, TableColumnRow, TableId, TablePartitionChange, TablePartitionFieldRow,
+        TablePartitionRow, TableRow, append_data_file, commit_append_data_files,
+        commit_append_table_columns, commit_change_table_partition, commit_create_table_row,
+        commit_data_mutation, commit_drop_table_columns, commit_inline_file_deletions,
+        expire_snapshots, initialize_catalog_if_absent,
         keys::{
             family_prefix, inline_file_deletion_file_prefix, inline_file_deletion_table_prefix,
             snapshot_timestamp_prefix, table_object_scan_prefix,
@@ -82,6 +82,58 @@ mod tests {
             1,
             "latest snapshot resolution should use the latest row; the one remaining scan renders public snapshot ids"
         );
+    }
+
+    #[test]
+    fn given_encrypted_files_when_rendering_listing_then_both_keys_are_returned() {
+        let catalog = CatalogId(1);
+        let table_id = TableId(10);
+        let mut kv = FakeOrderedCatalogKv::new();
+        initialize_catalog_if_absent(&mut kv, catalog).unwrap();
+        commit_create_table_row(
+            &mut kv,
+            catalog,
+            table_with_columns(table_id, "orders", CatalogOrderId::uuid_v7(0)),
+        )
+        .unwrap();
+        let snapshot = latest_snapshot(&kv, catalog).unwrap().unwrap();
+        let files = vec![AttachedDataFile::new(
+            DataFileRow::new(
+                DataFileId(7),
+                table_id,
+                "main/orders/encrypted.parquet",
+                1,
+                1024,
+                snapshot.order,
+            )
+            .with_encryption_key("AQIDBA=="),
+            Some(
+                DeleteFileRow::new(
+                    DeleteFileId(8),
+                    DataFileId(7),
+                    "main/orders/encrypted-delete.parquet",
+                    1,
+                    128,
+                    snapshot.order,
+                )
+                .with_encryption_key("BQYHCA=="),
+            ),
+        )];
+
+        let payload = String::from_utf8(
+            partition_files_payload_with_context(
+                &kv,
+                catalog,
+                snapshot.order,
+                "all".to_owned(),
+                files,
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(payload.contains("\tAQIDBA==\tBQYHCA==\n"), "{payload}");
     }
 
     #[test]
@@ -1145,8 +1197,7 @@ mod tests {
     }
 
     #[test]
-    fn given_file_footer_size_when_listing_files_then_payload_keeps_file_tag_plus_eighteen_values()
-    {
+    fn given_file_footer_size_when_listing_files_then_payload_includes_encryption_key_fields() {
         let catalog = CatalogId(1);
         let table_id = TableId(10);
         let mut kv = FakeOrderedCatalogKv::new();
@@ -1192,11 +1243,13 @@ mod tests {
             .unwrap();
         let fields: Vec<_> = file_line.split('\t').collect();
 
-        assert_eq!(fields.len(), 20);
+        assert_eq!(fields.len(), 22);
         assert_eq!(fields[16], "151");
         assert_eq!(fields[17], "1");
         assert_eq!(fields[18], "");
         assert_eq!(fields[19], "");
+        assert_eq!(fields[20], "");
+        assert_eq!(fields[21], "");
     }
 
     #[test]

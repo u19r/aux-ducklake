@@ -555,15 +555,19 @@ fn inline_file_deletions_for_flush_payload(
             .transpose()?
             .map(|id| id.to_string())
             .unwrap_or_default();
+        let delete_encryption_key = delete.map_or("", |row| row.encryption_key.as_str());
+        let delete_format = delete.map_or("", |_| "PARQUET");
         out.push_str(&format!(
-            "inline_file_delete\t{}\t{}\tfalse\t{}\t{}\t{}\t{}\tfalse\t{}\t\t\n",
+            "inline_file_delete\t{}\t{}\tfalse\t{}\t{}\t{}\t{}\tfalse\t{}\t{}\t{}\n",
             deletion.data_file_id.0,
             attached.data_file.path,
             deletion.row_id,
             begin_snapshot,
             delete_file_id,
             delete_path,
-            delete_begin_snapshot
+            delete_begin_snapshot,
+            delete_encryption_key,
+            delete_format
         ));
     }
     Ok(out.into_bytes())

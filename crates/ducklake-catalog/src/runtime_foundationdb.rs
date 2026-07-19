@@ -236,10 +236,11 @@ pub(crate) fn runtime_foundationdb_metadata_exists(catalog: CatalogId) -> Catalo
 #[cfg(feature = "foundationdb")]
 pub(crate) fn runtime_foundationdb_initialize_ducklake(
     catalog: CatalogId,
+    metadata: &[crate::MetadataSettingRow],
 ) -> CatalogResult<crate::CatalogOrderId> {
     let kv = open_foundationdb_catalog()?;
     Ok(kv
-        .initialize_catalog_if_absent_versionstamped(catalog)?
+        .initialize_catalog_with_metadata_if_absent_versionstamped(catalog, metadata)?
         .order)
 }
 
@@ -470,13 +471,15 @@ pub(crate) fn runtime_foundationdb_commit_data_mutation(
             .proposed_commit_snapshot
             .map(crate::runtime_snapshot_range::ProposedCommitSnapshot::commit_attempt_id),
         mutation.commit_metadata,
-        mutation.data_files,
-        materialized_delete_files,
-        mutation.inline_flushes,
-        mutation.partition_values,
-        mutation.inline_file_deletions,
-        mutation.file_column_stats,
-        mutation.dropped_data_file_ids,
+        crate::FdbDataMutation {
+            data_files: mutation.data_files,
+            delete_files: materialized_delete_files,
+            inline_flushes: mutation.inline_flushes,
+            partition_values: mutation.partition_values,
+            inline_file_deletions: mutation.inline_file_deletions,
+            file_column_stats: mutation.file_column_stats,
+            dropped_data_file_ids: mutation.dropped_data_file_ids,
+        },
     )?;
     Ok((commit, affected_table_ids))
 }
@@ -487,12 +490,35 @@ fn reject_stale_data_mutation(
     catalog: CatalogId,
     mutation: &RuntimeDataMutation,
 ) -> CatalogResult<()> {
-    let Some(read_snapshot) = mutation.read_snapshot else {
+    let read_snapshot = if let Some(read_snapshot) = mutation.read_snapshot {
+        snapshot_by_public_sequence(kv, catalog, read_snapshot)?
+    } else if let Some(flush_snapshot) = mutation
+        .inline_flushes
+        .iter()
+        .map(|flush| flush.flush_snapshot_sequence)
+        .max()
+    {
+        crate::snapshot_by_raw_sequence(kv, catalog, flush_snapshot)?
+    } else {
+        None
+    };
+    let Some(read_snapshot) = read_snapshot else {
         return Ok(());
     };
-    let Some(read_snapshot) = snapshot_by_public_sequence(kv, catalog, read_snapshot)? else {
-        return Ok(());
-    };
+    let latest = latest_snapshot(kv, catalog)?;
+    let proposed_sequence = mutation
+        .proposed_commit_snapshot
+        .and_then(|snapshot| u64::try_from(snapshot.commit_attempt_id().0).ok())
+        .map(crate::RawSnapshotSequence);
+    if !mutation.inline_flushes.is_empty()
+        && latest.is_some_and(|latest| {
+            latest.order > read_snapshot.order && Some(latest.sequence) != proposed_sequence
+        })
+    {
+        return Err(crate::CatalogError::InvalidMutation(
+            "conflict flushing inline data: catalog changed after read snapshot".to_owned(),
+        ));
+    }
     reject_append_files_incompatible_with_current_tables(
         kv,
         catalog,
@@ -917,6 +943,7 @@ pub(crate) fn runtime_foundationdb_metadata_exists(_catalog: CatalogId) -> Catal
 #[cfg(not(feature = "foundationdb"))]
 pub(crate) fn runtime_foundationdb_initialize_ducklake(
     _catalog: CatalogId,
+    _metadata: &[crate::MetadataSettingRow],
 ) -> CatalogResult<crate::CatalogOrderId> {
     foundationdb_runtime_order_error()
 }

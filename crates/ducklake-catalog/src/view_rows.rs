@@ -17,6 +17,34 @@ pub struct ViewRow {
     pub validity: ValidityWindow,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewDefinition {
+    pub uuid: String,
+    pub name: String,
+    pub dialect: String,
+    pub sql: String,
+    pub column_aliases: Vec<String>,
+}
+
+impl ViewDefinition {
+    #[must_use]
+    pub fn new(
+        uuid: impl Into<String>,
+        name: impl Into<String>,
+        dialect: impl Into<String>,
+        sql: impl Into<String>,
+        column_aliases: Vec<String>,
+    ) -> Self {
+        Self {
+            uuid: uuid.into(),
+            name: name.into(),
+            dialect: dialect.into(),
+            sql: sql.into(),
+            column_aliases,
+        }
+    }
+}
+
 impl ViewRow {
     const VERSION: u8 = 1;
     #[cfg(feature = "foundationdb")]
@@ -29,21 +57,17 @@ impl ViewRow {
     pub fn new(
         view_id: TableId,
         schema_id: SchemaId,
-        uuid: impl Into<String>,
-        name: impl Into<String>,
-        dialect: impl Into<String>,
-        sql: impl Into<String>,
-        column_aliases: Vec<String>,
+        definition: ViewDefinition,
         begin_order: CatalogOrderId,
     ) -> Self {
         Self {
             view_id,
             schema_id,
-            uuid: uuid.into(),
-            name: name.into(),
-            dialect: dialect.into(),
-            sql: sql.into(),
-            column_aliases,
+            uuid: definition.uuid,
+            name: definition.name,
+            dialect: definition.dialect,
+            sql: definition.sql,
+            column_aliases: definition.column_aliases,
             comment: None,
             validity: ValidityWindow::new(begin_order, None),
         }

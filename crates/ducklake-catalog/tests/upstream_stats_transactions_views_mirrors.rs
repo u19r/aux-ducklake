@@ -8,11 +8,10 @@ use ducklake_catalog::{
     commit_append_table_columns_with_conflict_check, commit_change_table_partition,
     commit_change_table_partition_with_conflict_check, commit_change_table_sort,
     commit_create_schema_rows, commit_create_table_row, commit_create_view_row,
-    commit_data_mutation_with_file_partitions,
-    commit_data_mutation_with_file_partitions_and_inline_deletes,
-    commit_data_mutation_with_file_partitions_inline_deletes_stats_and_dropped_files,
-    commit_delete_inline_table_rows, commit_drop_schema_rows, commit_drop_table_columns,
-    commit_drop_views, commit_merge_adjacent_data_files, commit_register_delete_files,
+    commit_data_mutation_with_details, commit_data_mutation_with_file_partitions,
+    commit_data_mutation_with_file_partitions_and_inline_deletes, commit_delete_inline_table_rows,
+    commit_drop_schema_rows, commit_drop_table_columns, commit_drop_views,
+    commit_merge_adjacent_data_files, commit_register_delete_files,
     commit_rewrite_delete_data_files, initialize_catalog_if_absent, latest_snapshot,
     list_current_data_files_by_partition_value, list_current_data_files_with_deletes,
     list_data_file_changes, list_data_files_at, list_file_column_stats,
@@ -231,26 +230,28 @@ fn mirrors_filter_pushdown_test_file_column_stats_are_saved_for_pruning() {
         "filter_pushdown",
         vec![column(1, "i", "integer")],
     );
-    commit_data_mutation_with_file_partitions_inline_deletes_stats_and_dropped_files(
+    commit_data_mutation_with_details(
         &mut kv,
         catalog,
-        vec![
-            data_file(1, table, 0, 1000),
-            data_file(2, table, 1000, 1000),
-            data_file(3, table, 2000, 1000),
-            data_file(4, table, 3000, 1),
-        ],
-        Vec::new(),
-        &[],
-        Vec::new(),
-        Vec::new(),
-        vec![
-            stats(1, table, 1, 0, Some("0"), Some("999")),
-            stats(2, table, 1, 0, Some("100000"), Some("100999")),
-            stats(3, table, 1, 0, Some("500000"), Some("500999")),
-            stats(4, table, 1, 0, Some("501000"), Some("501000")),
-        ],
-        Vec::new(),
+        ducklake_catalog::DataMutationInput {
+            data_files: vec![
+                data_file(1, table, 0, 1000),
+                data_file(2, table, 1000, 1000),
+                data_file(3, table, 2000, 1000),
+                data_file(4, table, 3000, 1),
+            ],
+            delete_files: Vec::new(),
+            inline_flushes: [].to_vec(),
+            partition_values: Vec::new(),
+            inline_file_deletions: Vec::new(),
+            file_column_stats: vec![
+                stats(1, table, 1, 0, Some("0"), Some("999")),
+                stats(2, table, 1, 0, Some("100000"), Some("100999")),
+                stats(3, table, 1, 0, Some("500000"), Some("500999")),
+                stats(4, table, 1, 0, Some("501000"), Some("501000")),
+            ],
+            dropped_data_file_ids: Vec::new(),
+        },
     )
     .unwrap();
 
@@ -306,16 +307,18 @@ fn mirrors_filter_stress_test_many_imported_file_stats_are_indexed_by_table_and_
             )
         })
         .collect::<Vec<_>>();
-    commit_data_mutation_with_file_partitions_inline_deletes_stats_and_dropped_files(
+    commit_data_mutation_with_details(
         &mut kv,
         catalog,
-        files,
-        Vec::new(),
-        &[],
-        Vec::new(),
-        Vec::new(),
-        file_stats,
-        Vec::new(),
+        ducklake_catalog::DataMutationInput {
+            data_files: files,
+            delete_files: Vec::new(),
+            inline_flushes: [].to_vec(),
+            partition_values: Vec::new(),
+            inline_file_deletions: Vec::new(),
+            file_column_stats: file_stats,
+            dropped_data_file_ids: Vec::new(),
+        },
     )
     .unwrap();
 
@@ -347,21 +350,23 @@ fn mirrors_global_stats_test_stats_for_multiple_types_are_persisted() {
             column(4, "b", "boolean"),
         ],
     );
-    commit_data_mutation_with_file_partitions_inline_deletes_stats_and_dropped_files(
+    commit_data_mutation_with_details(
         &mut kv,
         catalog,
-        vec![data_file(1, table, 0, 3)],
-        Vec::new(),
-        &[],
-        Vec::new(),
-        Vec::new(),
-        vec![
-            stats(1, table, 1, 1, Some("42"), Some("87")),
-            stats(1, table, 2, 0, Some("1992-01-01"), Some("2000-02-03")),
-            stats(1, table, 3, 0, Some("bye bye"), Some("hello wo")),
-            stats(1, table, 4, 0, Some("false"), Some("true")),
-        ],
-        Vec::new(),
+        ducklake_catalog::DataMutationInput {
+            data_files: vec![data_file(1, table, 0, 3)],
+            delete_files: Vec::new(),
+            inline_flushes: [].to_vec(),
+            partition_values: Vec::new(),
+            inline_file_deletions: Vec::new(),
+            file_column_stats: vec![
+                stats(1, table, 1, 1, Some("42"), Some("87")),
+                stats(1, table, 2, 0, Some("1992-01-01"), Some("2000-02-03")),
+                stats(1, table, 3, 0, Some("bye bye"), Some("hello wo")),
+                stats(1, table, 4, 0, Some("false"), Some("true")),
+            ],
+            dropped_data_file_ids: Vec::new(),
+        },
     )
     .unwrap();
 
@@ -392,27 +397,29 @@ fn mirrors_min_max_nested_leaf_rewrite_corruption_test_unrewritten_nested_leaf_s
         "t",
         vec![column(1, "i", "integer")],
     );
-    commit_data_mutation_with_file_partitions_inline_deletes_stats_and_dropped_files(
+    commit_data_mutation_with_details(
         &mut kv,
         catalog,
-        vec![data_file(1, table, 0, 50), data_file(2, table, 50, 50)],
-        vec![delete_file(1, 2, 1)],
-        &[],
-        Vec::new(),
-        Vec::new(),
-        vec![
-            stats(1, table, 1, 0, Some("1"), Some("50")),
-            stats(1, table, 3, 0, Some("1"), Some("50")),
-            stats(1, table, 5, 0, Some("1"), Some("50")),
-            stats(1, table, 7, 0, Some("1"), Some("50")),
-            stats(1, table, 8, 0, Some("2"), Some("100")),
-            stats(2, table, 1, 0, Some("51"), Some("100")),
-            stats(2, table, 3, 0, Some("51"), Some("100")),
-            stats(2, table, 5, 0, Some("51"), Some("100")),
-            stats(2, table, 7, 0, Some("51"), Some("100")),
-            stats(2, table, 8, 0, Some("102"), Some("200")),
-        ],
-        Vec::new(),
+        ducklake_catalog::DataMutationInput {
+            data_files: vec![data_file(1, table, 0, 50), data_file(2, table, 50, 50)],
+            delete_files: vec![delete_file(1, 2, 1)],
+            inline_flushes: [].to_vec(),
+            partition_values: Vec::new(),
+            inline_file_deletions: Vec::new(),
+            file_column_stats: vec![
+                stats(1, table, 1, 0, Some("1"), Some("50")),
+                stats(1, table, 3, 0, Some("1"), Some("50")),
+                stats(1, table, 5, 0, Some("1"), Some("50")),
+                stats(1, table, 7, 0, Some("1"), Some("50")),
+                stats(1, table, 8, 0, Some("2"), Some("100")),
+                stats(2, table, 1, 0, Some("51"), Some("100")),
+                stats(2, table, 3, 0, Some("51"), Some("100")),
+                stats(2, table, 5, 0, Some("51"), Some("100")),
+                stats(2, table, 7, 0, Some("51"), Some("100")),
+                stats(2, table, 8, 0, Some("102"), Some("200")),
+            ],
+            dropped_data_file_ids: Vec::new(),
+        },
     )
     .unwrap();
     rewrite(&mut kv, catalog, &[2], &[data_file(3, table, 50, 49)]);
@@ -445,16 +452,18 @@ fn mirrors_min_max_optimization_compaction_test_rewrite_can_store_tightened_repl
         "t",
         vec![column(1, "i", "integer")],
     );
-    commit_data_mutation_with_file_partitions_inline_deletes_stats_and_dropped_files(
+    commit_data_mutation_with_details(
         &mut kv,
         catalog,
-        vec![data_file(1, table, 0, 200)],
-        vec![delete_file(1, 1, 2)],
-        &[],
-        Vec::new(),
-        Vec::new(),
-        vec![stats(1, table, 1, 0, Some("1"), Some("200"))],
-        Vec::new(),
+        ducklake_catalog::DataMutationInput {
+            data_files: vec![data_file(1, table, 0, 200)],
+            delete_files: vec![delete_file(1, 1, 2)],
+            inline_flushes: [].to_vec(),
+            partition_values: Vec::new(),
+            inline_file_deletions: Vec::new(),
+            file_column_stats: vec![stats(1, table, 1, 0, Some("1"), Some("200"))],
+            dropped_data_file_ids: Vec::new(),
+        },
     )
     .unwrap();
     rewrite_with_stats(
@@ -492,16 +501,18 @@ fn mirrors_min_max_optimization_deletes_test_delete_file_keeps_original_stats_un
         "big",
         vec![column(1, "i", "integer")],
     );
-    commit_data_mutation_with_file_partitions_inline_deletes_stats_and_dropped_files(
+    commit_data_mutation_with_details(
         &mut kv,
         catalog,
-        vec![data_file(1, table, 0, 100)],
-        vec![delete_file(1, 1, 1)],
-        &[],
-        Vec::new(),
-        Vec::new(),
-        vec![stats(1, table, 1, 0, Some("1"), Some("100"))],
-        Vec::new(),
+        ducklake_catalog::DataMutationInput {
+            data_files: vec![data_file(1, table, 0, 100)],
+            delete_files: vec![delete_file(1, 1, 1)],
+            inline_flushes: [].to_vec(),
+            partition_values: Vec::new(),
+            inline_file_deletions: Vec::new(),
+            file_column_stats: vec![stats(1, table, 1, 0, Some("1"), Some("100"))],
+            dropped_data_file_ids: Vec::new(),
+        },
     )
     .unwrap();
 
@@ -530,54 +541,56 @@ fn mirrors_topn_file_pruning_test_timestamp_stats_keep_ordered_file_ranges() {
         "events",
         vec![column(1, "timestamp", "timestamp")],
     );
-    commit_data_mutation_with_file_partitions_inline_deletes_stats_and_dropped_files(
+    commit_data_mutation_with_details(
         &mut kv,
         catalog,
-        vec![
-            data_file(1, table, 0, 1000),
-            data_file(2, table, 1000, 500),
-            data_file(3, table, 1500, 200),
-            data_file(4, table, 1700, 100),
-        ],
-        Vec::new(),
-        &[],
-        Vec::new(),
-        Vec::new(),
-        vec![
-            stats(
-                1,
-                table,
-                1,
-                0,
-                Some("2026-01-01"),
-                Some("2026-01-01 00:16:39"),
-            ),
-            stats(
-                2,
-                table,
-                1,
-                0,
-                Some("2026-01-02"),
-                Some("2026-01-02 00:08:19"),
-            ),
-            stats(
-                3,
-                table,
-                1,
-                0,
-                Some("2026-01-03"),
-                Some("2026-01-03 00:03:19"),
-            ),
-            stats(
-                4,
-                table,
-                1,
-                0,
-                Some("2026-01-04"),
-                Some("2026-01-04 00:01:39"),
-            ),
-        ],
-        Vec::new(),
+        ducklake_catalog::DataMutationInput {
+            data_files: vec![
+                data_file(1, table, 0, 1000),
+                data_file(2, table, 1000, 500),
+                data_file(3, table, 1500, 200),
+                data_file(4, table, 1700, 100),
+            ],
+            delete_files: Vec::new(),
+            inline_flushes: [].to_vec(),
+            partition_values: Vec::new(),
+            inline_file_deletions: Vec::new(),
+            file_column_stats: vec![
+                stats(
+                    1,
+                    table,
+                    1,
+                    0,
+                    Some("2026-01-01"),
+                    Some("2026-01-01 00:16:39"),
+                ),
+                stats(
+                    2,
+                    table,
+                    1,
+                    0,
+                    Some("2026-01-02"),
+                    Some("2026-01-02 00:08:19"),
+                ),
+                stats(
+                    3,
+                    table,
+                    1,
+                    0,
+                    Some("2026-01-03"),
+                    Some("2026-01-03 00:03:19"),
+                ),
+                stats(
+                    4,
+                    table,
+                    1,
+                    0,
+                    Some("2026-01-04"),
+                    Some("2026-01-04 00:01:39"),
+                ),
+            ],
+            dropped_data_file_ids: Vec::new(),
+        },
     )
     .unwrap();
     assert_eq!(
@@ -1018,16 +1031,18 @@ fn mirrors_list_type_test_nested_list_column_stats_are_persisted() {
             column(2, "l.element", "integer"),
         ],
     );
-    commit_data_mutation_with_file_partitions_inline_deletes_stats_and_dropped_files(
+    commit_data_mutation_with_details(
         &mut kv,
         catalog,
-        vec![data_file(1, table, 0, 6)],
-        Vec::new(),
-        &[],
-        Vec::new(),
-        Vec::new(),
-        vec![stats(1, table, 2, 1, Some("1"), Some("7"))],
-        Vec::new(),
+        ducklake_catalog::DataMutationInput {
+            data_files: vec![data_file(1, table, 0, 6)],
+            delete_files: Vec::new(),
+            inline_flushes: [].to_vec(),
+            partition_values: Vec::new(),
+            inline_file_deletions: Vec::new(),
+            file_column_stats: vec![stats(1, table, 2, 1, Some("1"), Some("7"))],
+            dropped_data_file_ids: Vec::new(),
+        },
     )
     .unwrap();
     assert_eq!(
@@ -1058,16 +1073,18 @@ fn mirrors_struct_type_test_nested_struct_leaf_stats_are_persisted() {
             column(2, "s.i", "integer"),
         ],
     );
-    commit_data_mutation_with_file_partitions_inline_deletes_stats_and_dropped_files(
+    commit_data_mutation_with_details(
         &mut kv,
         catalog,
-        vec![data_file(1, table, 0, 5)],
-        Vec::new(),
-        &[],
-        Vec::new(),
-        Vec::new(),
-        vec![stats(1, table, 2, 1, Some("1"), Some("6"))],
-        Vec::new(),
+        ducklake_catalog::DataMutationInput {
+            data_files: vec![data_file(1, table, 0, 5)],
+            delete_files: Vec::new(),
+            inline_flushes: [].to_vec(),
+            partition_values: Vec::new(),
+            inline_file_deletions: Vec::new(),
+            file_column_stats: vec![stats(1, table, 2, 1, Some("1"), Some("6"))],
+            dropped_data_file_ids: Vec::new(),
+        },
     )
     .unwrap();
     let current = load_current_table(&kv, catalog, table);
@@ -1286,11 +1303,13 @@ fn view(id: u64, schema: SchemaId, name: &str, sql: &str) -> ViewRow {
     ViewRow::new(
         TableId(id),
         schema,
-        format!("view-{id}"),
-        name,
-        "duckdb",
-        sql,
-        Vec::new(),
+        ducklake_catalog::ViewDefinition::new(
+            format!("view-{id}"),
+            name,
+            "duckdb",
+            sql,
+            Vec::new(),
+        ),
         CatalogOrderId::uuid_v7(0),
     )
 }

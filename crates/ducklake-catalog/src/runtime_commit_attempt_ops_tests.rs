@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
+    use std::{collections::BTreeMap, time::Instant};
 
     use alloc_counter::{AllocationGuard, emit_report};
 
@@ -9,15 +9,20 @@ mod tests {
     use crate::runtime_inline_rows::{
         ReadInlineRowsPayload, read_inline_rows_global_stats_payload,
     };
+    #[cfg(feature = "foundationdb")]
+    use crate::runtime_protocol::RuntimeCatalogBackend;
+    #[cfg(feature = "foundationdb")]
+    use crate::runtime_schema_change_ops::RuntimeMutableCatalog;
     use crate::runtime_snapshot_range::ProposedCommitSnapshot;
     #[cfg(feature = "foundationdb")]
     use crate::runtime_snapshot_range::ReadSnapshot;
     use crate::{
-        CatalogId, ColumnId, FakeOrderedCatalogKv, SchemaId, SchemaRow, TableColumnRow, TableId,
-        TablePartitionFieldRow, TablePartitionRow, TableRow, TableSortFieldRow, TableSortRow,
-        ViewRow, commit_change_view_comment, commit_create_schema_rows, commit_create_table_row,
-        commit_create_view_row, commit_drop_schema_rows, initialize_catalog_if_absent,
-        latest_snapshot, list_schemas_at, load_table_at, load_view_at,
+        CatalogId, ColumnId, CommitAttemptId, FakeOrderedCatalogKv, RawSnapshotSequence, SchemaId,
+        SchemaRow, TableColumnRow, TableId, TablePartitionFieldRow, TablePartitionRow, TableRow,
+        TableSortFieldRow, TableSortRow, ViewRow, commit_change_view_comment,
+        commit_create_schema_rows, commit_create_table_row, commit_create_view_row,
+        commit_drop_schema_rows, initialize_catalog_if_absent, latest_snapshot, list_schemas_at,
+        list_tables_at, load_table_at, load_view_at,
     };
 
     #[test]
@@ -295,11 +300,13 @@ mod tests {
             ViewRow::new(
                 view_id,
                 SchemaId(0),
-                "view-uuid",
-                "comment_view",
-                "duckdb",
-                "SELECT 42",
-                vec!["42".to_owned()],
+                crate::ViewDefinition::new(
+                    "view-uuid",
+                    "comment_view",
+                    "duckdb",
+                    "SELECT 42",
+                    vec!["42".to_owned()],
+                ),
                 crate::CatalogOrderId::from_u128(0),
             ),
         )
@@ -341,11 +348,13 @@ mod tests {
             ViewRow::new(
                 view_id,
                 SchemaId(0),
-                "view-uuid",
-                "renamed_view",
-                "duckdb",
-                "SELECT 42",
-                vec!["42".to_owned()],
+                crate::ViewDefinition::new(
+                    "view-uuid",
+                    "renamed_view",
+                    "duckdb",
+                    "SELECT 42",
+                    vec!["42".to_owned()],
+                ),
                 crate::CatalogOrderId::from_u128(0),
             ),
         )
@@ -1372,6 +1381,42 @@ mod tests {
             error
                 .to_string()
                 .contains("table metadata changed after read snapshot")
+        );
+    }
+
+    #[test]
+    fn given_metadata_commit_is_retried_when_change_already_matches_then_storage_accepts_it() {
+        let catalog = CatalogId(1);
+        let table_id = TableId(1);
+        let mut kv = FakeOrderedCatalogKv::new();
+        initialize_catalog_if_absent(&mut kv, catalog).unwrap();
+        commit_create_table_row(&mut kv, catalog, table(table_id)).unwrap();
+        let intent = RuntimeCommitAttemptIntent {
+            read_snapshot: Some(DuckLakeSnapshotId(1)),
+            proposed_commit_snapshot: ProposedCommitSnapshot::new(CommitAttemptId(2)),
+            commit_metadata: SnapshotCommitMetadata::default(),
+            metadata_intents: vec![RuntimeMetadataIntent {
+                operation: RuntimeMetadataOperation::ChangePartitionKeys,
+                payload: b"partition\t1\t11\npartition_field\t1\t11\t0\t0\tidentity".to_vec(),
+            }],
+            compaction_intents: Vec::new(),
+            data_mutation_payload: Vec::new(),
+            inline_payloads: Vec::new(),
+        };
+        commit_metadata_intents_with_kv(&mut kv, catalog, &intent).unwrap();
+
+        commit_metadata_intents_with_kv(&mut kv, catalog, &intent).unwrap();
+
+        let latest = latest_snapshot(&kv, catalog).unwrap().unwrap();
+        let table = load_table_at(&kv, catalog, table_id, latest.order)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            table.partition,
+            Some(TablePartitionRow::new(
+                11,
+                vec![TablePartitionFieldRow::new(0, ColumnId(0), "identity")]
+            ))
         );
     }
 
