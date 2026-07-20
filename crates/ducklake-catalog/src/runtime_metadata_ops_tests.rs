@@ -21,11 +21,32 @@ mod tests {
         current_metadata_file_column_stats, current_metadata_file_partition_values,
         data_file_mirror_sql, data_file_rows_payload, delete_file_mirror_sql,
         delete_file_rows_payload, file_column_stats_mirror_sql, file_partition_values_mirror_sql,
+        initialization_metadata_settings, json_number_or_null,
         list_current_data_files_for_data_file_ids, list_delete_files_for_delete_file_ids,
         list_file_column_stats_for_data_file_ids, optional_metadata_payload_bool,
         scheduled_cleanup_mirror_sql, semantic_delete_begin_orders_for_rows,
         stats_snapshot_for_request,
     };
+
+    #[cfg(feature = "foundationdb")]
+    use super::super::{can_recompute_exact_inline_stats, global_stats_file_rows_from_payload};
+
+    #[test]
+    #[cfg(feature = "foundationdb")]
+    fn given_rewrite_snapshot_when_selecting_exact_inline_stats_then_requires_delete_free_files() {
+        let delete_free = global_stats_file_rows_from_payload(
+            b"file\t1\t2\tmain/t.parquet\t10\t100\t0\t\t\t\t\t\t\t\t1\t\t\t\t\t\t\t\t\n",
+        )
+        .unwrap();
+        let with_delete = global_stats_file_rows_from_payload(
+            b"file\t1\t2\tmain/t.parquet\t10\t100\t0\t\t9\tmain/d.parquet\t1\t10\t2\t\t1\t\t\t\t\t\t\t\t\n",
+        )
+        .unwrap();
+
+        assert!(can_recompute_exact_inline_stats(true, &delete_free));
+        assert!(!can_recompute_exact_inline_stats(false, &delete_free));
+        assert!(!can_recompute_exact_inline_stats(true, &with_delete));
+    }
 
     #[test]
     fn given_inline_schema_version_when_lookup_begin_snapshot_then_returns_raw_ducklake_snapshot_id()
@@ -66,13 +87,15 @@ mod tests {
     #[test]
     fn given_inline_column_without_bounds_when_merging_global_stats_then_file_min_max_are_cleared_but_extra_stats_survive()
      {
-        let mut stats = GlobalColumnStats::default();
-        stats.has_min = true;
-        stats.min_value = "POINT(0 0)".to_owned();
-        stats.has_max = true;
-        stats.max_value = "POINT(0 0)".to_owned();
-        stats.has_extra_stats = true;
-        stats.extra_stats = "{\"extent\":{\"x_min\":0}}".to_owned();
+        let mut stats = GlobalColumnStats {
+            has_min: true,
+            min_value: "POINT(0 0)".to_owned(),
+            has_max: true,
+            max_value: "POINT(0 0)".to_owned(),
+            has_extra_stats: true,
+            extra_stats: "{\"extent\":{\"x_min\":0}}".to_owned(),
+            ..GlobalColumnStats::default()
+        };
 
         stats.merge_inline(true, false, false, "", false, "");
 
@@ -82,6 +105,11 @@ mod tests {
         assert!(stats.max_value.is_empty());
         assert!(stats.has_extra_stats);
         assert_eq!(stats.extra_stats, "{\"extent\":{\"x_min\":0}}");
+    }
+
+    #[test]
+    fn given_integral_geometry_bound_when_rendering_json_then_number_remains_real() {
+        assert_eq!(json_number_or_null(Some(-2.0)), "-2.0");
     }
 
     #[test]
@@ -198,7 +226,8 @@ mod tests {
             12,
             4096,
             begin_order,
-        );
+        )
+        .with_encryption_key("AQIDBA==");
         data_file.validity.end_order = Some(end_order);
         data_file.max_partial_order = Some(partial_order);
         data_file.footer_size = Some(128);
@@ -209,6 +238,7 @@ mod tests {
         assert!(data_sql.contains("'main/table/a''b.parquet'"), "{data_sql}");
         assert!(data_sql.contains(", 10, 11, 7,"), "{data_sql}");
         assert!(data_sql.contains(", 128, 42,"), "{data_sql}");
+        assert!(data_sql.contains(", 'AQIDBA==', 99,"), "{data_sql}");
         assert!(data_sql.contains(", 99, 12);"), "{data_sql}");
 
         let partition_sql = file_partition_values_mirror_sql(vec![
@@ -253,17 +283,40 @@ mod tests {
             2,
             512,
             begin_order,
-        );
+        )
+        .with_encryption_key("BQYHCA==");
         delete_file.validity.end_order = Some(end_order);
         let delete_rows = vec![delete_file];
         let delete_sql = delete_file_mirror_sql(&delete_rows, &snapshots);
         assert!(delete_sql.contains("'delete''a.parquet'"), "{delete_sql}");
         assert!(delete_sql.contains(", 10, 11, 7,"), "{delete_sql}");
+        assert!(
+            delete_sql.contains(", 0, 'BQYHCA==', NULL);"),
+            "{delete_sql}"
+        );
 
         let cleanup_sql = scheduled_cleanup_mirror_sql(&delete_rows, &snapshots);
         assert!(
             cleanup_sql.contains("VALUES (5, 'delete''a.parquet', false, NOW());"),
             "{cleanup_sql}"
+        );
+    }
+
+    #[test]
+    fn given_encrypted_initialization_when_parsed_then_required_global_settings_are_preserved() {
+        let rows = initialization_metadata_settings(
+            b"version=1.0\ncreated_by=DuckDB test\ndata_path=/lake/data/\nencrypted=true\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            rows,
+            vec![
+                crate::MetadataSettingRow::global("version", "1.0"),
+                crate::MetadataSettingRow::global("created_by", "DuckDB test"),
+                crate::MetadataSettingRow::global("data_path", "/lake/data/"),
+                crate::MetadataSettingRow::global("encrypted", "true"),
+            ]
         );
     }
 

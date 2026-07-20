@@ -7,10 +7,9 @@ mod tests {
         resolve_data_file_visibility_orders, resolve_delete_file_visibility_orders,
     };
     use crate::{
-        CatalogId, CatalogOrderId, ColumnId, DataFileId, DeleteFileId, FakeOrderedCatalogKv,
-        InlinedTableRow, SchemaId, SnapshotRow, TableColumnRow, TableId, TableRow,
-        commit_create_table_row,
-        commit_data_mutation_with_file_partitions_inline_deletes_stats_and_dropped_files,
+        CatalogId, CatalogOrderId, ColumnId, DataFileId, DataMutationInput, DeleteFileId,
+        FakeOrderedCatalogKv, InlinedTableRow, SchemaId, SnapshotRow, TableColumnRow, TableId,
+        TableRow, commit_create_table_row, commit_data_mutation_with_details,
         initialize_catalog_if_absent, latest_snapshot, register_inline_table_payload_with_table,
         snapshot_changes_made,
     };
@@ -125,6 +124,32 @@ mod tests {
     }
 
     #[test]
+    fn given_encrypted_data_file_when_parsed_then_encryption_key_is_preserved() {
+        let mutation = data_mutation_payload_values(
+            b"file\t9\t10\tmain/orders/encrypted.parquet\t3\t1024\t0\t\t151\t4\t6\tAQIDBA==\n",
+        )
+        .unwrap();
+
+        assert!(
+            format!("{:?}", mutation.data_files[0]).contains("AQIDBA=="),
+            "parsed data-file metadata must retain the per-file encryption key"
+        );
+    }
+
+    #[test]
+    fn given_encrypted_delete_file_when_parsed_then_encryption_key_is_preserved() {
+        let mutation = data_mutation_payload_values(
+            b"delete_file\t30\t10\t9\tmain/orders/delete.parquet\t1\t64\t4\t6\tBQYHCA==\n",
+        )
+        .unwrap();
+
+        assert!(
+            format!("{:?}", mutation.materialized_delete_files[0].row()).contains("BQYHCA=="),
+            "parsed delete-file metadata must retain the per-file encryption key"
+        );
+    }
+
+    #[test]
     fn given_data_file_visibility_snapshot_ids_when_resolved_then_catalog_orders_are_typed() {
         let catalog = CatalogId(1);
         let (kv, snapshot) = catalog_with_single_table_snapshot(catalog, TableId(10));
@@ -134,9 +159,13 @@ mod tests {
         );
         let mutation = data_mutation_payload_values(payload.as_bytes()).unwrap();
 
-        let resolved =
-            resolve_data_file_visibility_orders(&kv, catalog, mutation.data_file_visibility[0])
-                .unwrap();
+        let resolved = resolve_data_file_visibility_orders(
+            &kv,
+            catalog,
+            mutation.data_file_visibility[0],
+            None,
+        )
+        .unwrap();
 
         assert_eq!(
             resolved,
@@ -164,9 +193,13 @@ mod tests {
                 .0,
             snapshot.sequence.0
         );
-        let resolved =
-            resolve_delete_file_visibility_orders(&kv, catalog, mutation.delete_file_visibility[0])
-                .unwrap();
+        let resolved = resolve_delete_file_visibility_orders(
+            &kv,
+            catalog,
+            mutation.delete_file_visibility[0],
+            None,
+        )
+        .unwrap();
 
         assert_eq!(
             resolved,
@@ -174,6 +207,33 @@ mod tests {
                 begin_order: snapshot.order,
                 max_partial_order: Some(snapshot.order),
             }
+        );
+    }
+
+    #[test]
+    fn given_delete_max_partial_snapshot_is_current_commit_when_resolved_then_order_is_versionstamped()
+     {
+        let catalog = CatalogId(1);
+        let (kv, snapshot) = catalog_with_single_table_snapshot(catalog, TableId(10));
+        let proposed_sequence = snapshot.sequence.0 + 1;
+        let payload = format!(
+            "commit_snapshot\t{proposed_sequence}\ndelete_file\t30\t10\t9\tmain/orders/delete.parquet\t1\t64\t{}\t{proposed_sequence}\n",
+            snapshot.sequence.0
+        );
+        let mutation = data_mutation_payload_values(payload.as_bytes()).unwrap();
+
+        let resolved = resolve_delete_file_visibility_orders(
+            &kv,
+            catalog,
+            mutation.delete_file_visibility[0],
+            mutation.proposed_commit_snapshot,
+        )
+        .unwrap();
+
+        assert_eq!(resolved.begin_order, snapshot.order);
+        assert_eq!(
+            resolved.max_partial_order,
+            Some(crate::ids::incomplete_fdb_order())
         );
     }
 
@@ -271,16 +331,14 @@ mod tests {
             inline_snapshot.sequence
         );
 
-        commit_data_mutation_with_file_partitions_inline_deletes_stats_and_dropped_files(
+        commit_data_mutation_with_details(
             &mut kv,
             catalog,
-            mutation.data_files,
-            Vec::new(),
-            &mutation.inline_flushes,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
+            DataMutationInput {
+                data_files: mutation.data_files,
+                inline_flushes: mutation.inline_flushes,
+                ..DataMutationInput::default()
+            },
         )
         .unwrap();
         let flush_snapshot = latest_snapshot(&kv, catalog).unwrap().unwrap();

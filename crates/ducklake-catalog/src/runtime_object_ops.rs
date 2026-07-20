@@ -114,11 +114,13 @@ pub(crate) fn create_view_rows(payload: &[u8]) -> CatalogResult<Vec<ViewRow>> {
                     ViewRow::new(
                         TableId(parse_u64_field(CREATE_VIEWS, id, "view id")?),
                         SchemaId(parse_u64_field(CREATE_VIEWS, schema_id, "view schema id")?),
-                        *uuid,
-                        *name,
-                        *dialect,
-                        *sql,
-                        parse_aliases(aliases),
+                        crate::ViewDefinition::new(
+                            *uuid,
+                            *name,
+                            *dialect,
+                            *sql,
+                            parse_aliases(aliases),
+                        ),
                         CatalogOrderId::uuid_v7(0),
                     )
                     .with_comment(empty_to_none(comment)),
@@ -343,10 +345,10 @@ fn comment_value(kind: &str, value: &str) -> CatalogResult<Option<String>> {
 }
 
 fn finish_impl(current: &mut Option<MacroRow>, current_impl: &mut Option<MacroImplementationRow>) {
-    if let Some(implementation) = current_impl.take() {
-        if let Some(macro_row) = current.as_mut() {
-            macro_row.implementations.push(implementation);
-        }
+    if let Some(implementation) = current_impl.take()
+        && let Some(macro_row) = current.as_mut()
+    {
+        macro_row.implementations.push(implementation);
     }
 }
 

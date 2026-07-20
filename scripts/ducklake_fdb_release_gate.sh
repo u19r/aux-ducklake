@@ -32,10 +32,12 @@ run_gate parity_inline env CARGO_TARGET_DIR=target/codex-validation AUX_DUCKLAKE
 run_gate upstream_postgres env AUX_DUCKLAKE_REUSE_DUCKLAKE_BUILD=1 AUX_DUCKLAKE_UPSTREAM_ARTIFACT_DIR="$EVIDENCE_DIR/upstream-postgres-$UPSTREAM_MODE" "$ROOT_DIR/scripts/ducklake_upstream_catalog_tests.sh" postgres "$UPSTREAM_MODE"
 run_gate upstream_fdb env CARGO_TARGET_DIR=target/codex-validation AUX_DUCKLAKE_REUSE_DUCKLAKE_BUILD=1 AUX_DUCKLAKE_UPSTREAM_ARTIFACT_DIR="$EVIDENCE_DIR/upstream-fdb-$UPSTREAM_MODE" "$ROOT_DIR/scripts/ducklake_upstream_catalog_tests.sh" fdb "$UPSTREAM_MODE"
 run_gate upstream_disabled_diff "$ROOT_DIR/scripts/ducklake_upstream_disabled_diff.sh"
+run_gate release_build env CARGO_TARGET_DIR=target/codex-validation just ducklake-build-release-local
 run_gate benchmark_profile env CARGO_TARGET_DIR=target/codex-validation just ducklake-catalog-benchmark-profile "$SCAN_FILES"
 run_gate chaos env CARGO_TARGET_DIR=target/codex-validation just ducklake-fdb-chaos
 run_gate concurrency env CARGO_TARGET_DIR=target/codex-validation just ducklake-fdb-concurrency
 run_gate runtime_smoke env CARGO_TARGET_DIR=target/codex-validation AUX_DUCKLAKE_REUSE_DUCKLAKE_BUILD=1 just ducklake-fdb-runtime-smoke
+run_gate encryption env CARGO_TARGET_DIR=target/codex-validation AUX_DUCKLAKE_REUSE_DUCKLAKE_BUILD=1 just ducklake-fdb-encryption
 run_gate prefix_clone env CARGO_TARGET_DIR=target/codex-validation AUX_DUCKLAKE_REUSE_DUCKLAKE_BUILD=1 just ducklake-fdb-prefix-clone-drill
 run_gate soak env CARGO_TARGET_DIR=target/codex-validation AUX_DUCKLAKE_REUSE_DUCKLAKE_BUILD=1 AUX_DUCKLAKE_FDB_SOAK_ITERATIONS="${AUX_DUCKLAKE_FDB_SOAK_ITERATIONS:-20}" "$ROOT_DIR/scripts/ducklake_fdb_soak.sh"
 

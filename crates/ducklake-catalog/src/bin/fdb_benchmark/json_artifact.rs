@@ -19,10 +19,7 @@ impl BatchResult {
     }
 
     pub(crate) fn operation(mut self, key: impl Into<String>, value: impl TryInto<u64>) -> Self {
-        let value = match value.try_into() {
-            Ok(value) => value,
-            Err(_) => u64::MAX,
-        };
+        let value = value.try_into().unwrap_or(u64::MAX);
         self.operation_counts.push((key.into(), value));
         self
     }

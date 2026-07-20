@@ -3,6 +3,8 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 #[cfg(not(test))]
+use crate::CatalogCacheNamespace;
+#[cfg(not(test))]
 use crate::bounded_cache::{BoundedCache, static_bounded_cache};
 #[cfg(feature = "runtime-metrics")]
 use crate::runtime_metrics::record_runtime_method_elapsed;
@@ -41,6 +43,7 @@ static CONFLICT_SNAPSHOT_PAYLOAD_CACHE: OnceLock<
 #[cfg(not(test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct CatalogSnapshotPayloadCacheKey {
+    namespace: CatalogCacheNamespace,
     catalog: CatalogId,
     order: CatalogOrderId,
     kind: CatalogSnapshotIdKind,
@@ -49,6 +52,7 @@ struct CatalogSnapshotPayloadCacheKey {
 #[cfg(not(test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct ConflictSnapshotPayloadCacheKey {
+    namespace: CatalogCacheNamespace,
     catalog: CatalogId,
     order: CatalogOrderId,
 }
@@ -106,6 +110,7 @@ pub(crate) fn conflict_snapshot_payload_for_row(
     #[cfg(not(test))]
     {
         let key = ConflictSnapshotPayloadCacheKey {
+            namespace: kv.catalog_cache_namespace(),
             catalog,
             order: row.order,
         };
@@ -115,7 +120,7 @@ pub(crate) fn conflict_snapshot_payload_for_row(
         }
         let payload = render_conflict_snapshot_payload(kv, catalog, row)?;
         cache.insert(key, payload.clone());
-        return Ok(payload);
+        Ok(payload)
     }
     #[cfg(test)]
     {
@@ -222,6 +227,7 @@ pub(crate) fn catalog_snapshot_payload_with_kind(
     #[cfg(not(test))]
     {
         let key = CatalogSnapshotPayloadCacheKey {
+            namespace: kv.catalog_cache_namespace(),
             catalog,
             order: requested.order,
             kind,
@@ -233,7 +239,7 @@ pub(crate) fn catalog_snapshot_payload_with_kind(
         let catalog_context = request.snapshot_context_for(kv, catalog, requested)?;
         let payload = render_catalog_snapshot_payload(catalog_context);
         cache.insert(key, payload.clone());
-        return Ok(payload);
+        Ok(payload)
     }
     #[cfg(test)]
     {

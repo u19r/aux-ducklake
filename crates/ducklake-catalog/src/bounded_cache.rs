@@ -36,13 +36,6 @@ where
         }
     }
 
-    pub(crate) fn remove(&self, key: K) {
-        let Ok(mut entries) = self.entries.lock() else {
-            return;
-        };
-        entries.remove(&key);
-    }
-
     pub(crate) fn retain(&self, mut keep: impl FnMut(&K, &V) -> bool) {
         let Ok(mut entries) = self.entries.lock() else {
             return;

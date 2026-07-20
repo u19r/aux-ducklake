@@ -130,7 +130,7 @@ pub(crate) fn create_tables_payload_values(
                         table.table_id.0
                     )));
                 }
-                table.columns.push(table_column_row(
+                table.columns.push(table_column_row(TableColumnInput {
                     column_id,
                     name,
                     column_type,
@@ -140,7 +140,7 @@ pub(crate) fn create_tables_payload_values(
                     initial_default,
                     default_value,
                     default_value_type,
-                )?);
+                })?);
             }
             _ => return Err(row.invalid()),
         }
@@ -204,7 +204,7 @@ pub(crate) fn replace_tables_payload_values(
                         table.table_id.0
                     )));
                 }
-                table.columns.push(table_column_row(
+                table.columns.push(table_column_row(TableColumnInput {
                     column_id,
                     name,
                     column_type,
@@ -214,7 +214,7 @@ pub(crate) fn replace_tables_payload_values(
                     initial_default,
                     default_value,
                     default_value_type,
-                )?);
+                })?);
             }
             _ => return Err(row.invalid()),
         }
@@ -303,39 +303,45 @@ fn table_row(
     Ok(table)
 }
 
-fn table_column_row(
-    column_id: &str,
-    name: &str,
-    column_type: &str,
-    nulls_allowed: &str,
-    parent_id: &str,
-    comment: &str,
-    initial_default: &str,
-    default_value: &str,
-    default_value_type: &str,
-) -> CatalogResult<TableColumnRow> {
-    let parent_id = if parent_id.is_empty() {
+struct TableColumnInput<'a> {
+    column_id: &'a str,
+    name: &'a str,
+    column_type: &'a str,
+    nulls_allowed: &'a str,
+    parent_id: &'a str,
+    comment: &'a str,
+    initial_default: &'a str,
+    default_value: &'a str,
+    default_value_type: &'a str,
+}
+
+fn table_column_row(input: TableColumnInput<'_>) -> CatalogResult<TableColumnRow> {
+    let parent_id = if input.parent_id.is_empty() {
         None
     } else {
         Some(ColumnId(parse_u64_field(
             CREATE_TABLES,
-            parent_id,
+            input.parent_id,
             "column parent id",
         )?))
     };
     Ok(TableColumnRow::new(
-        ColumnId(parse_u64_field(CREATE_TABLES, column_id, "column id")?),
-        name.to_owned(),
-        column_type.to_owned(),
-        parse_bool_field(CREATE_TABLES, nulls_allowed, "column nulls_allowed")?,
+        ColumnId(parse_u64_field(
+            CREATE_TABLES,
+            input.column_id,
+            "column id",
+        )?),
+        input.name.to_owned(),
+        input.column_type.to_owned(),
+        parse_bool_field(CREATE_TABLES, input.nulls_allowed, "column nulls_allowed")?,
         parent_id,
     )
     .with_default_metadata(
-        empty_to_none(initial_default),
-        default_value_to_option(default_value, default_value_type),
-        default_value_type.to_owned(),
+        empty_to_none(input.initial_default),
+        default_value_to_option(input.default_value, input.default_value_type),
+        input.default_value_type.to_owned(),
     )
-    .with_comment(empty_to_none(comment)))
+    .with_comment(empty_to_none(input.comment)))
 }
 
 pub(crate) fn create_tables_payload(

@@ -110,6 +110,7 @@ pub(crate) fn snapshot_schema_versions_by_order_shared(
             return Ok(SharedOrderMap::new(BTreeMap::new()));
         };
         let key = CatalogVersionCacheKey {
+            namespace: kv.catalog_cache_namespace(),
             catalog,
             latest_order: latest.order,
         };
@@ -152,6 +153,7 @@ fn snapshot_schema_versions_by_order_uncached(
 #[cfg(not(test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct CatalogVersionCacheKey {
+    namespace: crate::CatalogCacheNamespace,
     catalog: CatalogId,
     latest_order: CatalogOrderId,
 }
@@ -502,14 +504,15 @@ impl SnapshotReadContext {
         #[cfg(not(test))]
         {
             let latest = latest_snapshot(kv, catalog)?.map(|snapshot| snapshot.order);
+            let key = (kv.catalog_cache_namespace(), catalog);
             let cache = snapshot_read_context_cache();
-            if let Some(context) = cache.get(catalog)
+            if let Some(context) = cache.get(key)
                 && context.latest_order_is(latest)
             {
                 return Ok(context);
             }
             let context = Self::load(kv, catalog)?;
-            cache.insert(catalog, context.clone());
+            cache.insert(key, context.clone());
             Ok(context)
         }
     }
@@ -525,14 +528,15 @@ impl SnapshotReadContext {
         #[cfg(not(test))]
         {
             let latest = latest_snapshot(kv, catalog)?.map(|snapshot| snapshot.order);
+            let key = (kv.catalog_cache_namespace(), catalog);
             let cache = snapshot_read_context_cache();
-            if let Some(context) = cache.get(catalog)
+            if let Some(context) = cache.get(key)
                 && context.latest_order_is(latest)
             {
                 return Ok(context);
             }
             let context = Self::load(kv, catalog)?;
-            cache.insert(catalog, context.clone());
+            cache.insert(key, context.clone());
             Ok(context)
         }
     }
@@ -545,18 +549,19 @@ impl SnapshotReadContext {
         #[cfg(test)]
         {
             let _ = snapshot_id;
-            return Self::load(kv, catalog);
+            Self::load(kv, catalog)
         }
         #[cfg(not(test))]
         {
+            let key = (kv.catalog_cache_namespace(), catalog);
             let cache = snapshot_read_context_cache();
-            if let Some(context) = cache.get(catalog)
+            if let Some(context) = cache.get(key)
                 && context.public_snapshot(snapshot_id).is_some()
             {
                 return Ok(context);
             }
             let context = Self::load(kv, catalog)?;
-            cache.insert(catalog, context.clone());
+            cache.insert(key, context.clone());
             Ok(context)
         }
     }
@@ -569,18 +574,19 @@ impl SnapshotReadContext {
         #[cfg(test)]
         {
             let _ = snapshot_id;
-            return Self::load(kv, catalog);
+            Self::load(kv, catalog)
         }
         #[cfg(not(test))]
         {
+            let key = (kv.catalog_cache_namespace(), catalog);
             let cache = snapshot_read_context_cache();
-            if let Some(context) = cache.get(catalog)
+            if let Some(context) = cache.get(key)
                 && context.ducklake_snapshot(snapshot_id).is_some()
             {
                 return Ok(context);
             }
             let context = Self::load(kv, catalog)?;
-            cache.insert(catalog, context.clone());
+            cache.insert(key, context.clone());
             Ok(context)
         }
     }
@@ -759,11 +765,13 @@ fn schema_versions_by_order_from_loaded_facts(
 }
 
 #[cfg(not(test))]
-static SNAPSHOT_READ_CONTEXT_CACHE: OnceLock<BoundedCache<CatalogId, SnapshotReadContext>> =
-    OnceLock::new();
+static SNAPSHOT_READ_CONTEXT_CACHE: OnceLock<
+    BoundedCache<(crate::CatalogCacheNamespace, CatalogId), SnapshotReadContext>,
+> = OnceLock::new();
 
 #[cfg(not(test))]
-fn snapshot_read_context_cache() -> &'static BoundedCache<CatalogId, SnapshotReadContext> {
+fn snapshot_read_context_cache()
+-> &'static BoundedCache<(crate::CatalogCacheNamespace, CatalogId), SnapshotReadContext> {
     static_bounded_cache(&SNAPSHOT_READ_CONTEXT_CACHE, 64)
 }
 
@@ -847,8 +855,9 @@ pub(crate) fn public_snapshot_sequences_by_order_shared(
     #[cfg(not(test))]
     {
         let latest = latest_snapshot(kv, catalog)?.map(|snapshot| snapshot.order);
+        let key = (kv.catalog_cache_namespace(), catalog);
         let cache = snapshot_read_context_cache();
-        if let Some(context) = cache.get(catalog)
+        if let Some(context) = cache.get(key)
             && context.latest_order_is(latest)
         {
             record_public_snapshot_sequences_cache("Hit", RuntimeMetricStage::zero());
@@ -858,7 +867,7 @@ pub(crate) fn public_snapshot_sequences_by_order_shared(
         let context = SnapshotReadContext::load(kv, catalog)?;
         let sequences = context.sequences_by_order();
         record_public_snapshot_sequences_cache("Load", started);
-        cache.insert(catalog, context);
+        cache.insert(key, context);
         Ok(sequences)
     }
 }
@@ -875,8 +884,9 @@ pub(crate) fn public_snapshot_sequences_by_order_containing(
     }
     #[cfg(not(test))]
     {
+        let key = (kv.catalog_cache_namespace(), catalog);
         let cache = snapshot_read_context_cache();
-        if let Some(context) = cache.get(catalog)
+        if let Some(context) = cache.get(key)
             && context.sequences_by_order().get(&required_order).is_some()
         {
             record_public_snapshot_sequences_cache("Hit", RuntimeMetricStage::zero());
@@ -886,7 +896,7 @@ pub(crate) fn public_snapshot_sequences_by_order_containing(
         let context = SnapshotReadContext::load(kv, catalog)?;
         let sequences = context.sequences_by_order();
         record_public_snapshot_sequences_cache("Load", started);
-        cache.insert(catalog, context);
+        cache.insert(key, context);
         Ok(sequences)
     }
 }
@@ -962,13 +972,12 @@ fn selected_snapshots(
             .collect::<BTreeSet<_>>();
         snapshots.retain(|snapshot| requested.contains(&snapshot.sequence));
     }
-    if payload.protect_latest {
-        if let Some(latest) = list_snapshots(kv, catalog)?
+    if payload.protect_latest
+        && let Some(latest) = list_snapshots(kv, catalog)?
             .into_iter()
             .max_by_key(|row| row.sequence)
-        {
-            snapshots.retain(|snapshot| snapshot.sequence != latest.sequence);
-        }
+    {
+        snapshots.retain(|snapshot| snapshot.sequence != latest.sequence);
     }
     Ok(snapshots)
 }
@@ -984,7 +993,7 @@ fn push_snapshot(
 ) -> CatalogResult<()> {
     let snapshot = &snapshots[snapshot_index];
     let watermarks = snapshot_watermarks(kv, catalog, snapshot.representative.order)?;
-    let changes_made = public_snapshot_changes_made(kv, catalog, &snapshot)?;
+    let changes_made = public_snapshot_changes_made(kv, catalog, snapshot)?;
     let changes_made = if changes_made.is_empty()
         && snapshot.representative.sequence == crate::RawSnapshotSequence::initial()
     {
@@ -1768,7 +1777,7 @@ fn snapshot_inline_row_changed_table_ids_at(
 ) -> CatalogResult<BTreeSet<crate::TableId>> {
     #[cfg(test)]
     {
-        return snapshot_inline_row_changed_table_ids_at_uncached(kv, catalog, order, kind);
+        snapshot_inline_row_changed_table_ids_at_uncached(kv, catalog, order, kind)
     }
     #[cfg(not(test))]
     {
@@ -1897,6 +1906,7 @@ fn inline_row_change_index(
         });
     };
     let key = CatalogVersionCacheKey {
+        namespace: kv.catalog_cache_namespace(),
         catalog,
         latest_order: latest.order,
     };

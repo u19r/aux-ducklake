@@ -1,0 +1,38 @@
+{
+  "artifact": "ducklake-fdb-feature-parity-realistic-benchmark",
+  "profile": "profile",
+  "generated_at_micros": 1784479612255945,
+  "elapsed_ms": 1763.981,
+  "fixture": {
+    "backend": "fdb",
+    "duckdb_build_profile": "release",
+    "scan_rows": "1000",
+    "parallel_workers": "4",
+    "workload": "same-duckdb-sql"
+  },
+  "batches": [
+    {
+      "name": "same_duckdb_sql_workload",
+      "duration_ms": 1763.981,
+      "labels": {
+        "latest_scan": "997,500478",
+        "time_travel_scan": "1000,500500",
+        "inline_latest": "34,678",
+        "inline_time_travel": "37,703",
+        "inline_after_flush": "34,678",
+        "parallel_latest": "4,997,500478",
+        "compaction_cleanup": "997,500478,2,0"
+},
+      "operation_counts": {
+        "small_write_batches": 7,
+        "narrow_delete_statements": 4,
+        "parallel_workers": 4
+      },
+      "transaction_estimates": {
+        "columns_per_table": "24",
+        "inline_insert_batch_rows": "5,12,20",
+        "file_insert_batch_rows": "5,10,20,965"
+      }
+    }
+  ]
+}

@@ -520,7 +520,7 @@ fn recover_committed_tables(
         .iter()
         .map(|table| {
             recover_committed_table(kv, catalog, attempt.commit_order, table)?
-                .ok_or_else(|| CatalogError::NotFound("committed table"))
+                .ok_or(CatalogError::NotFound("committed table"))
         })
         .collect::<CatalogResult<Vec<_>>>()
         .map(Some)

@@ -77,19 +77,22 @@ macro_rules! record_snapshot_list_callsite {
 }
 
 #[cfg(not(test))]
-static LATEST_SNAPSHOT_CACHE: OnceLock<BoundedCache<CatalogId, Option<SnapshotRow>>> =
-    OnceLock::new();
+static LATEST_SNAPSHOT_CACHE: OnceLock<
+    BoundedCache<(crate::CatalogCacheNamespace, CatalogId), Option<SnapshotRow>>,
+> = OnceLock::new();
 
 #[cfg(not(test))]
-static SNAPSHOT_LIST_CACHE: OnceLock<BoundedCache<CatalogId, Vec<SnapshotRow>>> = OnceLock::new();
+static SNAPSHOT_LIST_CACHE: OnceLock<
+    BoundedCache<(crate::CatalogCacheNamespace, CatalogId), Vec<SnapshotRow>>,
+> = OnceLock::new();
 
 #[cfg(not(test))]
 pub(crate) fn invalidate_runtime_read_context(catalog: CatalogId) {
     if let Some(cache) = LATEST_SNAPSHOT_CACHE.get() {
-        cache.remove(catalog);
+        cache.retain(|(_, cached_catalog), _| *cached_catalog != catalog);
     }
     if let Some(cache) = SNAPSHOT_LIST_CACHE.get() {
-        cache.remove(catalog);
+        cache.retain(|(_, cached_catalog), _| *cached_catalog != catalog);
     }
     crate::runtime_read_context::invalidate_catalog_read_context(catalog);
     crate::runtime_file_listing::invalidate_file_listing_read_context(catalog);
@@ -133,8 +136,10 @@ pub fn latest_snapshot(
     catalog: CatalogId,
 ) -> CatalogResult<Option<SnapshotRow>> {
     #[cfg(not(test))]
+    let cache_key = (kv.catalog_cache_namespace(), catalog);
+    #[cfg(not(test))]
     if runtime_read_context_enabled()
-        && let Some(snapshot) = latest_snapshot_cache().get(catalog)
+        && let Some(snapshot) = latest_snapshot_cache().get(cache_key)
     {
         return Ok(snapshot);
     }
@@ -143,7 +148,7 @@ pub fn latest_snapshot(
     let result = result.row?;
     #[cfg(not(test))]
     if runtime_read_context_enabled() {
-        latest_snapshot_cache().insert(catalog, result.clone());
+        latest_snapshot_cache().insert(cache_key, result.clone());
     }
     Ok(result)
 }
@@ -195,8 +200,10 @@ pub fn list_snapshots(
     catalog: CatalogId,
 ) -> CatalogResult<Vec<SnapshotRow>> {
     #[cfg(not(test))]
+    let cache_key = (kv.catalog_cache_namespace(), catalog);
+    #[cfg(not(test))]
     if runtime_read_context_enabled()
-        && let Some(snapshots) = snapshot_list_cache().get(catalog)
+        && let Some(snapshots) = snapshot_list_cache().get(cache_key)
     {
         return Ok(snapshots);
     }
@@ -226,7 +233,7 @@ pub fn list_snapshots(
     record_snapshot_list_callsite!("list_snapshots", started);
     #[cfg(not(test))]
     if runtime_read_context_enabled() {
-        snapshot_list_cache().insert(catalog, rows.clone());
+        snapshot_list_cache().insert(cache_key, rows.clone());
     }
     Ok(rows)
 }
@@ -237,8 +244,10 @@ pub fn list_all_snapshots(
     catalog: CatalogId,
 ) -> CatalogResult<Vec<SnapshotRow>> {
     #[cfg(not(test))]
+    let cache_key = (kv.catalog_cache_namespace(), catalog);
+    #[cfg(not(test))]
     if runtime_read_context_enabled()
-        && let Some(snapshots) = snapshot_list_cache().get(catalog)
+        && let Some(snapshots) = snapshot_list_cache().get(cache_key)
     {
         return Ok(snapshots);
     }
@@ -256,18 +265,20 @@ pub fn list_all_snapshots(
     let rows = rows?;
     #[cfg(not(test))]
     if runtime_read_context_enabled() {
-        snapshot_list_cache().insert(catalog, rows.clone());
+        snapshot_list_cache().insert(cache_key, rows.clone());
     }
     Ok(rows)
 }
 
 #[cfg(not(test))]
-fn latest_snapshot_cache() -> &'static BoundedCache<CatalogId, Option<SnapshotRow>> {
+fn latest_snapshot_cache()
+-> &'static BoundedCache<(crate::CatalogCacheNamespace, CatalogId), Option<SnapshotRow>> {
     static_bounded_cache(&LATEST_SNAPSHOT_CACHE, 16)
 }
 
 #[cfg(not(test))]
-fn snapshot_list_cache() -> &'static BoundedCache<CatalogId, Vec<SnapshotRow>> {
+fn snapshot_list_cache()
+-> &'static BoundedCache<(crate::CatalogCacheNamespace, CatalogId), Vec<SnapshotRow>> {
     static_bounded_cache(&SNAPSHOT_LIST_CACHE, 16)
 }
 

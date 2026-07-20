@@ -3,11 +3,10 @@ use ducklake_catalog::{
     ColumnTypeChange, DataFileId, DataFileRow, FakeOrderedCatalogKv, FilePartitionValueRow,
     MergeAdjacentCompaction, PartitionKeyIndex, RewriteDeleteCompaction, SchemaId, TableColumnRow,
     TableId, TableRow, commit_append_data_files, commit_append_table_columns,
-    commit_change_table_column_types, commit_create_table_row,
+    commit_change_table_column_types, commit_create_table_row, commit_data_mutation_with_details,
     commit_data_mutation_with_file_partitions,
-    commit_data_mutation_with_file_partitions_and_inline_deletes,
-    commit_data_mutation_with_file_partitions_inline_deletes_and_dropped_files,
-    commit_drop_table_columns, commit_drop_tables, commit_merge_adjacent_data_files,
+    commit_data_mutation_with_file_partitions_and_inline_deletes, commit_drop_table_columns,
+    commit_drop_tables, commit_merge_adjacent_data_files,
     commit_merge_adjacent_data_files_with_conflict_check, commit_rename_table_columns,
     commit_rewrite_delete_data_files, expire_snapshots, initialize_catalog_if_absent,
     latest_snapshot, list_catalog_debug_rows, list_current_data_files_by_partition_value,
@@ -247,15 +246,18 @@ fn mirrors_compaction_delete_conflict_test_stale_merge_rewrite_is_rejected() {
     );
     assert!(accepted.is_ok());
 
-    let stale_drop = commit_data_mutation_with_file_partitions_inline_deletes_and_dropped_files(
+    let stale_drop = commit_data_mutation_with_details(
         &mut kv,
         catalog,
-        Vec::new(),
-        Vec::new(),
-        &[],
-        Vec::new(),
-        Vec::new(),
-        vec![DataFileId(2), DataFileId(4)],
+        ducklake_catalog::DataMutationInput {
+            data_files: Vec::new(),
+            delete_files: Vec::new(),
+            inline_flushes: [].to_vec(),
+            partition_values: Vec::new(),
+            inline_file_deletions: Vec::new(),
+            dropped_data_file_ids: vec![DataFileId(2), DataFileId(4)],
+            ..ducklake_catalog::DataMutationInput::default()
+        },
     );
     assert!(stale_drop.is_err());
 }

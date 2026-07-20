@@ -83,7 +83,11 @@ fn stage_metadata_setting(batch: &mut KvBatch, catalog: CatalogId, row: &Metadat
     );
 }
 
-fn metadata_setting_key(catalog: CatalogId, scope: MetadataSettingScope, key: &str) -> Vec<u8> {
+pub(crate) fn metadata_setting_key(
+    catalog: CatalogId,
+    scope: MetadataSettingScope,
+    key: &str,
+) -> Vec<u8> {
     let mut out = family_prefix(catalog, KeyFamily::MetadataSetting);
     match scope {
         MetadataSettingScope::Global => out.push(b'g'),

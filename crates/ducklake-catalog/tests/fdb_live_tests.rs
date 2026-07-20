@@ -617,18 +617,20 @@ fn fdb_live_file_cleanup_removes_only_expired_unreachable_metadata_when_enabled(
         .commit_data_mutation_versionstamped(
             catalog,
             None,
-            Vec::new(),
-            vec![DeleteFileRow::new(
-                DeleteFileId(8300),
-                current_file.data_file_id,
-                "cleanup-delete-old.parquet",
-                1,
-                10,
-                current_file.validity.begin_order,
-            )],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
+            ducklake_catalog::FdbDataMutation::new(
+                Vec::new(),
+                vec![DeleteFileRow::new(
+                    DeleteFileId(8300),
+                    current_file.data_file_id,
+                    "cleanup-delete-old.parquet",
+                    1,
+                    10,
+                    current_file.validity.begin_order,
+                )],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap()
         .delete_files
@@ -639,18 +641,20 @@ fn fdb_live_file_cleanup_removes_only_expired_unreachable_metadata_when_enabled(
     kv.commit_data_mutation_versionstamped(
         catalog,
         None,
-        Vec::new(),
-        vec![DeleteFileRow::new(
-            DeleteFileId(8301),
-            current_file.data_file_id,
-            "cleanup-delete-current.parquet",
-            1,
-            10,
-            current_file.validity.begin_order,
-        )],
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
+        ducklake_catalog::FdbDataMutation::new(
+            Vec::new(),
+            vec![DeleteFileRow::new(
+                DeleteFileId(8301),
+                current_file.data_file_id,
+                "cleanup-delete-current.parquet",
+                1,
+                10,
+                current_file.validity.begin_order,
+            )],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ),
     )
     .unwrap();
     expire_snapshots(&mut kv, catalog, &[first_delete_snapshot.sequence]).unwrap();
@@ -719,35 +723,37 @@ fn fdb_live_data_mutation_can_delete_file_appended_in_same_commit_when_enabled()
     kv.commit_data_mutation_versionstamped(
         catalog,
         Some(CommitAttemptId(4001)),
-        vec![DataFileRow::new(
-            DataFileId(11),
-            table,
-            "mutation-new-file.parquet",
-            100,
-            1_024,
-            existing.validity.begin_order,
-        )],
-        vec![
-            DeleteFileRow::new(
-                DeleteFileId(20),
-                existing.data_file_id,
-                "mutation-delete-existing.parquet",
-                10,
-                512,
-                existing.validity.begin_order,
-            ),
-            DeleteFileRow::new(
-                DeleteFileId(21),
+        ducklake_catalog::FdbDataMutation::new(
+            vec![DataFileRow::new(
                 DataFileId(11),
-                "mutation-delete-new-file.parquet",
-                15,
-                512,
+                table,
+                "mutation-new-file.parquet",
+                100,
+                1_024,
                 existing.validity.begin_order,
-            ),
-        ],
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
+            )],
+            vec![
+                DeleteFileRow::new(
+                    DeleteFileId(20),
+                    existing.data_file_id,
+                    "mutation-delete-existing.parquet",
+                    10,
+                    512,
+                    existing.validity.begin_order,
+                ),
+                DeleteFileRow::new(
+                    DeleteFileId(21),
+                    DataFileId(11),
+                    "mutation-delete-new-file.parquet",
+                    15,
+                    512,
+                    existing.validity.begin_order,
+                ),
+            ],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ),
     )
     .unwrap();
 
@@ -883,18 +889,20 @@ fn fdb_live_delete_file_cleanup_rechecks_stale_candidate_before_removing_when_en
         .commit_data_mutation_versionstamped(
             catalog,
             None,
-            Vec::new(),
-            vec![DeleteFileRow::new(
-                DeleteFileId(7600),
-                data_file.data_file_id,
-                "delete-cleanup-race-old-delete.parquet",
-                1,
-                10,
-                data_file.validity.begin_order,
-            )],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
+            ducklake_catalog::FdbDataMutation::new(
+                Vec::new(),
+                vec![DeleteFileRow::new(
+                    DeleteFileId(7600),
+                    data_file.data_file_id,
+                    "delete-cleanup-race-old-delete.parquet",
+                    1,
+                    10,
+                    data_file.validity.begin_order,
+                )],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap()
         .delete_files
@@ -905,18 +913,20 @@ fn fdb_live_delete_file_cleanup_rechecks_stale_candidate_before_removing_when_en
     kv.commit_data_mutation_versionstamped(
         catalog,
         None,
-        Vec::new(),
-        vec![DeleteFileRow::new(
-            DeleteFileId(7601),
-            data_file.data_file_id,
-            "delete-cleanup-race-newer-delete.parquet",
-            1,
-            10,
-            first_delete.validity.begin_order,
-        )],
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
+        ducklake_catalog::FdbDataMutation::new(
+            Vec::new(),
+            vec![DeleteFileRow::new(
+                DeleteFileId(7601),
+                data_file.data_file_id,
+                "delete-cleanup-race-newer-delete.parquet",
+                1,
+                10,
+                first_delete.validity.begin_order,
+            )],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ),
     )
     .unwrap();
     expire_snapshots(&mut kv, catalog, &[first_delete_snapshot.sequence]).unwrap();
@@ -1150,22 +1160,24 @@ fn fdb_live_inline_rows_attach_read_and_emit_insert_cdf_when_enabled() {
         .commit_data_mutation_versionstamped(
             catalog,
             None,
-            vec![DataFileRow::new(
-                DataFileId(820),
-                table_id,
-                "inline-flush.parquet",
-                1,
-                10,
-                delete_snapshot.order,
-            )],
-            Vec::new(),
-            vec![ducklake_catalog::InlineTableFlush::new(
-                table_id,
-                schema_id,
-                delete_snapshot.sequence,
-            )],
-            Vec::new(),
-            Vec::new(),
+            ducklake_catalog::FdbDataMutation::new(
+                vec![DataFileRow::new(
+                    DataFileId(820),
+                    table_id,
+                    "inline-flush.parquet",
+                    1,
+                    10,
+                    delete_snapshot.order,
+                )],
+                Vec::new(),
+                vec![ducklake_catalog::InlineTableFlush::new(
+                    table_id,
+                    schema_id,
+                    delete_snapshot.sequence,
+                )],
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap();
     assert_eq!(flush.flushed_inline_count, 1);
@@ -1275,22 +1287,24 @@ fn fdb_live_given_inline_rows_already_flushed_when_stale_flush_replays_then_no_d
         .commit_data_mutation_versionstamped(
             catalog,
             None,
-            vec![DataFileRow::new(
-                DataFileId(831),
-                table_id,
-                "first-flush.parquet",
-                2,
-                128,
-                inline_snapshot.order,
-            )],
-            Vec::new(),
-            vec![InlineTableFlush::new(
-                table_id,
-                schema_id,
-                inline_snapshot.sequence,
-            )],
-            Vec::new(),
-            Vec::new(),
+            ducklake_catalog::FdbDataMutation::new(
+                vec![DataFileRow::new(
+                    DataFileId(831),
+                    table_id,
+                    "first-flush.parquet",
+                    2,
+                    128,
+                    inline_snapshot.order,
+                )],
+                Vec::new(),
+                vec![InlineTableFlush::new(
+                    table_id,
+                    schema_id,
+                    inline_snapshot.sequence,
+                )],
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap();
     assert_eq!(first_flush.flushed_inline_count, 1);
@@ -1305,22 +1319,24 @@ fn fdb_live_given_inline_rows_already_flushed_when_stale_flush_replays_then_no_d
         .commit_data_mutation_versionstamped(
             catalog,
             None,
-            vec![DataFileRow::new(
-                DataFileId(832),
-                table_id,
-                "stale-replay.parquet",
-                2,
-                128,
-                inline_snapshot.order,
-            )],
-            Vec::new(),
-            vec![InlineTableFlush::new(
-                table_id,
-                schema_id,
-                flush_snapshot.sequence,
-            )],
-            Vec::new(),
-            Vec::new(),
+            ducklake_catalog::FdbDataMutation::new(
+                vec![DataFileRow::new(
+                    DataFileId(832),
+                    table_id,
+                    "stale-replay.parquet",
+                    2,
+                    128,
+                    inline_snapshot.order,
+                )],
+                Vec::new(),
+                vec![InlineTableFlush::new(
+                    table_id,
+                    schema_id,
+                    flush_snapshot.sequence,
+                )],
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap();
 
@@ -1372,25 +1388,28 @@ fn fdb_live_given_inline_file_deletions_without_inline_rows_when_flushing_then_f
     kv.commit_data_mutation_versionstamped_with_inline_file_deletions(
         catalog,
         None,
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        vec![
-            InlineFileDeletionRow::new(
-                table_id,
-                source.data_file_id,
-                1,
-                source.validity.begin_order,
-            ),
-            InlineFileDeletionRow::new(
-                table_id,
-                source.data_file_id,
-                2,
-                source.validity.begin_order,
-            ),
-        ],
-        Vec::new(),
+        ducklake_catalog::FdbDataMutation {
+            data_files: Vec::new(),
+            delete_files: Vec::new(),
+            inline_flushes: Vec::new(),
+            partition_values: Vec::new(),
+            inline_file_deletions: vec![
+                InlineFileDeletionRow::new(
+                    table_id,
+                    source.data_file_id,
+                    1,
+                    source.validity.begin_order,
+                ),
+                InlineFileDeletionRow::new(
+                    table_id,
+                    source.data_file_id,
+                    2,
+                    source.validity.begin_order,
+                ),
+            ],
+            dropped_data_file_ids: Vec::new(),
+            ..ducklake_catalog::FdbDataMutation::default()
+        },
     )
     .unwrap();
     let delete_snapshot = latest_snapshot(&kv, catalog).unwrap().unwrap();
@@ -1399,22 +1418,24 @@ fn fdb_live_given_inline_file_deletions_without_inline_rows_when_flushing_then_f
         .commit_data_mutation_versionstamped(
             catalog,
             None,
-            vec![DataFileRow::new(
-                DataFileId(842),
-                table_id,
-                "delete-position-flush.parquet",
-                98,
-                2_048,
-                delete_snapshot.order,
-            )],
-            Vec::new(),
-            vec![InlineTableFlush::new(
-                table_id,
-                schema_id,
-                delete_snapshot.sequence,
-            )],
-            Vec::new(),
-            Vec::new(),
+            ducklake_catalog::FdbDataMutation::new(
+                vec![DataFileRow::new(
+                    DataFileId(842),
+                    table_id,
+                    "delete-position-flush.parquet",
+                    98,
+                    2_048,
+                    delete_snapshot.order,
+                )],
+                Vec::new(),
+                vec![InlineTableFlush::new(
+                    table_id,
+                    schema_id,
+                    delete_snapshot.sequence,
+                )],
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap();
     let flush_snapshot = latest_snapshot(&kv, catalog).unwrap().unwrap();
@@ -1731,11 +1752,13 @@ fn fdb_live_views_and_macros_use_versionstamped_object_history_when_enabled() {
             ViewRow::new(
                 view,
                 SchemaId(0),
-                "view-ddl-uuid",
-                "orders_view",
-                "duckdb",
-                "SELECT 1 AS id",
-                vec!["id".to_owned()],
+                ducklake_catalog::ViewDefinition::new(
+                    "view-ddl-uuid",
+                    "orders_view",
+                    "duckdb",
+                    "SELECT 1 AS id",
+                    vec!["id".to_owned()],
+                ),
                 CatalogOrderId::uuid_v7(0),
             )
             .with_comment(Some("initial view")),
@@ -1933,25 +1956,27 @@ fn fdb_live_data_mutation_appends_and_registers_delete_files_atomically_when_ena
         .commit_data_mutation_versionstamped(
             catalog,
             Some(CommitAttemptId(7001)),
-            vec![DataFileRow::new(
-                DataFileId(51),
-                table,
-                "fdb-mutation-replacement.parquet",
-                70,
-                700,
-                initial.order,
-            )],
-            vec![DeleteFileRow::new(
-                DeleteFileId(60),
-                base_file.data_file_id,
-                "fdb-mutation-delete.parquet",
-                30,
-                300,
-                initial.order,
-            )],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
+            ducklake_catalog::FdbDataMutation::new(
+                vec![DataFileRow::new(
+                    DataFileId(51),
+                    table,
+                    "fdb-mutation-replacement.parquet",
+                    70,
+                    700,
+                    initial.order,
+                )],
+                vec![DeleteFileRow::new(
+                    DeleteFileId(60),
+                    base_file.data_file_id,
+                    "fdb-mutation-delete.parquet",
+                    30,
+                    300,
+                    initial.order,
+                )],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap();
 
@@ -2018,25 +2043,27 @@ fn fdb_live_data_mutation_appends_and_registers_delete_files_atomically_when_ena
         kv.commit_data_mutation_versionstamped(
             catalog,
             Some(CommitAttemptId(7001)),
-            vec![DataFileRow::new(
-                DataFileId(51),
-                table,
-                "fdb-mutation-replacement.parquet",
-                70,
-                700,
-                initial.order,
-            )],
-            vec![DeleteFileRow::new(
-                DeleteFileId(60),
-                base_file.data_file_id,
-                "fdb-mutation-delete.parquet",
-                30,
-                300,
-                initial.order,
-            )],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
+            ducklake_catalog::FdbDataMutation::new(
+                vec![DataFileRow::new(
+                    DataFileId(51),
+                    table,
+                    "fdb-mutation-replacement.parquet",
+                    70,
+                    700,
+                    initial.order,
+                )],
+                vec![DeleteFileRow::new(
+                    DeleteFileId(60),
+                    base_file.data_file_id,
+                    "fdb-mutation-delete.parquet",
+                    30,
+                    300,
+                    initial.order,
+                )],
+                Vec::new(),
+                Vec::new(),
+                Vec::new()
+            )
         )
         .unwrap(),
         ducklake_catalog::DataMutationCommit::default()
@@ -2072,18 +2099,20 @@ fn fdb_live_data_mutation_attempt_recovery_survives_catalog_reopen_when_enabled(
             .commit_data_mutation_versionstamped(
                 catalog,
                 Some(attempt),
-                vec![DataFileRow::new(
-                    DataFileId(780),
-                    table,
-                    "reopen-recovery.parquet",
-                    78,
-                    780,
-                    initial.order,
-                )],
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
+                ducklake_catalog::FdbDataMutation::new(
+                    vec![DataFileRow::new(
+                        DataFileId(780),
+                        table,
+                        "reopen-recovery.parquet",
+                        78,
+                        780,
+                        initial.order,
+                    )],
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                ),
             )
             .unwrap();
         let [file] = committed.data_files.try_into().unwrap();
@@ -2097,18 +2126,20 @@ fn fdb_live_data_mutation_attempt_recovery_survives_catalog_reopen_when_enabled(
         kv.commit_data_mutation_versionstamped(
             catalog,
             Some(attempt),
-            vec![DataFileRow::new(
-                DataFileId(780),
-                table,
-                "reopen-recovery.parquet",
-                78,
-                780,
-                requested_begin_order,
-            )],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
+            ducklake_catalog::FdbDataMutation::new(
+                vec![DataFileRow::new(
+                    DataFileId(780),
+                    table,
+                    "reopen-recovery.parquet",
+                    78,
+                    780,
+                    requested_begin_order,
+                )],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new()
+            )
         )
         .unwrap(),
         ducklake_catalog::DataMutationCommit::default()
@@ -2159,35 +2190,40 @@ fn fdb_live_inline_delete_replaced_by_delete_file_keeps_next_public_snapshot_whe
     kv.commit_data_mutation_versionstamped_with_inline_file_deletions(
         catalog,
         None,
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        vec![InlineFileDeletionRow::new(
-            table,
-            data_file,
-            0,
-            CatalogOrderId::uuid_v7(0),
-        )],
-        Vec::new(),
+        ducklake_catalog::FdbDataMutation {
+            data_files: Vec::new(),
+            delete_files: Vec::new(),
+            inline_flushes: Vec::new(),
+            partition_values: Vec::new(),
+            inline_file_deletions: vec![InlineFileDeletionRow::new(
+                table,
+                data_file,
+                0,
+                CatalogOrderId::uuid_v7(0),
+            )],
+            dropped_data_file_ids: Vec::new(),
+            ..ducklake_catalog::FdbDataMutation::default()
+        },
     )
     .unwrap();
     let inline_delete = latest_snapshot(&kv, catalog).unwrap().unwrap();
     kv.commit_data_mutation_versionstamped(
         catalog,
         None,
-        Vec::new(),
-        vec![DeleteFileRow::new(
-            DeleteFileId(1),
-            data_file,
-            "inline-delete-public-snapshot-delete.parquet",
-            2,
-            512,
-            CatalogOrderId::uuid_v7(0),
-        )],
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
+        ducklake_catalog::FdbDataMutation::new(
+            Vec::new(),
+            vec![DeleteFileRow::new(
+                DeleteFileId(1),
+                data_file,
+                "inline-delete-public-snapshot-delete.parquet",
+                2,
+                512,
+                CatalogOrderId::uuid_v7(0),
+            )],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ),
     )
     .unwrap();
     let physical_delete = latest_snapshot(&kv, catalog).unwrap().unwrap();
@@ -2626,19 +2662,21 @@ fn fdb_live_partitioned_merge_replacement_survives_cleanup_for_time_travel_when_
             .commit_data_mutation_versionstamped(
                 catalog,
                 None,
-                vec![
-                    DataFileRow::new(file_id, table, path, 1, 64, CatalogOrderId::uuid_v7(0))
-                        .with_row_id_start(row_id_start),
-                ],
-                Vec::new(),
-                Vec::new(),
-                vec![FilePartitionValueRow::new(
-                    file_id,
-                    table,
-                    PartitionKeyIndex(0),
-                    partition_value,
-                )],
-                Vec::new(),
+                ducklake_catalog::FdbDataMutation::new(
+                    vec![
+                        DataFileRow::new(file_id, table, path, 1, 64, CatalogOrderId::uuid_v7(0))
+                            .with_row_id_start(row_id_start),
+                    ],
+                    Vec::new(),
+                    Vec::new(),
+                    vec![FilePartitionValueRow::new(
+                        file_id,
+                        table,
+                        PartitionKeyIndex(0),
+                        partition_value,
+                    )],
+                    Vec::new(),
+                ),
             )
             .unwrap()
             .data_files
@@ -2897,26 +2935,28 @@ fn fdb_live_partitioned_multi_output_merge_derives_row_ids_by_partition_when_ena
         kv.commit_data_mutation_versionstamped(
             catalog,
             None,
-            vec![
-                DataFileRow::new(
+            ducklake_catalog::FdbDataMutation::new(
+                vec![
+                    DataFileRow::new(
+                        file_id,
+                        table,
+                        format!("source-{}.parquet", file_id.0),
+                        1,
+                        64,
+                        CatalogOrderId::uuid_v7(0),
+                    )
+                    .with_row_id_start(row_id_start),
+                ],
+                Vec::new(),
+                Vec::new(),
+                vec![FilePartitionValueRow::new(
                     file_id,
                     table,
-                    format!("source-{}.parquet", file_id.0),
-                    1,
-                    64,
-                    CatalogOrderId::uuid_v7(0),
-                )
-                .with_row_id_start(row_id_start),
-            ],
-            Vec::new(),
-            Vec::new(),
-            vec![FilePartitionValueRow::new(
-                file_id,
-                table,
-                PartitionKeyIndex(0),
-                partition,
-            )],
-            Vec::new(),
+                    PartitionKeyIndex(0),
+                    partition,
+                )],
+                Vec::new(),
+            ),
         )
         .unwrap();
     }
@@ -3073,18 +3113,20 @@ fn fdb_live_rewrite_delete_compaction_replaces_source_and_delete_file_when_enabl
         .commit_data_mutation_versionstamped(
             catalog,
             None,
-            Vec::new(),
-            vec![DeleteFileRow::new(
-                DeleteFileId(121),
-                source.data_file_id,
-                "rewrite-delete-source-delete.parquet",
-                1,
-                128,
-                source.validity.begin_order,
-            )],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
+            ducklake_catalog::FdbDataMutation::new(
+                Vec::new(),
+                vec![DeleteFileRow::new(
+                    DeleteFileId(121),
+                    source.data_file_id,
+                    "rewrite-delete-source-delete.parquet",
+                    1,
+                    128,
+                    source.validity.begin_order,
+                )],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap()
         .delete_files
@@ -3185,18 +3227,20 @@ fn fdb_live_rewrite_delete_compaction_after_concurrent_append_conflicts_without_
     kv.commit_data_mutation_versionstamped(
         catalog,
         None,
-        Vec::new(),
-        vec![DeleteFileRow::new(
-            DeleteFileId(131),
-            source.data_file_id,
-            "rewrite-conflict-source-delete.parquet",
-            1,
-            128,
-            source.validity.begin_order,
-        )],
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
+        ducklake_catalog::FdbDataMutation::new(
+            Vec::new(),
+            vec![DeleteFileRow::new(
+                DeleteFileId(131),
+                source.data_file_id,
+                "rewrite-conflict-source-delete.parquet",
+                1,
+                128,
+                source.validity.begin_order,
+            )],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ),
     )
     .unwrap();
     let base_snapshot = latest_snapshot(&kv, catalog).unwrap().unwrap();
@@ -3306,15 +3350,18 @@ fn fdb_live_data_mutation_registers_inline_file_deletions_when_enabled() {
         .commit_data_mutation_versionstamped_with_inline_file_deletions(
             catalog,
             None,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            vec![
-                InlineFileDeletionRow::new(table, source.data_file_id, 3, initial.order),
-                InlineFileDeletionRow::new(table, source.data_file_id, 7, initial.order),
-            ],
-            Vec::new(),
+            ducklake_catalog::FdbDataMutation {
+                data_files: Vec::new(),
+                delete_files: Vec::new(),
+                inline_flushes: Vec::new(),
+                partition_values: Vec::new(),
+                inline_file_deletions: vec![
+                    InlineFileDeletionRow::new(table, source.data_file_id, 3, initial.order),
+                    InlineFileDeletionRow::new(table, source.data_file_id, 7, initial.order),
+                ],
+                dropped_data_file_ids: Vec::new(),
+                ..ducklake_catalog::FdbDataMutation::default()
+            },
         )
         .unwrap();
     let delete_snapshot = latest_snapshot(&kv, catalog).unwrap().unwrap();
@@ -3365,17 +3412,20 @@ fn fdb_live_rewrite_delete_compaction_uses_inline_file_deletions_when_enabled() 
     kv.commit_data_mutation_versionstamped_with_inline_file_deletions(
         catalog,
         None,
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        vec![InlineFileDeletionRow::new(
-            table,
-            source.data_file_id,
-            4,
-            source.validity.begin_order,
-        )],
-        Vec::new(),
+        ducklake_catalog::FdbDataMutation {
+            data_files: Vec::new(),
+            delete_files: Vec::new(),
+            inline_flushes: Vec::new(),
+            partition_values: Vec::new(),
+            inline_file_deletions: vec![InlineFileDeletionRow::new(
+                table,
+                source.data_file_id,
+                4,
+                source.validity.begin_order,
+            )],
+            dropped_data_file_ids: Vec::new(),
+            ..ducklake_catalog::FdbDataMutation::default()
+        },
     )
     .unwrap();
     let inline_delete_snapshot = latest_snapshot(&kv, catalog).unwrap().unwrap();

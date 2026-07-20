@@ -366,7 +366,9 @@ async fn delete_file_changes_exist_for_files_at(
     {
         return Ok(true);
     }
-    if let Some(changed_tables) = cached_delete_file_changed_tables_at(catalog, snapshot_order) {
+    if let Some(changed_tables) =
+        cached_delete_file_changed_tables_at(kv.catalog_cache_namespace(), catalog, snapshot_order)
+    {
         return Ok(table_ids
             .iter()
             .any(|table_id| changed_tables.contains(table_id)));
@@ -399,7 +401,9 @@ async fn delete_file_changed_tables_at(
     catalog: CatalogId,
     snapshot_order: CatalogOrderId,
 ) -> CatalogResult<BTreeSet<TableId>> {
-    if let Some(tables) = cached_delete_file_changed_tables_at(catalog, snapshot_order) {
+    if let Some(tables) =
+        cached_delete_file_changed_tables_at(kv.catalog_cache_namespace(), catalog, snapshot_order)
+    {
         return Ok(tables);
     }
     let prefix = order_delete_file_change_prefix(catalog);
@@ -418,7 +422,12 @@ async fn delete_file_changed_tables_at(
             &prefix, &item.key,
         )?);
     }
-    cache_delete_file_changed_tables_at(catalog, snapshot_order, tables.clone());
+    cache_delete_file_changed_tables_at(
+        kv.catalog_cache_namespace(),
+        catalog,
+        snapshot_order,
+        tables.clone(),
+    );
     Ok(tables)
 }
 
@@ -429,9 +438,12 @@ async fn table_delete_file_changes_exist_at(
     table_id: TableId,
     snapshot_order: CatalogOrderId,
 ) -> CatalogResult<bool> {
-    if let Some(exists) =
-        cached_table_delete_file_changes_exist_at(catalog, table_id, snapshot_order)
-    {
+    if let Some(exists) = cached_table_delete_file_changes_exist_at(
+        kv.catalog_cache_namespace(),
+        catalog,
+        table_id,
+        snapshot_order,
+    ) {
         return Ok(exists);
     }
     let prefix = table_delete_file_change_prefix(catalog, table_id);
@@ -445,7 +457,13 @@ async fn table_delete_file_changes_exist_at(
     )
     .await?;
     let exists = !items.is_empty();
-    cache_table_delete_file_changes_exist_at(catalog, table_id, snapshot_order, exists);
+    cache_table_delete_file_changes_exist_at(
+        kv.catalog_cache_namespace(),
+        catalog,
+        table_id,
+        snapshot_order,
+        exists,
+    );
     Ok(exists)
 }
 

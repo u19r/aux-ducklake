@@ -66,7 +66,10 @@ done < <(ducklake_foundationdb_client_libraries)
 
 mkdir -p "$artifact_dir"
 tar -C "$bundle_root" -czf "$artifact_dir/$artifact_name" opt
-ducklake_write_sha256 "$artifact_dir/$artifact_name" "$artifact_dir/$artifact_name.sha256"
+(
+    cd "$artifact_dir"
+    ducklake_write_sha256 "$artifact_name" "$artifact_name.sha256"
+)
 
 echo "ducklake_release_package=ok"
 echo "artifact=$artifact_dir/$artifact_name"

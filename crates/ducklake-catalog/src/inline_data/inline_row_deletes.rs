@@ -68,7 +68,7 @@ pub fn commit_delete_inline_table_rows_at_snapshot(
 
     for (begin_order, chunks) in visible_payloads {
         let begin_snapshot = public_snapshot_sequence_for_order(kv, catalog, begin_order)?
-            .ok_or_else(|| CatalogError::NotFound("inline payload snapshot"))?
+            .ok_or(CatalogError::NotFound("inline payload snapshot"))?
             .0;
         if begin_snapshot >= target.snapshot.sequence.0 {
             continue;
@@ -136,13 +136,13 @@ fn inline_delete_target(
     latest: crate::SnapshotRow,
     commit_snapshot: Option<DuckLakeSnapshotId>,
 ) -> CatalogResult<InlineDeleteTarget> {
-    if let Some(commit_snapshot) = commit_snapshot {
-        if let Some(snapshot) = snapshot_by_ducklake_sequence(kv, catalog, commit_snapshot)? {
-            return Ok(InlineDeleteTarget {
-                snapshot,
-                stage_snapshot: false,
-            });
-        }
+    if let Some(commit_snapshot) = commit_snapshot
+        && let Some(snapshot) = snapshot_by_ducklake_sequence(kv, catalog, commit_snapshot)?
+    {
+        return Ok(InlineDeleteTarget {
+            snapshot,
+            stage_snapshot: false,
+        });
     }
     let order = kv.generated_order_id()?;
     Ok(InlineDeleteTarget {

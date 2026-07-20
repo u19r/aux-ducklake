@@ -229,6 +229,17 @@ pub(crate) enum RuntimeMutableCatalog {
 }
 
 impl OrderedCatalogKv for RuntimeMutableCatalog {
+    fn catalog_cache_namespace(&self) -> crate::CatalogCacheNamespace {
+        match self {
+            #[cfg(feature = "foundationdb")]
+            Self::FoundationDb(kv) => kv.catalog_cache_namespace(),
+            #[cfg(not(feature = "foundationdb"))]
+            Self::Unavailable => {
+                crate::CatalogCacheNamespace::process_local(self as *const Self as usize)
+            }
+        }
+    }
+
     fn get(&self, key: &[u8]) -> CatalogResult<Option<Vec<u8>>> {
         #[cfg(not(feature = "foundationdb"))]
         let _ = key;

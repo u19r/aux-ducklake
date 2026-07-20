@@ -92,8 +92,14 @@ pub(crate) fn resolve_data_file_visibility(
     catalog: CatalogId,
     mutation: &mut RuntimeDataMutation,
 ) -> CatalogResult<()> {
+    let proposed_commit_snapshot = mutation.proposed_commit_snapshot;
     for visibility in &mutation.data_file_visibility {
-        let resolved = resolve_data_file_visibility_orders(kv, catalog, *visibility)?;
+        let resolved = resolve_data_file_visibility_orders(
+            kv,
+            catalog,
+            *visibility,
+            proposed_commit_snapshot,
+        )?;
         let Some(file) = mutation
             .data_files
             .iter_mut()
@@ -108,7 +114,12 @@ pub(crate) fn resolve_data_file_visibility(
         file.max_partial_order = resolved.max_partial_order;
     }
     for visibility in &mutation.delete_file_visibility {
-        let resolved = resolve_delete_file_visibility_orders(kv, catalog, *visibility)?;
+        let resolved = resolve_delete_file_visibility_orders(
+            kv,
+            catalog,
+            *visibility,
+            proposed_commit_snapshot,
+        )?;
         let Some(file) = mutation
             .materialized_delete_files
             .iter_mut()
@@ -129,6 +140,7 @@ pub(crate) fn resolve_data_file_visibility_orders(
     kv: &impl crate::OrderedCatalogKv,
     catalog: CatalogId,
     visibility: RuntimeDataFileVisibility,
+    proposed_commit_snapshot: Option<ProposedCommitSnapshot>,
 ) -> CatalogResult<ResolvedRuntimeVisibility> {
     Ok(ResolvedRuntimeVisibility {
         begin_order: data_file_visibility_order(
@@ -137,6 +149,7 @@ pub(crate) fn resolve_data_file_visibility_orders(
             visibility.begin_snapshot,
             visibility.data_file_id,
             "begin",
+            proposed_commit_snapshot,
         )?,
         max_partial_order: visibility
             .max_partial_snapshot
@@ -147,6 +160,7 @@ pub(crate) fn resolve_data_file_visibility_orders(
                     snapshot_id,
                     visibility.data_file_id,
                     "max partial",
+                    proposed_commit_snapshot,
                 )
             })
             .transpose()?,
@@ -157,6 +171,7 @@ pub(crate) fn resolve_delete_file_visibility_orders(
     kv: &impl crate::OrderedCatalogKv,
     catalog: CatalogId,
     visibility: RuntimeDeleteFileVisibility,
+    proposed_commit_snapshot: Option<ProposedCommitSnapshot>,
 ) -> CatalogResult<ResolvedRuntimeVisibility> {
     Ok(ResolvedRuntimeVisibility {
         begin_order: delete_file_visibility_order(
@@ -165,6 +180,7 @@ pub(crate) fn resolve_delete_file_visibility_orders(
             visibility.delete_file_id,
             visibility.begin_snapshot.public_id(),
             "begin",
+            proposed_commit_snapshot,
         )?,
         max_partial_order: visibility
             .max_partial_snapshot
@@ -175,6 +191,7 @@ pub(crate) fn resolve_delete_file_visibility_orders(
                     visibility.delete_file_id,
                     snapshot_id,
                     "max partial",
+                    proposed_commit_snapshot,
                 )
             })
             .transpose()?,
@@ -254,7 +271,13 @@ fn delete_file_visibility_order(
     delete_file_id: DeleteFileId,
     snapshot_id: DuckLakeSnapshotId,
     label: &str,
+    proposed_commit_snapshot: Option<ProposedCommitSnapshot>,
 ) -> CatalogResult<crate::CatalogOrderId> {
+    if proposed_commit_snapshot
+        .is_some_and(|proposed| proposed.commit_attempt_id().0 == u128::from(snapshot_id.0))
+    {
+        return Ok(crate::ids::incomplete_fdb_order());
+    }
     if let Some(snapshot) = snapshot_by_ducklake_sequence(kv, catalog, snapshot_id)? {
         return Ok(snapshot.order);
     }
@@ -273,7 +296,13 @@ fn data_file_visibility_order(
     snapshot_id: DuckLakeSnapshotId,
     data_file_id: crate::DataFileId,
     label: &str,
+    proposed_commit_snapshot: Option<ProposedCommitSnapshot>,
 ) -> CatalogResult<crate::CatalogOrderId> {
+    if proposed_commit_snapshot
+        .is_some_and(|proposed| proposed.commit_attempt_id().0 == u128::from(snapshot_id.0))
+    {
+        return Ok(crate::ids::incomplete_fdb_order());
+    }
     if let Some(snapshot) = snapshot_by_ducklake_sequence(kv, catalog, snapshot_id)? {
         return Ok(snapshot.order);
     }
@@ -338,16 +367,17 @@ pub(crate) fn data_mutation_payload_values(payload: &[u8]) -> CatalogResult<Runt
                 mutation.commit_metadata.commit_extra_info = Some((*extra_info).to_owned());
             }
             ["file", id, table_id, path, row_count, file_size_bytes] => {
-                mutation.data_files.push(data_file_row(
+                mutation.data_files.push(data_file_row(DataFileInput {
                     id,
                     table_id,
                     path,
                     row_count,
                     file_size_bytes,
-                    None,
-                    None,
-                    None,
-                )?);
+                    row_id_start: None,
+                    mapping_id: None,
+                    footer_size: None,
+                    encryption_key: None,
+                })?);
             }
             [
                 "file",
@@ -358,37 +388,17 @@ pub(crate) fn data_mutation_payload_values(payload: &[u8]) -> CatalogResult<Runt
                 file_size_bytes,
                 row_id_start,
             ] => {
-                mutation.data_files.push(data_file_row(
+                mutation.data_files.push(data_file_row(DataFileInput {
                     id,
                     table_id,
                     path,
                     row_count,
                     file_size_bytes,
-                    Some(*row_id_start),
-                    None,
-                    None,
-                )?);
-            }
-            [
-                "file",
-                id,
-                table_id,
-                path,
-                row_count,
-                file_size_bytes,
-                row_id_start,
-                mapping_id,
-            ] => {
-                mutation.data_files.push(data_file_row(
-                    id,
-                    table_id,
-                    path,
-                    row_count,
-                    file_size_bytes,
-                    Some(*row_id_start),
-                    optional_u64_field(mapping_id, "mapping id")?,
-                    None,
-                )?);
+                    row_id_start: Some(*row_id_start),
+                    mapping_id: None,
+                    footer_size: None,
+                    encryption_key: None,
+                })?);
             }
             [
                 "file",
@@ -399,18 +409,18 @@ pub(crate) fn data_mutation_payload_values(payload: &[u8]) -> CatalogResult<Runt
                 file_size_bytes,
                 row_id_start,
                 mapping_id,
-                footer_size,
             ] => {
-                mutation.data_files.push(data_file_row(
+                mutation.data_files.push(data_file_row(DataFileInput {
                     id,
                     table_id,
                     path,
                     row_count,
                     file_size_bytes,
-                    Some(*row_id_start),
-                    optional_u64_field(mapping_id, "mapping id")?,
-                    optional_u64_field(footer_size, "footer size")?,
-                )?);
+                    row_id_start: Some(*row_id_start),
+                    mapping_id: optional_u64_field(mapping_id, "mapping id")?,
+                    footer_size: None,
+                    encryption_key: None,
+                })?);
             }
             [
                 "file",
@@ -422,21 +432,44 @@ pub(crate) fn data_mutation_payload_values(payload: &[u8]) -> CatalogResult<Runt
                 row_id_start,
                 mapping_id,
                 footer_size,
-                begin_snapshot,
-                max_partial_snapshot,
             ] => {
+                mutation.data_files.push(data_file_row(DataFileInput {
+                    id,
+                    table_id,
+                    path,
+                    row_count,
+                    file_size_bytes,
+                    row_id_start: Some(*row_id_start),
+                    mapping_id: optional_u64_field(mapping_id, "mapping id")?,
+                    footer_size: optional_u64_field(footer_size, "footer size")?,
+                    encryption_key: None,
+                })?);
+            }
+            fields @ ["file", ..] if matches!(fields.len(), 11 | 12) => {
+                let id = fields[1];
+                let table_id = fields[2];
+                let path = fields[3];
+                let row_count = fields[4];
+                let file_size_bytes = fields[5];
+                let row_id_start = fields[6];
+                let mapping_id = fields[7];
+                let footer_size = fields[8];
+                let begin_snapshot = fields[9];
+                let max_partial_snapshot = fields[10];
+                let encryption_key = fields.get(11).copied();
                 let data_file_id =
                     DataFileId(parse_u64_field(COMMIT_DATA_MUTATION, id, "data file id")?);
-                mutation.data_files.push(data_file_row(
+                mutation.data_files.push(data_file_row(DataFileInput {
                     id,
                     table_id,
                     path,
                     row_count,
                     file_size_bytes,
-                    Some(*row_id_start),
-                    optional_u64_field(mapping_id, "mapping id")?,
-                    optional_u64_field(footer_size, "footer size")?,
-                )?);
+                    row_id_start: Some(row_id_start),
+                    mapping_id: optional_u64_field(mapping_id, "mapping id")?,
+                    footer_size: optional_u64_field(footer_size, "footer size")?,
+                    encryption_key,
+                })?);
                 if !begin_snapshot.is_empty() || !max_partial_snapshot.is_empty() {
                     mutation
                         .data_file_visibility
@@ -511,16 +544,18 @@ pub(crate) fn data_mutation_payload_values(payload: &[u8]) -> CatalogResult<Runt
                 max_value,
                 extra_stats,
             ] => {
-                mutation.file_column_stats.push(file_column_stats_row(
-                    data_file_id,
-                    table_id,
-                    column_id,
-                    Some(*value_count),
-                    null_count,
-                    min_value,
-                    max_value,
-                    extra_stats,
-                )?);
+                mutation
+                    .file_column_stats
+                    .push(file_column_stats_row(FileColumnStatsInput {
+                        data_file_id,
+                        table_id,
+                        column_id,
+                        value_count: Some(*value_count),
+                        null_count,
+                        min_value,
+                        max_value,
+                        extra_stats,
+                    })?);
             }
             [
                 "file_column_stats",
@@ -532,16 +567,18 @@ pub(crate) fn data_mutation_payload_values(payload: &[u8]) -> CatalogResult<Runt
                 min_value,
                 max_value,
             ] => {
-                mutation.file_column_stats.push(file_column_stats_row(
-                    data_file_id,
-                    table_id,
-                    column_id,
-                    Some(*value_count),
-                    null_count,
-                    min_value,
-                    max_value,
-                    "",
-                )?);
+                mutation
+                    .file_column_stats
+                    .push(file_column_stats_row(FileColumnStatsInput {
+                        data_file_id,
+                        table_id,
+                        column_id,
+                        value_count: Some(*value_count),
+                        null_count,
+                        min_value,
+                        max_value,
+                        extra_stats: "",
+                    })?);
             }
             [
                 "file_column_stats",
@@ -552,39 +589,42 @@ pub(crate) fn data_mutation_payload_values(payload: &[u8]) -> CatalogResult<Runt
                 min_value,
                 max_value,
             ] => {
-                mutation.file_column_stats.push(file_column_stats_row(
-                    data_file_id,
-                    table_id,
-                    column_id,
-                    None,
-                    null_count,
-                    min_value,
-                    max_value,
-                    "",
-                )?);
+                mutation
+                    .file_column_stats
+                    .push(file_column_stats_row(FileColumnStatsInput {
+                        data_file_id,
+                        table_id,
+                        column_id,
+                        value_count: None,
+                        null_count,
+                        min_value,
+                        max_value,
+                        extra_stats: "",
+                    })?);
             }
-            [
-                "delete_file",
-                id,
-                _table_id,
-                data_file_id,
-                path,
-                delete_count,
-                file_size_bytes,
-                begin_snapshot,
-                max_partial_snapshot,
-            ] => {
+            fields @ ["delete_file", ..] if matches!(fields.len(), 9 | 10) => {
+                let id = fields[1];
+                let data_file_id = fields[3];
+                let path = fields[4];
+                let delete_count = fields[5];
+                let file_size_bytes = fields[6];
+                let begin_snapshot = fields[7];
+                let max_partial_snapshot = fields[8];
+                let encryption_key = fields.get(9).copied().unwrap_or_default();
                 let delete_file_id =
                     DeleteFileId(parse_u64_field(COMMIT_DATA_MUTATION, id, "delete file id")?);
                 push_delete_file_from_payload(
                     &mut mutation,
-                    delete_file_id,
-                    data_file_id,
-                    path,
-                    delete_count,
-                    file_size_bytes,
-                    begin_snapshot,
-                    max_partial_snapshot,
+                    DeleteFileInput {
+                        delete_file_id,
+                        data_file_id,
+                        path,
+                        delete_count,
+                        file_size_bytes,
+                        begin_snapshot,
+                        max_partial_snapshot,
+                        encryption_key,
+                    },
                 )?;
             }
             [
@@ -601,13 +641,16 @@ pub(crate) fn data_mutation_payload_values(payload: &[u8]) -> CatalogResult<Runt
                     DeleteFileId(parse_u64_field(COMMIT_DATA_MUTATION, id, "delete file id")?);
                 push_delete_file_from_payload(
                     &mut mutation,
-                    delete_file_id,
-                    data_file_id,
-                    path,
-                    delete_count,
-                    file_size_bytes,
-                    begin_snapshot,
-                    "",
+                    DeleteFileInput {
+                        delete_file_id,
+                        data_file_id,
+                        path,
+                        delete_count,
+                        file_size_bytes,
+                        begin_snapshot,
+                        max_partial_snapshot: "",
+                        encryption_key: "",
+                    },
                 )?;
             }
             ["inline", table_id, schema_id, flush_snapshot] => {
@@ -714,50 +757,56 @@ fn invalid_inlined_table_name(table_name: &str) -> crate::CatalogError {
     ))
 }
 
+struct DeleteFileInput<'a> {
+    delete_file_id: DeleteFileId,
+    data_file_id: &'a str,
+    path: &'a str,
+    delete_count: &'a str,
+    file_size_bytes: &'a str,
+    begin_snapshot: &'a str,
+    max_partial_snapshot: &'a str,
+    encryption_key: &'a str,
+}
+
 fn push_delete_file_from_payload(
     mutation: &mut RuntimeDataMutation,
-    delete_file_id: DeleteFileId,
-    data_file_id: &str,
-    path: &str,
-    delete_count: &str,
-    file_size_bytes: &str,
-    begin_snapshot: &str,
-    max_partial_snapshot: &str,
+    input: DeleteFileInput<'_>,
 ) -> CatalogResult<()> {
     mutation
         .materialized_delete_files
         .push(DeleteFileMaterialization::historical_delete_file(
             DeleteFileRow::new(
-                delete_file_id,
+                input.delete_file_id,
                 DataFileId(parse_u64_field(
                     COMMIT_DATA_MUTATION,
-                    data_file_id,
+                    input.data_file_id,
                     "data file id",
                 )?),
-                path.to_owned(),
-                parse_u64_field(COMMIT_DATA_MUTATION, delete_count, "delete count")?,
+                input.path.to_owned(),
+                parse_u64_field(COMMIT_DATA_MUTATION, input.delete_count, "delete count")?,
                 parse_u64_field(
                     COMMIT_DATA_MUTATION,
-                    file_size_bytes,
+                    input.file_size_bytes,
                     "delete file size bytes",
                 )?,
                 CatalogOrderId::uuid_v7(0),
-            ),
+            )
+            .with_encryption_key(input.encryption_key),
         ));
-    if !begin_snapshot.is_empty() {
+    if !input.begin_snapshot.is_empty() {
         mutation
             .delete_file_visibility
             .push(RuntimeDeleteFileVisibility {
-                delete_file_id,
+                delete_file_id: input.delete_file_id,
                 begin_snapshot: SemanticDeleteCoverageBegin::new(DuckLakeSnapshotId(
                     parse_u64_field(
                         COMMIT_DATA_MUTATION,
-                        begin_snapshot,
+                        input.begin_snapshot,
                         "delete file begin snapshot",
                     )?,
                 )),
                 max_partial_snapshot: optional_u64_field(
-                    max_partial_snapshot,
+                    input.max_partial_snapshot,
                     "delete file max partial snapshot",
                 )?
                 .map(DuckLakeSnapshotId),
@@ -766,27 +815,43 @@ fn push_delete_file_from_payload(
     Ok(())
 }
 
-fn data_file_row(
-    id: &str,
-    table_id: &str,
-    path: &str,
-    row_count: &str,
-    file_size_bytes: &str,
-    row_id_start: Option<&str>,
+struct DataFileInput<'a> {
+    id: &'a str,
+    table_id: &'a str,
+    path: &'a str,
+    row_count: &'a str,
+    file_size_bytes: &'a str,
+    row_id_start: Option<&'a str>,
     mapping_id: Option<u64>,
     footer_size: Option<u64>,
-) -> CatalogResult<DataFileRow> {
+    encryption_key: Option<&'a str>,
+}
+
+fn data_file_row(input: DataFileInput<'_>) -> CatalogResult<DataFileRow> {
     let row = DataFileRow::new(
-        DataFileId(parse_u64_field(COMMIT_DATA_MUTATION, id, "data file id")?),
-        TableId(parse_u64_field(COMMIT_DATA_MUTATION, table_id, "table id")?),
-        path.to_owned(),
-        parse_u64_field(COMMIT_DATA_MUTATION, row_count, "file row count")?,
-        parse_u64_field(COMMIT_DATA_MUTATION, file_size_bytes, "file size bytes")?,
+        DataFileId(parse_u64_field(
+            COMMIT_DATA_MUTATION,
+            input.id,
+            "data file id",
+        )?),
+        TableId(parse_u64_field(
+            COMMIT_DATA_MUTATION,
+            input.table_id,
+            "table id",
+        )?),
+        input.path.to_owned(),
+        parse_u64_field(COMMIT_DATA_MUTATION, input.row_count, "file row count")?,
+        parse_u64_field(
+            COMMIT_DATA_MUTATION,
+            input.file_size_bytes,
+            "file size bytes",
+        )?,
         CatalogOrderId::uuid_v7(0),
     )
-    .with_mapping_id(mapping_id)
-    .with_footer_size(footer_size);
-    let Some(row_id_start) = row_id_start else {
+    .with_mapping_id(input.mapping_id)
+    .with_footer_size(input.footer_size)
+    .with_encryption_key(input.encryption_key.unwrap_or_default());
+    let Some(row_id_start) = input.row_id_start else {
         return Ok(row);
     };
     Ok(row.with_row_id_start(parse_u64_field(
@@ -855,41 +920,43 @@ fn optional_string_field(value: &str) -> Option<String> {
     }
 }
 
-fn file_column_stats_row(
-    data_file_id: &str,
-    table_id: &str,
-    column_id: &str,
-    value_count: Option<&str>,
-    null_count: &str,
-    min_value: &str,
-    max_value: &str,
-    extra_stats: &str,
-) -> CatalogResult<FileColumnStatsRow> {
+struct FileColumnStatsInput<'a> {
+    data_file_id: &'a str,
+    table_id: &'a str,
+    column_id: &'a str,
+    value_count: Option<&'a str>,
+    null_count: &'a str,
+    min_value: &'a str,
+    max_value: &'a str,
+    extra_stats: &'a str,
+}
+
+fn file_column_stats_row(input: FileColumnStatsInput<'_>) -> CatalogResult<FileColumnStatsRow> {
     Ok(FileColumnStatsRow::new(
         DataFileId(parse_u64_field(
             COMMIT_DATA_MUTATION,
-            data_file_id,
+            input.data_file_id,
             "file column stats data file id",
         )?),
         TableId(parse_u64_field(
             COMMIT_DATA_MUTATION,
-            table_id,
+            input.table_id,
             "file column stats table id",
         )?),
         ColumnId(parse_u64_field(
             COMMIT_DATA_MUTATION,
-            column_id,
+            input.column_id,
             "file column stats column id",
         )?),
         parse_u64_field(
             COMMIT_DATA_MUTATION,
-            null_count,
+            input.null_count,
             "file column stats null count",
         )?,
-        optional_string_field(min_value),
-        optional_string_field(max_value),
+        optional_string_field(input.min_value),
+        optional_string_field(input.max_value),
     )
-    .with_value_count(match value_count {
+    .with_value_count(match input.value_count {
         Some(value) => Some(parse_u64_field(
             COMMIT_DATA_MUTATION,
             value,
@@ -897,7 +964,7 @@ fn file_column_stats_row(
         )?),
         None => None,
     })
-    .with_extra_stats(optional_string_field(extra_stats)))
+    .with_extra_stats(optional_string_field(input.extra_stats)))
 }
 
 #[cfg(test)]

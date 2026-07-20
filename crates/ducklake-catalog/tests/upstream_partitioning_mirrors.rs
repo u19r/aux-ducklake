@@ -96,7 +96,7 @@ fn mirrors_bucket_pruning_test_partition_scan_uses_bucket_partition_values() {
         &mut kv,
         catalog,
         (0..10)
-            .map(|bucket| data_file(bucket + 1, table, bucket as u64 * 100, 100))
+            .map(|bucket| data_file(bucket + 1, table, bucket * 100, 100))
             .collect(),
         Vec::new(),
         &[],

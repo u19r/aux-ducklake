@@ -2,9 +2,11 @@
 mod tests {
     use crate::{
         CatalogId, CatalogOrderId, DataFileId, DataFileRow, DeleteFileId, DeleteFileRow,
-        FakeOrderedCatalogKv, FilePartitionValueRow, MutableCatalogKv, PartitionKeyIndex,
-        TableColumnRow, TableId, TablePartitionFieldRow, TablePartitionRow, TableRow,
-        TableVersionReplacement, commit_create_table_row, initialize_catalog_if_absent,
+        FakeOrderedCatalogKv, FilePartitionValueRow, InlineTableFlush, MutableCatalogKv,
+        PartitionKeyIndex, RawSnapshotSequence, SchemaId, TableColumnRow, TableId,
+        TablePartitionFieldRow, TablePartitionRow, TableRow, TableVersionReplacement,
+        commit_create_table_row, initialize_catalog_if_absent,
+        runtime_data_mutation_ops::RuntimeDataMutation,
         runtime_data_mutation_ops::RuntimeFilePartitionSet,
     };
 
@@ -54,6 +56,57 @@ mod tests {
             &[],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn given_inline_flush_read_snapshot_is_stale_when_committing_then_conflict_is_returned() {
+        let mut kv = FakeOrderedCatalogKv::new();
+        let catalog = CatalogId(1);
+        initialize_catalog_if_absent(&mut kv, catalog).unwrap();
+        commit_create_table_row(
+            &mut kv,
+            catalog,
+            TableRow::new(TableId(1), "events", CatalogOrderId::uuid_v7(0)),
+        )
+        .unwrap();
+        let mut mutation = RuntimeDataMutation::default();
+        mutation.inline_flushes.push(InlineTableFlush::new(
+            TableId(1),
+            SchemaId(1),
+            RawSnapshotSequence(0),
+        ));
+
+        let error = super::super::reject_stale_data_mutation(&kv, catalog, &mutation).unwrap_err();
+
+        assert!(error.to_string().contains("conflict flushing inline data"));
+    }
+
+    #[test]
+    fn given_inline_flush_follows_metadata_from_same_commit_when_committing_then_it_is_accepted() {
+        let mut kv = FakeOrderedCatalogKv::new();
+        let catalog = CatalogId(1);
+        initialize_catalog_if_absent(&mut kv, catalog).unwrap();
+        commit_create_table_row(
+            &mut kv,
+            catalog,
+            TableRow::new(TableId(1), "events", CatalogOrderId::uuid_v7(0)),
+        )
+        .unwrap();
+        let mut mutation = RuntimeDataMutation {
+            proposed_commit_snapshot: Some(
+                crate::runtime_snapshot_range::ProposedCommitSnapshot::new(crate::CommitAttemptId(
+                    1,
+                )),
+            ),
+            ..RuntimeDataMutation::default()
+        };
+        mutation.inline_flushes.push(InlineTableFlush::new(
+            TableId(1),
+            SchemaId(1),
+            RawSnapshotSequence(0),
+        ));
+
+        super::super::reject_stale_data_mutation(&kv, catalog, &mutation).unwrap();
     }
 
     #[test]

@@ -2,10 +2,7 @@ name: ci
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
-  push:
-    branches:
-      - main
+    types: [labeled, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
 permissions:
@@ -18,7 +15,7 @@ concurrency:
 jobs:
   ci-check:
     name: ci-check
-    if: ${{ github.repository_owner == 'u19r' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && !contains(github.event.pull_request.labels.*.name, 'no-ci'))) }}
+    if: ${{ github.repository_owner == 'u19r' && (github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository && contains(github.event.pull_request.labels.*.name, 'run-ci'))) }}
     # Runner class: arm64/large maps to the approved 4xlarge-first Spot pool.
     # Use x64 only for x86-only toolchains; use xlarge/docker or memory only
     # for release, image, or integration jobs that cannot pass on large.
@@ -33,17 +30,24 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Print workflow dispatch inputs
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          WORKFLOW_DISPATCH_INPUTS: ${{ toJson(inputs) }}
+        run: |
+          echo "workflow_dispatch inputs:"
+          printf '%s\n' "$WORKFLOW_DISPATCH_INPUTS"
       - name: Checkout
         uses: actions/checkout@v6
         with:
           persist-credentials: false
 
-      - name: Run repository gate
+      - name: Run CI check
         run: just ci-check
 
   report:
     name: report
-    if: ${{ always() && github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'no-ci') }}
+    if: ${{ always() && github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'run-ci') }}
     needs: ci-check
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -51,6 +55,13 @@ jobs:
       contents: read
       pull-requests: write
     steps:
+      - name: Print workflow dispatch inputs
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          WORKFLOW_DISPATCH_INPUTS: ${{ toJson(inputs) }}
+        run: |
+          echo "workflow_dispatch inputs:"
+          printf '%s\n' "$WORKFLOW_DISPATCH_INPUTS"
       - name: Comment PR status
         env:
           GH_TOKEN: ${{ github.token }}
@@ -64,16 +75,23 @@ jobs:
             status="${{ needs.ci-check.result }}"
           fi
           gh pr comment "${{ github.event.pull_request.number }}" \
-            --body "ci check: ${status} in run ${{ github.run_id }}" || true
+            --body "ci-check: ${status} in run ${{ github.run_id }}" || true
 
   metadata:
     name: metadata
-    if: ${{ github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, 'no-ci') }}
+    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'run-ci') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
     steps:
+      - name: Print workflow dispatch inputs
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          WORKFLOW_DISPATCH_INPUTS: ${{ toJson(inputs) }}
+        run: |
+          echo "workflow_dispatch inputs:"
+          printf '%s\n' "$WORKFLOW_DISPATCH_INPUTS"
       - name: Checkout
         uses: actions/checkout@v6
 

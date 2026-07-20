@@ -1032,6 +1032,10 @@ delete_position\t3\t0\n"
 
         assert!(output.contains("inline_aggregate_stats\t3"), "{output}");
         assert!(
+            output.contains("inline_aggregate_next_row_id\t3"),
+            "{output}"
+        );
+        assert!(
             output.contains("inline_aggregate_column_stats\t1\t2\ttrue\t2\ttrue\t10"),
             "{output}"
         );
@@ -1865,26 +1869,28 @@ delete_position\t3\t0\n"
         kv.commit_data_mutation_versionstamped(
             catalog,
             None,
-            vec![
-                DataFileRow::new(
-                    DataFileId(910),
-                    main.table_id,
-                    "main/test/flushed.parquet",
-                    1,
-                    100,
-                    flush_snapshot.order,
-                )
-                .with_row_id_start(0)
-                .with_max_partial_order(Some(flush_snapshot.order)),
-            ],
-            vec![],
-            vec![InlineTableFlush {
-                table_id: main.table_id,
-                schema_id: main.schema_id,
-                flush_snapshot_sequence: flush_snapshot.sequence,
-            }],
-            Vec::new(),
-            Vec::new(),
+            crate::FdbDataMutation::new(
+                vec![
+                    DataFileRow::new(
+                        DataFileId(910),
+                        main.table_id,
+                        "main/test/flushed.parquet",
+                        1,
+                        100,
+                        flush_snapshot.order,
+                    )
+                    .with_row_id_start(0)
+                    .with_max_partial_order(Some(flush_snapshot.order)),
+                ],
+                vec![],
+                vec![InlineTableFlush {
+                    table_id: main.table_id,
+                    schema_id: main.schema_id,
+                    flush_snapshot_sequence: flush_snapshot.sequence,
+                }],
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap();
         let latest = latest_snapshot(&kv, catalog).unwrap().unwrap();
@@ -1983,26 +1989,28 @@ delete_position\t3\t0\n"
         kv.commit_data_mutation_versionstamped(
             catalog,
             None,
-            vec![
-                DataFileRow::new(
-                    DataFileId(99),
+            crate::FdbDataMutation::new(
+                vec![
+                    DataFileRow::new(
+                        DataFileId(99),
+                        table_id,
+                        "main/runtime_fdb_inline_rewrite_file/replacement.parquet",
+                        248,
+                        100,
+                        inline_snapshot.order,
+                    )
+                    .with_row_id_start(0)
+                    .with_max_partial_order(Some(inline_snapshot.order)),
+                ],
+                vec![],
+                vec![InlineTableFlush {
                     table_id,
-                    "main/runtime_fdb_inline_rewrite_file/replacement.parquet",
-                    248,
-                    100,
-                    inline_snapshot.order,
-                )
-                .with_row_id_start(0)
-                .with_max_partial_order(Some(inline_snapshot.order)),
-            ],
-            vec![],
-            vec![InlineTableFlush {
-                table_id,
-                schema_id,
-                flush_snapshot_sequence: delete_snapshot.sequence,
-            }],
-            Vec::new(),
-            Vec::new(),
+                    schema_id,
+                    flush_snapshot_sequence: delete_snapshot.sequence,
+                }],
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap();
         let rewrite_snapshot = latest_snapshot(&kv, catalog).unwrap().unwrap();
@@ -2236,11 +2244,7 @@ delete_position\t3\t0\n"
         schema_id: SchemaId,
         nested_type: &str,
     ) -> TableRow {
-        let top_type = match nested_type {
-            "list" => "list",
-            "struct" => "struct",
-            _ => nested_type,
-        };
+        let top_type = nested_type;
         let child_name = if nested_type == "list" {
             "element"
         } else {

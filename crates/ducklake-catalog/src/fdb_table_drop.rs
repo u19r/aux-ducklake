@@ -209,7 +209,7 @@ fn recover_committed_replacement(
         .iter()
         .map(|table| {
             load_table_at(kv, catalog, table.table_id, attempt.commit_order)?
-                .ok_or_else(|| CatalogError::NotFound("committed replacement table"))
+                .ok_or(CatalogError::NotFound("committed replacement table"))
         })
         .collect::<CatalogResult<Vec<_>>>()
         .map(Some)

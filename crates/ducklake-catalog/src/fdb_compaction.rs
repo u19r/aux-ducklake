@@ -84,10 +84,12 @@ impl FdbOrderedCatalogKv {
             catalog,
             attempt_id,
             commit_metadata,
-            compaction.new_files,
-            compaction.partition_values.clone(),
-            file_column_stats,
-            source_context.sources().to_vec(),
+            crate::fdb_data_mutations::FdbCompactionMutation {
+                data_files: compaction.new_files,
+                partition_values: compaction.partition_values.clone(),
+                file_column_stats,
+                dropped_data_files: source_context.sources().to_vec(),
+            },
         )?;
         compaction.new_files = commit.data_files;
         Ok(compaction)
@@ -205,13 +207,15 @@ impl FdbOrderedCatalogKv {
             catalog,
             attempt_id,
             commit_metadata,
-            compaction.new_files,
-            compaction.partition_values.clone(),
-            source_deletions.inline_file_deletions,
-            file_column_stats,
-            source_context.sources().to_vec(),
-            source_deletions.expired_delete_files,
-            source_context.table_id(),
+            crate::fdb_data_mutations::FdbRewriteDeleteMutation {
+                data_files: compaction.new_files,
+                partition_values: compaction.partition_values.clone(),
+                inline_file_deletions: source_deletions.inline_file_deletions,
+                file_column_stats,
+                dropped_data_files: source_context.sources().to_vec(),
+                expired_delete_files: source_deletions.expired_delete_files,
+                table_id: source_context.table_id(),
+            },
         )?;
         compaction.new_files = commit.data_files;
         Ok(compaction)
@@ -442,7 +446,7 @@ fn reject_source_delete_files(
     catalog: CatalogId,
     source_file_ids: &[DataFileId],
 ) -> CatalogResult<()> {
-    let current_delete_file_ids = current_delete_file_ids(kv, catalog, &source_file_ids)?;
+    let current_delete_file_ids = current_delete_file_ids(kv, catalog, source_file_ids)?;
     for data_file_id in source_file_ids {
         if current_delete_file_ids.contains_key(data_file_id) {
             return Err(CatalogError::InvalidMutation(format!(
@@ -458,8 +462,8 @@ fn normalize_rewrite_replacement_row_ids_from_sources(
     sources: &[DataFileRow],
     new_files: &mut [DataFileRow],
 ) -> CatalogResult<()> {
-    let source_start = min_known_source_row_id_start(&sources)?;
-    derive_unknown_rewrite_replacement_row_ids(&sources, new_files)?;
+    let source_start = min_known_source_row_id_start(sources)?;
+    derive_unknown_rewrite_replacement_row_ids(sources, new_files)?;
     for new_file in new_files {
         if new_file.row_id_start_known && new_file.row_id_start < source_start {
             new_file.row_id_start = source_start.saturating_add(new_file.row_id_start);
@@ -913,7 +917,7 @@ fn apply_merge_replacement_visibility(
         } else {
             replacement_visibility_sources(
                 &all_sources,
-                &source_partition_values,
+                source_partition_values,
                 &compaction.partition_values,
                 new_file,
             )?

@@ -158,7 +158,7 @@ mod tests {
     fn given_cross_schema_merge_sources_when_new_column_stats_missing_then_missing_rows_count_as_nulls()
      {
         let table = TableId(3);
-        let sources = vec![
+        let sources = [
             DataFileRow::new(
                 DataFileId(18),
                 table,

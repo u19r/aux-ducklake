@@ -4,11 +4,40 @@ mod tests {
 
     use super::super::*;
     use crate::{
-        CatalogError, CatalogOrderId, FakeOrderedCatalogKv, PartitionKeyIndex, RangeDirection,
-        RangeItem, initialize_catalog_if_absent,
+        CatalogError, CatalogOrderId, DeleteFileId, FakeOrderedCatalogKv, FilePartitionValueRow,
+        PartitionKeyIndex, RangeDirection, RangeItem, initialize_catalog_if_absent,
         keys::{KeyFamily, family_prefix, latest_snapshot_row_key, order_delete_file_change_key},
         register_file_partition_value,
     };
+
+    #[test]
+    fn given_encrypted_file_rows_when_encoded_then_both_keys_round_trip() {
+        let order = CatalogOrderId::uuid_v7(1);
+        let data_file = DataFileRow::new(
+            DataFileId(3),
+            TableId(7),
+            "encrypted.parquet",
+            10,
+            512,
+            order,
+        )
+        .with_encryption_key("AQIDBA==");
+        let delete_file = DeleteFileRow::new(
+            DeleteFileId(4),
+            DataFileId(3),
+            "encrypted-delete.parquet",
+            2,
+            128,
+            order,
+        )
+        .with_encryption_key("BQYHCA==");
+
+        assert_eq!(DataFileRow::decode(&data_file.encode()).unwrap(), data_file);
+        assert_eq!(
+            DeleteFileRow::decode(&delete_file.encode()).unwrap(),
+            delete_file
+        );
+    }
 
     #[test]
     fn given_later_cumulative_delete_exists_when_listing_before_its_change_then_original_delete_is_attached()

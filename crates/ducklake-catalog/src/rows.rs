@@ -310,6 +310,7 @@ pub struct DataFileRow {
     pub record_count: u64,
     pub file_size_bytes: u64,
     pub footer_size: Option<u64>,
+    pub encryption_key: String,
     pub row_id_start: u64,
     pub row_id_start_known: bool,
     pub mapping_id: Option<u64>,
@@ -318,7 +319,8 @@ pub struct DataFileRow {
 }
 
 impl DataFileRow {
-    const VERSION: u8 = 7;
+    const VERSION: u8 = 8;
+    const VERSION_WITH_ROW_ID_KNOWN: u8 = 7;
     #[cfg_attr(not(feature = "foundationdb"), allow(dead_code))]
     pub(crate) const BEGIN_ORDER_BYTES_OFFSET: usize = 1 + 8 + 8 + 8 + 8 + 8 + 1 + 1 + 8 + 1;
     #[cfg_attr(not(feature = "foundationdb"), allow(dead_code))]
@@ -341,6 +343,7 @@ impl DataFileRow {
             record_count,
             file_size_bytes,
             footer_size: None,
+            encryption_key: String::new(),
             row_id_start: 0,
             row_id_start_known: false,
             mapping_id: None,
@@ -365,6 +368,12 @@ impl DataFileRow {
     #[must_use]
     pub fn with_footer_size(mut self, footer_size: Option<u64>) -> Self {
         self.footer_size = footer_size;
+        self
+    }
+
+    #[must_use]
+    pub fn with_encryption_key(mut self, encryption_key: impl Into<String>) -> Self {
+        self.encryption_key = encryption_key.into();
         self
     }
 
@@ -397,6 +406,8 @@ impl DataFileRow {
                 + STORED_ORDER_LEN
                 + 1
                 + 8
+                + 4
+                + self.encryption_key.len()
                 + self.path.len(),
         );
         out.push(Self::VERSION);
@@ -447,6 +458,8 @@ impl DataFileRow {
                 out.extend_from_slice(&0_u64.to_be_bytes());
             }
         }
+        out.extend_from_slice(&(self.encryption_key.len() as u32).to_be_bytes());
+        out.extend_from_slice(self.encryption_key.as_bytes());
         out.extend_from_slice(self.path.as_bytes());
         out
     }
@@ -465,7 +478,11 @@ impl DataFileRow {
                 ));
             }
         };
-        let row_id_known_len = if version >= Self::VERSION { 1 } else { 0 };
+        let row_id_known_len = if version >= Self::VERSION_WITH_ROW_ID_KNOWN {
+            1
+        } else {
+            0
+        };
         let mapping_len = if version >= 4 { 1 + 8 } else { 0 };
         let max_partial_len = if version >= 5 {
             1 + STORED_ORDER_LEN
@@ -473,6 +490,7 @@ impl DataFileRow {
             0
         };
         let footer_len = if version >= 6 { 1 + 8 } else { 0 };
+        let encryption_len = if version >= Self::VERSION { 4 } else { 0 };
         let minimum_len = 1
             + 8
             + 8
@@ -485,7 +503,8 @@ impl DataFileRow {
             + 1
             + STORED_ORDER_LEN
             + max_partial_len
-            + footer_len;
+            + footer_len
+            + encryption_len;
         if bytes.len() < minimum_len {
             return Err(CatalogError::Decode(format!(
                 "data file row is too short: {} bytes",
@@ -506,7 +525,7 @@ impl DataFileRow {
         let max_partial_start = max_partial_present_index + 1;
         let footer_present_index = max_partial_present_index + max_partial_len;
         let footer_start = footer_present_index + 1;
-        let path_start = footer_present_index + footer_len;
+        let encryption_length_start = footer_present_index + footer_len;
         let data_file_id = DataFileId(u64::from_be_bytes(
             bytes[data_file_start..table_start]
                 .try_into()
@@ -532,7 +551,7 @@ impl DataFileRow {
                 .try_into()
                 .map_err(|_| CatalogError::Decode("row id start is truncated".to_owned()))?,
         );
-        let row_id_start_known = if version >= Self::VERSION {
+        let row_id_start_known = if version >= Self::VERSION_WITH_ROW_ID_KNOWN {
             match bytes[row_id_known_start] {
                 0 => false,
                 1 => true,
@@ -598,7 +617,7 @@ impl DataFileRow {
         };
         let footer_size = if version >= 6 {
             let value = u64::from_be_bytes(
-                bytes[footer_start..path_start]
+                bytes[footer_start..encryption_length_start]
                     .try_into()
                     .map_err(|_| CatalogError::Decode("footer size is truncated".to_owned()))?,
             );
@@ -614,6 +633,32 @@ impl DataFileRow {
         } else {
             None
         };
+        let (encryption_key, path_start) = if version >= Self::VERSION {
+            let encryption_value_start = encryption_length_start + 4;
+            let encryption_value_len = u32::from_be_bytes(
+                bytes[encryption_length_start..encryption_value_start]
+                    .try_into()
+                    .map_err(|_| {
+                        CatalogError::Decode(
+                            "data file encryption key length is truncated".to_owned(),
+                        )
+                    })?,
+            ) as usize;
+            let path_start = encryption_value_start.saturating_add(encryption_value_len);
+            if bytes.len() < path_start {
+                return Err(CatalogError::Decode(
+                    "data file encryption key is truncated".to_owned(),
+                ));
+            }
+            let encryption_key = std::str::from_utf8(&bytes[encryption_value_start..path_start])
+                .map_err(|err| {
+                    CatalogError::Decode(format!("data file encryption key is not utf8: {err}"))
+                })?
+                .to_owned();
+            (encryption_key, path_start)
+        } else {
+            (String::new(), encryption_length_start)
+        };
         let path = std::str::from_utf8(&bytes[path_start..])
             .map_err(|err| CatalogError::Decode(format!("data file path is not utf8: {err}")))?
             .to_owned();
@@ -624,6 +669,7 @@ impl DataFileRow {
             record_count,
             file_size_bytes,
             footer_size,
+            encryption_key,
             row_id_start,
             row_id_start_known,
             mapping_id,
@@ -640,12 +686,14 @@ pub struct DeleteFileRow {
     pub path: String,
     pub record_count: u64,
     pub file_size_bytes: u64,
+    pub encryption_key: String,
     pub validity: ValidityWindow,
     pub max_partial_order: Option<CatalogOrderId>,
 }
 
 impl DeleteFileRow {
-    const VERSION: u8 = 3;
+    const VERSION: u8 = 4;
+    const VERSION_WITH_MAX_PARTIAL_ORDER: u8 = 3;
     const VERSION_WITHOUT_MAX_PARTIAL_ORDER: u8 = 2;
     #[cfg_attr(not(feature = "foundationdb"), allow(dead_code))]
     pub(crate) const BEGIN_ORDER_BYTES_OFFSET: usize = 1 + 8 + 8 + 8 + 8 + 1;
@@ -668,6 +716,7 @@ impl DeleteFileRow {
             path: path.into(),
             record_count,
             file_size_bytes,
+            encryption_key: String::new(),
             validity: ValidityWindow::new(begin_order, None),
             max_partial_order: None,
         }
@@ -680,9 +729,24 @@ impl DeleteFileRow {
     }
 
     #[must_use]
+    pub fn with_encryption_key(mut self, encryption_key: impl Into<String>) -> Self {
+        self.encryption_key = encryption_key.into();
+        self
+    }
+
+    #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        let mut out =
-            Vec::with_capacity(1 + 8 + 8 + 8 + 8 + STORED_ORDER_LEN * 3 + 2 + self.path.len());
+        let mut out = Vec::with_capacity(
+            1 + 8
+                + 8
+                + 8
+                + 8
+                + STORED_ORDER_LEN * 3
+                + 2
+                + 4
+                + self.encryption_key.len()
+                + self.path.len(),
+        );
         out.push(Self::VERSION);
         out.extend_from_slice(&self.delete_file_id.0.to_be_bytes());
         out.extend_from_slice(&self.data_file_id.0.to_be_bytes());
@@ -709,6 +773,8 @@ impl DeleteFileRow {
                 encode_stored_order(&mut out, CatalogOrderId::uuid_v7(0));
             }
         }
+        out.extend_from_slice(&(self.encryption_key.len() as u32).to_be_bytes());
+        out.extend_from_slice(self.encryption_key.as_bytes());
         out.extend_from_slice(self.path.as_bytes());
         out
     }
@@ -716,6 +782,7 @@ impl DeleteFileRow {
     pub fn decode(bytes: &[u8]) -> CatalogResult<Self> {
         let version = match bytes.first().copied() {
             Some(Self::VERSION) => Self::VERSION,
+            Some(Self::VERSION_WITH_MAX_PARTIAL_ORDER) => Self::VERSION_WITH_MAX_PARTIAL_ORDER,
             Some(Self::VERSION_WITHOUT_MAX_PARTIAL_ORDER) => {
                 Self::VERSION_WITHOUT_MAX_PARTIAL_ORDER
             }
@@ -747,12 +814,12 @@ impl DeleteFileRow {
         let legacy_path_start = end_start + STORED_ORDER_LEN;
         let max_partial_present_index = legacy_path_start;
         let max_partial_start = max_partial_present_index + 1;
-        let path_start = if version == Self::VERSION {
+        let encryption_length_start = if version >= Self::VERSION_WITH_MAX_PARTIAL_ORDER {
             max_partial_start + STORED_ORDER_LEN
         } else {
             legacy_path_start
         };
-        if bytes.len() < path_start {
+        if bytes.len() < encryption_length_start {
             return Err(CatalogError::Decode(format!(
                 "delete file row version {version} is too short: {} bytes",
                 bytes.len()
@@ -792,7 +859,7 @@ impl DeleteFileRow {
                 )));
             }
         };
-        let max_partial_order = if version == Self::VERSION {
+        let max_partial_order = if version >= Self::VERSION_WITH_MAX_PARTIAL_ORDER {
             match bytes[max_partial_present_index] {
                 0 => None,
                 1 => Some(decode_stored_order(
@@ -808,6 +875,37 @@ impl DeleteFileRow {
         } else {
             None
         };
+        let (encryption_key, path_start) = if version >= Self::VERSION {
+            let encryption_value_start = encryption_length_start + 4;
+            if bytes.len() < encryption_value_start {
+                return Err(CatalogError::Decode(
+                    "delete file encryption key length is truncated".to_owned(),
+                ));
+            }
+            let encryption_value_len = u32::from_be_bytes(
+                bytes[encryption_length_start..encryption_value_start]
+                    .try_into()
+                    .map_err(|_| {
+                        CatalogError::Decode(
+                            "delete file encryption key length is truncated".to_owned(),
+                        )
+                    })?,
+            ) as usize;
+            let path_start = encryption_value_start.saturating_add(encryption_value_len);
+            if bytes.len() < path_start {
+                return Err(CatalogError::Decode(
+                    "delete file encryption key is truncated".to_owned(),
+                ));
+            }
+            let encryption_key = std::str::from_utf8(&bytes[encryption_value_start..path_start])
+                .map_err(|err| {
+                    CatalogError::Decode(format!("delete file encryption key is not utf8: {err}"))
+                })?
+                .to_owned();
+            (encryption_key, path_start)
+        } else {
+            (String::new(), encryption_length_start)
+        };
         let path = std::str::from_utf8(&bytes[path_start..])
             .map_err(|err| CatalogError::Decode(format!("delete file path is not utf8: {err}")))?
             .to_owned();
@@ -817,6 +915,7 @@ impl DeleteFileRow {
             path,
             record_count,
             file_size_bytes,
+            encryption_key,
             validity: ValidityWindow::new(begin_order, end_order),
             max_partial_order,
         })

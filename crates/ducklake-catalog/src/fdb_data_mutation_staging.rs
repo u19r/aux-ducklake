@@ -39,6 +39,12 @@ use crate::{
 const DELETE_FILE_END_ORDER_BYTES_OFFSET: usize =
     DeleteFileRow::BEGIN_ORDER_BYTES_OFFSET + STORED_ORDER_LEN + 1;
 
+pub(crate) struct DeleteFileCommitOrders {
+    pub begin: crate::CatalogOrderId,
+    pub timeline: crate::CatalogOrderId,
+    pub table_change: crate::CatalogOrderId,
+}
+
 pub(crate) fn stage_snapshot(
     kv: &FdbOrderedCatalogKv,
     trx: &foundationdb::Transaction,
@@ -177,9 +183,7 @@ pub(crate) fn stage_delete_file_without_watermark(
     catalog: crate::CatalogId,
     data_file: &DataFileRow,
     row: &DeleteFileRow,
-    delete_file_begin_order: crate::CatalogOrderId,
-    timeline_order: crate::CatalogOrderId,
-    table_change_order: crate::CatalogOrderId,
+    orders: DeleteFileCommitOrders,
 ) -> CatalogResult<()> {
     let mut row = row.clone();
     if let Some(inherited_begin_order) =
@@ -187,11 +191,11 @@ pub(crate) fn stage_delete_file_without_watermark(
     {
         row.validity.begin_order = inherited_begin_order;
         if row.max_partial_order.is_none() {
-            row.max_partial_order = Some(timeline_order);
+            row.max_partial_order = Some(orders.timeline);
         }
     }
     let delete_file_begin_order = if row.validity.begin_order == incomplete_order() {
-        delete_file_begin_order
+        orders.begin
     } else {
         row.validity.begin_order
     };
@@ -231,13 +235,13 @@ pub(crate) fn stage_delete_file_without_watermark(
             &row.encode(),
         );
     }
-    if timeline_order == incomplete_order() {
+    if orders.timeline == incomplete_order() {
         trx.atomic_op(
             &kv.versionstamped_key(
                 &delete_file_timeline_key(
                     catalog,
                     row.data_file_id,
-                    timeline_order,
+                    orders.timeline,
                     row.delete_file_id,
                 ),
                 delete_file_timeline_key_order_offset(catalog, row.data_file_id),
@@ -250,7 +254,7 @@ pub(crate) fn stage_delete_file_without_watermark(
             &kv.namespaced_key(&delete_file_timeline_key(
                 catalog,
                 row.data_file_id,
-                timeline_order,
+                orders.timeline,
                 row.delete_file_id,
             )),
             &row.encode(),
@@ -261,7 +265,7 @@ pub(crate) fn stage_delete_file_without_watermark(
         trx,
         catalog,
         data_file.table_id,
-        table_change_order,
+        orders.table_change,
         row.delete_file_id,
     )?;
     Ok(())

@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[test]
 fn inline_row_limit_stays_under_foundationdb_item_limit() {
     assert_eq!(INLINE_PAYLOAD_LIMIT_BYTES, 90 * 1024);
-    assert!(INLINE_PAYLOAD_LIMIT_BYTES < 100 * 1024);
+    const { assert!(INLINE_PAYLOAD_LIMIT_BYTES < 100 * 1024) };
     assert!(
         validate_inline_table_rows_fit_fdb(&small_inline_rows_payload(
             INLINE_PAYLOAD_LIMIT_BYTES + 1

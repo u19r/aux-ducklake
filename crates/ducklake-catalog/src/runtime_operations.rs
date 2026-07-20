@@ -64,7 +64,7 @@ pub(crate) fn payload_for_request(request: &RuntimeRequest) -> CatalogResult<Vec
         "ResolveCatalogId" => resolve_catalog_id(request.backend, catalog, &request.payload),
         "AttachMetadata" => attach_metadata(request.backend, catalog, &request.payload),
         "MetadataExists" => metadata_exists(request.backend, catalog),
-        "InitializeDuckLake" => initialize_ducklake(request.backend, catalog),
+        "InitializeDuckLake" => initialize_ducklake(request.backend, catalog, &request.payload),
         "CommitMetadataBatch" => commit_metadata_batch(request.backend, catalog),
         "SetConfigOption" => set_config_option(request.backend, catalog, &request.payload),
         "ListConfigOptions" => list_config_options(request.backend, catalog),

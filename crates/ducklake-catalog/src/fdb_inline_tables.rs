@@ -42,6 +42,13 @@ use crate::{
     table_store::load_current_table_row,
 };
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct InlineTableCommitContext<'a> {
+    pub commit_snapshot: Option<DuckLakeSnapshotId>,
+    pub read_snapshot: Option<DuckLakeSnapshotId>,
+    pub commit_metadata: Option<&'a crate::SnapshotCommitMetadata>,
+}
+
 impl FdbOrderedCatalogKv {
     pub fn register_inline_table_payload_versionstamped(
         &self,
@@ -51,7 +58,13 @@ impl FdbOrderedCatalogKv {
         payload: Vec<u8>,
     ) -> CatalogResult<Vec<InlineTableChunkRow>> {
         commit_inline_table_payload(
-            self, catalog, None, table_id, schema_id, payload, None, None, None,
+            self,
+            catalog,
+            None,
+            table_id,
+            schema_id,
+            payload,
+            InlineTableCommitContext::default(),
         )
     }
 
@@ -63,7 +76,11 @@ impl FdbOrderedCatalogKv {
         payload: Vec<u8>,
     ) -> CatalogResult<Vec<InlineTableChunkRow>> {
         self.register_inline_table_payload_with_table_at_snapshot_versionstamped(
-            catalog, table, schema_id, payload, None, None, None,
+            catalog,
+            table,
+            schema_id,
+            payload,
+            InlineTableCommitContext::default(),
         )
     }
 
@@ -73,9 +90,7 @@ impl FdbOrderedCatalogKv {
         table: TableRow,
         schema_id: SchemaId,
         payload: Vec<u8>,
-        commit_snapshot: Option<DuckLakeSnapshotId>,
-        read_snapshot: Option<DuckLakeSnapshotId>,
-        commit_metadata: Option<&crate::SnapshotCommitMetadata>,
+        context: InlineTableCommitContext<'_>,
     ) -> CatalogResult<Vec<InlineTableChunkRow>> {
         let table_id = table.table_id;
         commit_inline_table_payload(
@@ -85,9 +100,7 @@ impl FdbOrderedCatalogKv {
             table_id,
             schema_id,
             payload,
-            commit_snapshot,
-            read_snapshot,
-            commit_metadata,
+            context,
         )
     }
 
@@ -140,20 +153,18 @@ fn commit_inline_table_payload(
     table_id: TableId,
     schema_id: SchemaId,
     payload: Vec<u8>,
-    commit_snapshot: Option<DuckLakeSnapshotId>,
-    read_snapshot: Option<DuckLakeSnapshotId>,
-    commit_metadata: Option<&crate::SnapshotCommitMetadata>,
+    context: InlineTableCommitContext<'_>,
 ) -> CatalogResult<Vec<InlineTableChunkRow>> {
     validate_inline_table_rows_fit_fdb(&payload)?;
     let latest = latest_snapshot(kv, catalog)?;
-    if let Some(commit_snapshot) = commit_snapshot {
+    if let Some(commit_snapshot) = context.commit_snapshot {
         let latest_sequence = latest
             .as_ref()
             .ok_or(CatalogError::NotFound("catalog snapshot"))?
             .sequence;
         let latest_commit = DuckLakeSnapshotId(latest_sequence.0);
         let next_commit = DuckLakeSnapshotId(latest_sequence.next().0);
-        let valid_commit_snapshot = if read_snapshot.is_some() {
+        let valid_commit_snapshot = if context.read_snapshot.is_some() {
             commit_snapshot == next_commit
         } else {
             commit_snapshot == latest_commit || commit_snapshot == next_commit
@@ -165,14 +176,14 @@ fn commit_inline_table_payload(
             )));
         }
     }
-    let next_sequence = match (latest.as_ref(), commit_snapshot) {
+    let next_sequence = match (latest.as_ref(), context.commit_snapshot) {
         (_, Some(commit_snapshot)) => crate::RawSnapshotSequence(commit_snapshot.0),
         (Some(snapshot), None) => snapshot.sequence.next(),
         (None, None) => crate::RawSnapshotSequence::initial(),
     };
     let placeholder = incomplete_order();
-    let snapshot =
-        SnapshotRow::new(placeholder, next_sequence).with_optional_commit_metadata(commit_metadata);
+    let snapshot = SnapshotRow::new(placeholder, next_sequence)
+        .with_optional_commit_metadata(context.commit_metadata);
     let rows = inline_table_chunks(table_id, schema_id, placeholder, payload.clone())?;
     let row_changes = staged_inline_change_keys(catalog, table_id, schema_id, &payload)?;
     let replacement = prepare_table_replacement(kv, catalog, latest.as_ref(), placeholder, table)?;
@@ -316,7 +327,7 @@ fn commit_delete_inline_table_rows(
 
     for (begin_order, chunks) in visible_payloads {
         let begin_snapshot = public_snapshot_sequence_for_order(kv, catalog, begin_order)?
-            .ok_or_else(|| CatalogError::NotFound("inline payload snapshot"))?
+            .ok_or(CatalogError::NotFound("inline payload snapshot"))?
             .0;
         if begin_snapshot >= target.snapshot.sequence.0 {
             continue;
@@ -503,14 +514,13 @@ fn fdb_inline_delete_target(
     latest: &SnapshotRow,
     commit_snapshot: Option<DuckLakeSnapshotId>,
 ) -> CatalogResult<FdbInlineDeleteTarget> {
-    if let Some(commit_snapshot) = commit_snapshot {
-        if let Some(snapshot) = crate::snapshot_by_ducklake_sequence(kv, catalog, commit_snapshot)?
-        {
-            return Ok(FdbInlineDeleteTarget {
-                snapshot,
-                stage_snapshot: false,
-            });
-        }
+    if let Some(commit_snapshot) = commit_snapshot
+        && let Some(snapshot) = crate::snapshot_by_ducklake_sequence(kv, catalog, commit_snapshot)?
+    {
+        return Ok(FdbInlineDeleteTarget {
+            snapshot,
+            stage_snapshot: false,
+        });
     }
     Ok(FdbInlineDeleteTarget {
         snapshot: SnapshotRow::new(incomplete_order(), latest.sequence.next()),

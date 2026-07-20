@@ -69,6 +69,12 @@ fn record_runtime_request_stage(
 }
 
 #[unsafe(no_mangle)]
+/// Executes one catalog runtime request and writes the owned response buffer to `out`.
+///
+/// # Safety
+///
+/// `request_ptr` must reference `request_len` readable bytes for the duration of the call, and
+/// `out` must be a valid, writable pointer to an exclusively owned buffer descriptor.
 pub unsafe extern "C" fn ducklake_catalog_runtime_probe(
     request_ptr: *const u8,
     request_len: usize,
@@ -116,6 +122,12 @@ pub unsafe extern "C" fn ducklake_catalog_runtime_probe(
 }
 
 #[unsafe(no_mangle)]
+/// Releases a response buffer returned by [`ducklake_catalog_runtime_probe`].
+///
+/// # Safety
+///
+/// `ptr` and `len` must be the unchanged pair returned by `ducklake_catalog_runtime_probe`, and
+/// the buffer must not have been freed previously.
 pub unsafe extern "C" fn ducklake_catalog_runtime_free(ptr: *mut u8, len: usize) {
     if ptr.is_null() {
         return;

@@ -4,6 +4,7 @@ FROM registry.access.redhat.com/ubi9/ubi:latest AS builder
 
 ARG FDB_VERSION=7.4.6
 ARG CROARING_VERSION=4.3.12
+ARG POSTGRES_VERSION=18.3
 ARG DUCKDB_PLATFORM=linux_amd64
 ARG AUX_DUCKLAKE_PACKAGE_PLATFORM=linux-amd64
 ARG AUX_DUCKLAKE_RELEASE_VERSION
@@ -33,7 +34,6 @@ RUN set -eux; \
         openssl-devel \
         patch \
         perl \
-        postgresql-devel \
         pkgconf-pkg-config \
         python3 \
         tar \
@@ -60,8 +60,33 @@ RUN set -eux; \
     cmake --install /tmp/croaring-build; \
     rm -rf "/tmp/CRoaring-${CROARING_VERSION}" /tmp/croaring-build
 
+# UBI omits Bison and Flex; libpq does not regenerate parsers from a PostgreSQL release archive.
+RUN set -eux; \
+    curl -fsSL "https://ftp.postgresql.org/pub/source/v${POSTGRES_VERSION}/postgresql-${POSTGRES_VERSION}.tar.gz" \
+        | tar -xz -C /tmp; \
+    cd "/tmp/postgresql-${POSTGRES_VERSION}"; \
+    BISON='/bin/echo bison version is 3.8' FLEX='/bin/echo flex 2.6.4' ./configure \
+        --prefix=/opt/postgresql \
+        --with-libcurl \
+        --with-openssl \
+        --without-icu \
+        --without-readline \
+        --without-zlib; \
+    make -C src/include pg_config.h pg_config_os.h; \
+    install -d /opt/postgresql/include/libpq; \
+    install -m 0644 \
+        src/include/postgres_ext.h \
+        src/include/pg_config.h \
+        src/include/pg_config_os.h \
+        src/include/pg_config_manual.h \
+        /opt/postgresql/include/; \
+    install -m 0644 src/include/libpq/libpq-fs.h /opt/postgresql/include/libpq/; \
+    make -C src/interfaces/libpq install; \
+    make -C src/bin/pg_config install; \
+    rm -rf "/tmp/postgresql-${POSTGRES_VERSION}"
+
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-ENV PATH="/root/.cargo/bin:${PATH}"
+ENV PATH="/root/.cargo/bin:/opt/postgresql/bin:${PATH}"
 
 WORKDIR /workspace
 COPY . .

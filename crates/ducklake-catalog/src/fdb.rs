@@ -13,7 +13,7 @@ use futures::executor::block_on;
 
 use crate::{
     CatalogCacheNamespace, CatalogError, CatalogResult, DataFileChangeKind, DataFileRow,
-    DeleteFileRow, SnapshotRow, ValidityWindow,
+    DeleteFileRow, MetadataSettingRow, SnapshotRow, ValidityWindow,
     fdb_runtime::{map_fdb_commit_error, map_fdb_error, shared_foundationdb_database},
     fdb_versionstamp::{
         append_versionstamp_offset, committed_order, data_file_begin_key_order_offset,
@@ -32,6 +32,7 @@ use crate::{
         table_data_file_change_key, table_delete_file_change_key,
     },
     kv::OrderedCatalogKv,
+    metadata_settings::metadata_setting_key,
     store::{latest_snapshot, stage_fdb_latest_snapshot_value},
 };
 
@@ -103,6 +104,14 @@ impl FdbOrderedCatalogKv {
         &self,
         catalog: crate::CatalogId,
     ) -> CatalogResult<SnapshotRow> {
+        self.initialize_empty_catalog_with_metadata_versionstamped(catalog, &[])
+    }
+
+    fn initialize_empty_catalog_with_metadata_versionstamped(
+        &self,
+        catalog: crate::CatalogId,
+        metadata: &[MetadataSettingRow],
+    ) -> CatalogResult<SnapshotRow> {
         let placeholder = incomplete_order();
         let row = SnapshotRow::initial(placeholder);
         let trx = self.create_transaction()?;
@@ -123,6 +132,12 @@ impl FdbOrderedCatalogKv {
             MutationType::SetVersionstampedKey,
         );
         stage_fdb_latest_snapshot_value(self, &trx, catalog, &row)?;
+        for setting in metadata {
+            trx.set(
+                &self.namespaced_key(&metadata_setting_key(catalog, setting.scope, &setting.key)),
+                setting.value.as_bytes(),
+            );
+        }
         let versionstamp = trx.get_versionstamp();
         block_on(trx.commit()).map_err(map_fdb_commit_error)?;
         let order = committed_order(block_on(versionstamp).map_err(map_fdb_error)?.deref())?;
@@ -140,6 +155,17 @@ impl FdbOrderedCatalogKv {
         match latest_snapshot(self, catalog)? {
             Some(row) => Ok(row),
             None => self.initialize_empty_catalog_versionstamped(catalog),
+        }
+    }
+
+    pub(crate) fn initialize_catalog_with_metadata_if_absent_versionstamped(
+        &self,
+        catalog: crate::CatalogId,
+        metadata: &[MetadataSettingRow],
+    ) -> CatalogResult<SnapshotRow> {
+        match latest_snapshot(self, catalog)? {
+            Some(row) => Ok(row),
+            None => self.initialize_empty_catalog_with_metadata_versionstamped(catalog, metadata),
         }
     }
 

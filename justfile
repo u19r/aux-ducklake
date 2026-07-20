@@ -8,13 +8,25 @@ default:
 setup:
     @just _setup
 
+# Build the primary local DuckLake debug artifact.
+build:
+    @just ducklake-build
+
 # Run cargo check for the full workspace.
 check:
     @just _check
 
-# Apply Rust formatting.
-style:
-    @just _style
+# Check Rust formatting without modifying files.
+style-check:
+    @just _style-check
+
+# Apply deterministic Rust formatting.
+style-fix:
+    @just _style-fix
+
+# Print the curated style cleanup queue when one exists.
+style-audit:
+    @if test -f style-debt.tsv; then cat style-debt.tsv; else echo "No curated style debt."; fi
 
 # Run workspace tests.
 test:
@@ -52,11 +64,12 @@ _check:
     ./scripts/fetch_ducklake.sh
     ./scripts/cargo_with_sccache.sh check --workspace --all-targets --all-features
 
-_style:
+_style-fix:
     ./scripts/cargo_with_sccache.sh fmt --all
 
 _style-check:
     ./scripts/cargo_with_sccache.sh fmt --all --check
+    ./scripts/cargo_with_sccache.sh clippy --workspace --all-targets --all-features --no-deps -- -D warnings
 
 _test:
     ./scripts/cargo_with_sccache.sh test --workspace --all-targets
@@ -73,7 +86,6 @@ _ci-check:
     #!/usr/bin/env bash
     set -euo pipefail
     ./scripts/fetch_ducklake.sh
-    just _style-check
     ./scripts/cargo_with_sccache.sh check -p ducklake-catalog --all-targets
     just _runtime-protocol-check
     just _workload-inventory-verify
@@ -139,6 +151,9 @@ ducklake-runtime-cpp-ffi-smoke:
 
 ducklake-fdb-runtime-smoke:
     ./scripts/ducklake_runtime_cpp_ffi_smoke.sh fdb
+
+ducklake-fdb-encryption:
+    ./scripts/ducklake-fdb-encryption.sh
 
 ducklake-fdb-prefix-clone-drill:
     ./scripts/ducklake_fdb_prefix_clone_drill.sh

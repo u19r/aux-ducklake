@@ -34,6 +34,9 @@ cmake_args=(
     -DENABLE_UBSAN=0
     -DCMAKE_BUILD_TYPE=Release
 )
+while IFS= read -r postgres_arg; do
+    [[ -n "$postgres_arg" ]] && cmake_args+=("$postgres_arg")
+done < <(ducklake_postgres_cmake_args required)
 if [[ -n "${CMAKE_PREFIX_PATH:-}" ]]; then
     cmake_args+=("-DCMAKE_PREFIX_PATH=$CMAKE_PREFIX_PATH")
 fi
@@ -42,7 +45,7 @@ case "${GEN:-}" in
     make | "") ;;
     *) echo "unsupported GEN for release build: $GEN" >&2; exit 1 ;;
 esac
-cmake "${cmake_args[@]}" -S "$DUCKLAKE_DIR/duckdb" -B "$release_dir"
+ENABLE_POSTGRES_SCANNER=1 cmake "${cmake_args[@]}" -S "$DUCKLAKE_DIR/duckdb" -B "$release_dir"
 case "$(uname -s)" in
     Darwin) duckdb_shared_target="libduckdb.dylib" ;;
     Linux) duckdb_shared_target="libduckdb.so" ;;
@@ -51,9 +54,11 @@ esac
 cmake --build "$release_dir" --config Release --target \
     duckdb \
     shell \
+    postgres_scanner.duckdb_extension \
     "$duckdb_shared_target"
 
 runtime_library="$(ducklake_release_runtime_library "$ROOT_DIR")"
+postgres_scanner_extension="$release_dir/extension/postgres_scanner/postgres_scanner.duckdb_extension"
 [[ -x "$release_dir/duckdb" ]] || {
     echo "missing release DuckDB binary at $release_dir/duckdb" >&2
     exit 1
@@ -68,6 +73,10 @@ if ! compgen -G "$release_dir/src/libduckdb.so*" >/dev/null && ! compgen -G "$re
 fi
 [[ -f "$runtime_library" ]] || {
     echo "missing release Rust FFI runtime at $runtime_library" >&2
+    exit 1
+}
+[[ -f "$postgres_scanner_extension" ]] || {
+    echo "missing release postgres_scanner extension at $postgres_scanner_extension" >&2
     exit 1
 }
 

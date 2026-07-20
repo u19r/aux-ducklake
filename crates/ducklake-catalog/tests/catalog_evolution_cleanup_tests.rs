@@ -1012,11 +1012,13 @@ fn given_view_created_and_commented_then_history_preserves_comment_versions() {
         ViewRow::new(
             view,
             SchemaId(0),
-            "view-uuid",
-            "orders_view",
-            "duckdb",
-            "SELECT 1 AS id",
-            vec!["id".to_owned()],
+            ducklake_catalog::ViewDefinition::new(
+                "view-uuid",
+                "orders_view",
+                "duckdb",
+                "SELECT 1 AS id",
+                vec!["id".to_owned()],
+            ),
             CatalogOrderId::uuid_v7(0),
         ),
     )
@@ -1075,11 +1077,13 @@ fn given_view_renamed_and_dropped_then_history_preserves_versions() {
         ViewRow::new(
             view,
             SchemaId(0),
-            "view-uuid",
-            "orders_view",
-            "duckdb",
-            "SELECT 1 AS id",
-            vec!["id".to_owned()],
+            ducklake_catalog::ViewDefinition::new(
+                "view-uuid",
+                "orders_view",
+                "duckdb",
+                "SELECT 1 AS id",
+                vec!["id".to_owned()],
+            ),
             CatalogOrderId::uuid_v7(0),
         )
         .with_comment(Some("view comment")),
