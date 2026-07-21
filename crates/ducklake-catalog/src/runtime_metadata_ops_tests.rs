@@ -239,7 +239,7 @@ mod tests {
         assert!(data_sql.contains(", 10, 11, 7,"), "{data_sql}");
         assert!(data_sql.contains(", 128, 42,"), "{data_sql}");
         assert!(data_sql.contains(", 'AQIDBA==', 99,"), "{data_sql}");
-        assert!(data_sql.contains(", 99, 12);"), "{data_sql}");
+        assert!(data_sql.contains(", 99, 12, NULL);"), "{data_sql}");
 
         let partition_sql = file_partition_values_mirror_sql(vec![
             FilePartitionValueRow::new(
@@ -291,7 +291,7 @@ mod tests {
         assert!(delete_sql.contains("'delete''a.parquet'"), "{delete_sql}");
         assert!(delete_sql.contains(", 10, 11, 7,"), "{delete_sql}");
         assert!(
-            delete_sql.contains(", 0, 'BQYHCA==', NULL);"),
+            delete_sql.contains(", 0, 'BQYHCA==', NULL, NULL);"),
             "{delete_sql}"
         );
 
