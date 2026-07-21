@@ -195,7 +195,7 @@ new file mode 100644
 index 00000000..4e8930d4
 --- /dev/null
 +++ b/src/include/metadata_manager/aux_catalog_metadata_manager.hpp
-@@ -0,0 +1,259 @@
+@@ -0,0 +1,260 @@
 +//===----------------------------------------------------------------------===//
 +//                         DuckDB
 +//
@@ -236,6 +236,7 @@ index 00000000..4e8930d4
 +	unique_ptr<QueryResult> AttachMetadata(const string &attach_query) override;
 +	bool MetadataExists() override;
 +	void InitializeDuckLake(bool has_explicit_schema, DuckLakeEncryption encryption) override;
++	void MigrateV10(bool allow_failures = false) override;
 +	DuckLakeMetadata LoadDuckLake() override;
 +	unique_ptr<QueryResult> Query(DuckLakeSnapshot snapshot, string &query) override;
 +	unique_ptr<DuckLakeSnapshot> GetSnapshot() override;
@@ -2125,7 +2126,7 @@ index 00000000..6d0f7e0c
 +void AuxCatalogMetadataManager::EnsureDataFileMirrorTable() {
 +	EnsureMetadataMirrorSchema();
 +	string query = R"(
-+CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_data_file(data_file_id BIGINT PRIMARY KEY, table_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, file_order BIGINT, path VARCHAR, path_is_relative BOOLEAN, file_format VARCHAR, record_count BIGINT, file_size_bytes BIGINT, footer_size BIGINT, row_id_start BIGINT, partition_id BIGINT, encryption_key VARCHAR, mapping_id BIGINT, partial_max BIGINT);
++CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_data_file(data_file_id BIGINT PRIMARY KEY, table_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, file_order BIGINT, path VARCHAR, path_is_relative BOOLEAN, file_format VARCHAR, record_count BIGINT, file_size_bytes BIGINT, footer_size BIGINT, row_id_start BIGINT, partition_id BIGINT, encryption_key VARCHAR, mapping_id BIGINT, partial_max BIGINT, row_group_count BIGINT);
 +)";
 +	SubstituteCatalogPlaceholders(query);
 +	auto result = transaction.ExecuteRaw(query);
@@ -2137,7 +2138,7 @@ index 00000000..6d0f7e0c
 +void AuxCatalogMetadataManager::EnsureDeleteFileMirrorTable() {
 +	EnsureMetadataMirrorSchema();
 +	string query = R"(
-+CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_delete_file(delete_file_id BIGINT PRIMARY KEY, table_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, data_file_id BIGINT, path VARCHAR, path_is_relative BOOLEAN, format VARCHAR, delete_count BIGINT, file_size_bytes BIGINT, footer_size BIGINT, encryption_key VARCHAR, partial_max BIGINT);
++CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.ducklake_delete_file(delete_file_id BIGINT PRIMARY KEY, table_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, data_file_id BIGINT, path VARCHAR, path_is_relative BOOLEAN, format VARCHAR, delete_count BIGINT, file_size_bytes BIGINT, footer_size BIGINT, encryption_key VARCHAR, partial_max BIGINT, row_group_count BIGINT);
 +)";
 +	SubstituteCatalogPlaceholders(query);
 +	auto result = transaction.ExecuteRaw(query);
@@ -5203,7 +5204,7 @@ new file mode 100644
 index 00000000..6c9a5c8c
 --- /dev/null
 +++ b/src/metadata_manager/aux_catalog_metadata_manager.cpp
-@@ -0,0 +1,1281 @@
+@@ -0,0 +1,1287 @@
 +#include "metadata_manager/aux_catalog_metadata_manager.hpp"
 +#include "metadata_manager/aux_catalog_tabular_payload.hpp"
 +#include "metadata_manager/aux_catalog_runtime_bridge.hpp"
@@ -5927,6 +5928,12 @@ index 00000000..6c9a5c8c
 +	                                  DuckDB::SourceID(), data_path, encrypted);
 +	auto output = RuntimeExecute("InitializeDuckLake", payload);
 +	std::fwrite(output.data(), 1, output.size(), stdout);
++}
++
++void AuxCatalogMetadataManager::MigrateV10(bool) {
++	DuckLakeConfigOption option;
++	option.option = {"version", "1.1-dev1"};
++	SetConfigOption(option);
 +}
 +
 +unique_ptr<DuckLakeSnapshot> AuxCatalogMetadataManager::GetSnapshot() {

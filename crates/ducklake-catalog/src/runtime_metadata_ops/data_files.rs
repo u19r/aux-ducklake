@@ -189,7 +189,7 @@ THEN (SELECT partition_id FROM {{METADATA_CATALOG}}.ducklake_partition_info WHER
             row.data_file_id.0, row.table_id.0
         );
         out.push_str(&format!(
-            "INSERT INTO {{METADATA_CATALOG}}.ducklake_data_file VALUES ({}, {}, {}, {}, {}, {}, false, 'parquet', {}, {}, {}, {}, {}, {}, {}, {});\n",
+            "INSERT INTO {{METADATA_CATALOG}}.ducklake_data_file VALUES ({}, {}, {}, {}, {}, {}, false, 'parquet', {}, {}, {}, {}, {}, {}, {}, {}, NULL);\n",
             row.data_file_id.0,
             row.table_id.0,
             begin_snapshot,

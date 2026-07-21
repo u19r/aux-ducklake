@@ -176,6 +176,27 @@ assert_contains "$output" "cdf_delete=1,10,1"
 assert_contains "$output" "old_cleanup_dry_run=0"
 assert_contains "$output" "orphan_cleanup_dry_run=1"
 
+set +e
+reattach_output="$("$DUCKDB_BIN" -batch 2>&1 <<SQL
+LOAD ducklake;
+ATTACH 'ducklake:$tmp_dir/metadata.duckdb' AS dl (
+    DATA_PATH '$tmp_dir/data',
+    META_TYPE 'aux_catalog',
+    DATA_INLINING_ROW_LIMIT 0,
+    AUTOMATIC_MIGRATION true
+);
+SELECT 'reattach_count=' || count(*)
+FROM dl.main.runtime_probe;
+SQL
+)"
+reattach_status=$?
+set -e
+
+printf '%s\n' "$reattach_output"
+
+[[ "$reattach_status" -eq 0 ]] || fail "expected existing aux_catalog attach to succeed"
+assert_contains "$reattach_output" "reattach_count=0"
+
 export AUX_DUCKLAKE_FDB_PREFIX="aux-ducklake/runtime-smoke/$catalog_run_id/inline/"
 
 set +e

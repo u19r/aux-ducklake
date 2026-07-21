@@ -185,7 +185,7 @@ pub(super) fn append_delete_file_mirror_inserts(
             row.validity.end_order,
         ));
         out.push_str(&format!(
-            "INSERT INTO {{METADATA_CATALOG}}.ducklake_delete_file VALUES ({}, (SELECT table_id FROM {{METADATA_CATALOG}}.ducklake_data_file WHERE data_file_id = {}), {}, {}, {}, {}, false, 'parquet', {}, {}, 0, {}, NULL);\n",
+            "INSERT INTO {{METADATA_CATALOG}}.ducklake_delete_file VALUES ({}, (SELECT table_id FROM {{METADATA_CATALOG}}.ducklake_data_file WHERE data_file_id = {}), {}, {}, {}, {}, false, 'parquet', {}, {}, 0, {}, NULL, NULL);\n",
             row.delete_file_id.0,
             row.data_file_id.0,
             begin_snapshot,
