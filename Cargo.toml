@@ -18,4 +18,5 @@ rust-version = "1.96.0"
 foundationdb = { version = "0.11.0", default-features = false, features = ["embedded-fdb-include", "fdb-7_4"] }
 foundationdb-simulation = { version = "0.3.0", default-features = false, features = ["embedded-fdb-include", "fdb-7_4", "cpp-abi"] }
 futures = "0.3.31"
+sha2 = "0.10.9"
 tempfile = "3.27.0"

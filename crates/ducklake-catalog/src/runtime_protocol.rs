@@ -1,8 +1,10 @@
 use crate::{CatalogError, CatalogId, CatalogResult};
+use sha2::{Digest, Sha256};
 
-pub const RUNTIME_PROTOCOL_VERSION: u16 = 1;
+pub const RUNTIME_PROTOCOL_VERSION: u16 = 2;
 pub const MAX_RUNTIME_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_RUNTIME_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_RUNTIME_PAGE_PAYLOAD_BYTES: usize = 512 * 1024;
 pub const MAX_RUNTIME_PAYLOAD_BYTES: usize = 900 * 1024;
 pub const MAX_RUNTIME_OPERATION_BYTES: usize = 64;
 pub const MAX_RUNTIME_REQUEST_ID_BYTES: usize = 64;
@@ -38,6 +40,8 @@ pub struct RuntimeRequest {
     pub catalog_id: CatalogId,
     pub operation: String,
     pub payload: Vec<u8>,
+    pub page_offset: usize,
+    pub page_etag: Option<String>,
 }
 
 impl RuntimeRequest {
@@ -53,6 +57,8 @@ impl RuntimeRequest {
             catalog_id: CatalogId(1),
             operation: operation.into(),
             payload,
+            page_offset: 0,
+            page_etag: None,
         };
         request.validate()?;
         Ok(request)
@@ -64,16 +70,30 @@ impl RuntimeRequest {
         Ok(self)
     }
 
+    pub fn with_page(mut self, offset: usize, etag: impl Into<String>) -> CatalogResult<Self> {
+        self.page_offset = offset;
+        self.page_etag = Some(etag.into());
+        self.validate()?;
+        Ok(self)
+    }
+
     pub fn encode(&self) -> CatalogResult<Vec<u8>> {
         self.validate()?;
-        let header = format!(
-            "{MAGIC}/{RUNTIME_PROTOCOL_VERSION}\nrequest_id={}\nbackend={}\ncatalog_id={}\noperation={}\npayload_len={}\n\n",
+        let mut header = format!(
+            "{MAGIC}/{RUNTIME_PROTOCOL_VERSION}\nrequest_id={}\nbackend={}\ncatalog_id={}\noperation={}\npayload_len={}\n",
             self.request_id,
             self.backend.as_str(),
             self.catalog_id.0,
             self.operation,
             self.payload.len()
         );
+        if let Some(etag) = &self.page_etag {
+            header.push_str(&format!(
+                "page_offset={}\npage_etag={}\n",
+                self.page_offset, etag
+            ));
+        }
+        header.push('\n');
         let mut out = Vec::with_capacity(header.len().saturating_add(self.payload.len()));
         out.extend_from_slice(header.as_bytes());
         out.extend_from_slice(&self.payload);
@@ -90,6 +110,8 @@ impl RuntimeRequest {
         let mut catalog_id = None;
         let mut operation = None;
         let mut payload_len = None;
+        let mut page_offset = None;
+        let mut page_etag = None;
         for (index, line) in header.lines().enumerate() {
             if index == 0 {
                 version = Some(parse_magic(line)?);
@@ -102,6 +124,8 @@ impl RuntimeRequest {
                 "catalog_id" => catalog_id = Some(CatalogId(parse_u64(value, "catalog_id")?)),
                 "operation" => operation = Some(value.to_owned()),
                 "payload_len" => payload_len = Some(parse_usize(value, "payload_len")?),
+                "page_offset" => page_offset = Some(parse_usize(value, "page_offset")?),
+                "page_etag" => page_etag = Some(value.to_owned()),
                 _ => {
                     return Err(CatalogError::Decode(format!(
                         "unknown runtime request header {key}"
@@ -111,13 +135,25 @@ impl RuntimeRequest {
         }
         require_version(version)?;
         require_payload_len(payload_len, payload.len())?;
-        Self::new(
+        let mut request = Self::new(
             required_header(request_id, "request_id")?,
             required_header(backend, "backend")?,
             required_header(operation, "operation")?,
             payload.to_vec(),
         )?
-        .with_catalog_id(catalog_id.unwrap_or(CatalogId(1)))
+        .with_catalog_id(catalog_id.unwrap_or(CatalogId(1)))?;
+        match (page_offset, page_etag) {
+            (None, None) => Ok(request),
+            (Some(offset), Some(etag)) => {
+                request.page_offset = offset;
+                request.page_etag = Some(etag);
+                request.validate()?;
+                Ok(request)
+            }
+            _ => Err(CatalogError::Decode(
+                "runtime page continuation requires page_offset and page_etag".to_owned(),
+            )),
+        }
     }
 
     fn validate(&self) -> CatalogResult<()> {
@@ -135,7 +171,16 @@ impl RuntimeRequest {
             self.payload.len(),
             MAX_RUNTIME_PAYLOAD_BYTES,
             "runtime request payload",
-        )
+        )?;
+        match (&self.page_etag, self.page_offset) {
+            (None, 0) => Ok(()),
+            (Some(etag), offset) if offset > 0 => {
+                validate_hex_token(etag, "runtime page_etag")
+            }
+            _ => Err(CatalogError::Decode(
+                "runtime page continuation requires a positive offset and page_etag".to_owned(),
+            )),
+        }
     }
 }
 
@@ -144,6 +189,8 @@ pub struct RuntimeResponse {
     pub request_id: String,
     pub status: RuntimeResponseStatus,
     pub payload: Vec<u8>,
+    pub next_page_offset: Option<usize>,
+    pub page_etag: Option<String>,
 }
 
 impl RuntimeResponse {
@@ -152,6 +199,8 @@ impl RuntimeResponse {
             request_id: request_id.into(),
             status: RuntimeResponseStatus::Ok,
             payload,
+            next_page_offset: None,
+            page_etag: None,
         };
         response.validate()?;
         Ok(response)
@@ -162,6 +211,8 @@ impl RuntimeResponse {
             request_id: request_id.into(),
             status: RuntimeResponseStatus::Error,
             payload,
+            next_page_offset: None,
+            page_etag: None,
         };
         response.validate()?;
         Ok(response)
@@ -169,12 +220,18 @@ impl RuntimeResponse {
 
     pub fn encode(&self) -> CatalogResult<Vec<u8>> {
         self.validate()?;
-        let header = format!(
-            "{MAGIC}/{RUNTIME_PROTOCOL_VERSION}\nrequest_id={}\nstatus={}\npayload_len={}\n\n",
+        let mut header = format!(
+            "{MAGIC}/{RUNTIME_PROTOCOL_VERSION}\nrequest_id={}\nstatus={}\npayload_len={}\n",
             self.request_id,
             self.status.as_str(),
             self.payload.len()
         );
+        if let (Some(offset), Some(etag)) = (self.next_page_offset, &self.page_etag) {
+            header.push_str(&format!(
+                "next_page_offset={offset}\npage_etag={etag}\n"
+            ));
+        }
+        header.push('\n');
         let mut out = Vec::with_capacity(header.len().saturating_add(self.payload.len()));
         out.extend_from_slice(header.as_bytes());
         out.extend_from_slice(&self.payload);
@@ -189,6 +246,8 @@ impl RuntimeResponse {
         let mut request_id = None;
         let mut status = None;
         let mut payload_len = None;
+        let mut next_page_offset = None;
+        let mut page_etag = None;
         for (index, line) in header.lines().enumerate() {
             if index == 0 {
                 version = Some(parse_magic(line)?);
@@ -199,6 +258,10 @@ impl RuntimeResponse {
                 "request_id" => request_id = Some(value.to_owned()),
                 "status" => status = Some(RuntimeResponseStatus::parse(value)?),
                 "payload_len" => payload_len = Some(parse_usize(value, "payload_len")?),
+                "next_page_offset" => {
+                    next_page_offset = Some(parse_usize(value, "next_page_offset")?)
+                }
+                "page_etag" => page_etag = Some(value.to_owned()),
                 _ => {
                     return Err(CatalogError::Decode(format!(
                         "unknown runtime response header {key}"
@@ -212,6 +275,8 @@ impl RuntimeResponse {
             request_id: required_header(request_id, "request_id")?,
             status: required_header(status, "status")?,
             payload: payload.to_vec(),
+            next_page_offset,
+            page_etag,
         };
         response.validate()?;
         Ok(response)
@@ -227,8 +292,51 @@ impl RuntimeResponse {
             self.payload.len(),
             MAX_RUNTIME_RESPONSE_BYTES,
             "runtime response payload",
-        )
+        )?;
+        match (self.next_page_offset, &self.page_etag) {
+            (None, None) => Ok(()),
+            (Some(offset), Some(etag)) if offset > 0 => {
+                validate_hex_token(etag, "runtime page_etag")
+            }
+            _ => Err(CatalogError::Decode(
+                "runtime paged response requires next_page_offset and page_etag".to_owned(),
+            )),
+        }
     }
+}
+
+pub(crate) fn paged_runtime_response(
+    request_id: String,
+    payload: Vec<u8>,
+    page_offset: usize,
+    requested_etag: Option<&str>,
+) -> CatalogResult<RuntimeResponse> {
+    let page_etag = runtime_payload_etag(&payload);
+    if requested_etag.is_some_and(|requested| requested != page_etag) {
+        return Err(CatalogError::InvalidMutation(
+            "conflict: runtime response changed during pagination".to_owned(),
+        ));
+    }
+    if page_offset > payload.len() {
+        return Err(CatalogError::Decode(format!(
+            "runtime page offset {page_offset} exceeds payload length {}",
+            payload.len()
+        )));
+    }
+    let page_end = page_offset
+        .saturating_add(MAX_RUNTIME_PAGE_PAYLOAD_BYTES)
+        .min(payload.len());
+    let mut response = RuntimeResponse::ok(request_id, payload[page_offset..page_end].to_vec())?;
+    if page_end < payload.len() {
+        response.next_page_offset = Some(page_end);
+        response.page_etag = Some(page_etag);
+        response.validate()?;
+    }
+    Ok(response)
+}
+
+fn runtime_payload_etag(payload: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(payload))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -362,6 +470,15 @@ fn validate_token(value: &str, limit: usize, label: &str) -> CatalogResult<()> {
     {
         return Err(CatalogError::InvalidMutation(format!(
             "{label} contains unsupported characters"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_hex_token(value: &str, label: &str) -> CatalogResult<()> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(CatalogError::Decode(format!(
+            "{label} must be a 64-character hexadecimal digest"
         )));
     }
     Ok(())

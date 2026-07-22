@@ -95,6 +95,30 @@ you need to inspect the temporary DuckLake files.
   data mutation, read, and cleanup families.
 - Prefix clone output must include nonzero `copied_key_count` and `ducklake_fdb_prefix_clone_drill=ok`.
 
+## Runtime Response Pagination
+
+The runtime protocol transports read results in pages of at most 512 KiB. The C++ bridge follows
+`next_page_offset` automatically and presents the reassembled payload to DuckLake, so operation
+callers must not implement their own catalog pagination. This boundary covers every read family,
+including catalog snapshots, metadata mirrors, file and statistics listings, change feeds, inline
+rows, and cleanup inventories. It also leaves headroom below the runtime's 2 MiB frame limit and
+deployment surfaces hosted in AWS Lambda. Lambda query/API responses remain a separate
+consumer-owned pagination boundary; reassembling catalog pages does not waive that external
+response limit.
+
+Pagination is runtime protocol version 2. The DuckLake extension and Rust runtime library must be
+released and deployed as one matching artifact; version 1 peers are rejected rather than risking a
+silently truncated result.
+
+Each continuation carries a SHA-256 digest of the complete logical result. The runtime returns a
+retryable conflict if the result changes between pages; it never combines pages from different
+catalog states. Mutating operations are executed once and cannot accept a page continuation. Keep
+mutation responses request-bounded rather than adding transport retries that could repeat effects.
+
+`cargo test -p ducklake-catalog runtime_protocol_tests` proves multi-page reassembly, legacy
+single-page compatibility, and changed-result rejection. `just ducklake-runtime-cpp-ffi-smoke`
+proves the patched C++ bridge builds and retains end-to-end catalog behavior.
+
 ## References
 
 - FoundationDB backup/restore overview:

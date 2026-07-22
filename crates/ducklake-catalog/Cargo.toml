@@ -23,6 +23,7 @@ path = "src/bin/ducklake-fdb-prefix-copy.rs"
 [dependencies]
 foundationdb = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]
 alloc-counter = { git = "https://github.com/u19r/aux-common", package = "alloc-counter" }

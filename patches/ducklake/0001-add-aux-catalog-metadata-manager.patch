@@ -6582,7 +6582,7 @@ new file mode 100644
 index 00000000..8d1aeee2
 --- /dev/null
 +++ b/src/metadata_manager/aux_catalog_runtime_bridge.cpp
-@@ -0,0 +1,206 @@
+@@ -0,0 +1,248 @@
 +#include "metadata_manager/aux_catalog_runtime_bridge.hpp"
 +#include "duckdb/common/exception.hpp"
 +#include "duckdb/common/string_util.hpp"
@@ -6629,13 +6629,18 @@ index 00000000..8d1aeee2
 +	throw InvalidConfigurationException("unsupported AUX_DUCKLAKE_CATALOG_BACKEND=%s", backend);
 +}
 +
-+string RuntimeRequest(const string &operation, const string &payload, uint64_t catalog_id) {
-+	return StringUtil::Format(
-+	    "aux-ducklake-runtime/1\nrequest_id=ducklake-cpp-probe\nbackend=%s\ncatalog_id=%llu\noperation=%s\npayload_len=%d\n\n%s",
-+	    RuntimeBackend(), static_cast<unsigned long long>(catalog_id), operation, payload.size(), payload);
++string RuntimeRequest(const string &operation, const string &payload, uint64_t catalog_id, idx_t page_offset,
++                      const string &page_etag) {
++	auto header = StringUtil::Format(
++	    "aux-ducklake-runtime/2\nrequest_id=ducklake-cpp-probe\nbackend=%s\ncatalog_id=%llu\noperation=%s\npayload_len=%d\n",
++	    RuntimeBackend(), static_cast<unsigned long long>(catalog_id), operation, payload.size());
++	if (!page_etag.empty()) {
++		header += StringUtil::Format("page_offset=%d\npage_etag=%s\n", page_offset, page_etag);
++	}
++	return header + "\n" + payload;
 +}
 +
-+string HeaderValue(const string &header, const string &key) {
++bool TryHeaderValue(const string &header, const string &key, string &result) {
 +	auto prefix = key + "=";
 +	idx_t offset = 0;
 +	while (offset < header.size()) {
@@ -6645,9 +6650,18 @@ index 00000000..8d1aeee2
 +		}
 +		auto line = header.substr(offset, end - offset);
 +		if (line.rfind(prefix, 0) == 0) {
-+			return line.substr(prefix.size());
++			result = line.substr(prefix.size());
++			return true;
 +		}
 +		offset = end + 1;
++	}
++	return false;
++}
++
++string HeaderValue(const string &header, const string &key) {
++	string result;
++	if (TryHeaderValue(header, key, result)) {
++		return result;
 +	}
 +	throw IOException("aux_catalog runtime response missing required field %s", key);
 +}
@@ -6665,7 +6679,13 @@ index 00000000..8d1aeee2
 +	}
 +}
 +
-+string DecodeRuntimePayload(const string &frame, const string &operation) {
++struct RuntimeResponsePage {
++	string payload;
++	string page_etag;
++	optional_idx next_page_offset;
++};
++
++RuntimeResponsePage DecodeRuntimePayload(const string &frame, const string &operation) {
 +	auto split = frame.find("\n\n");
 +	if (split == string::npos) {
 +		throw IOException("aux_catalog runtime operation %s returned an invalid frame", operation);
@@ -6685,7 +6705,14 @@ index 00000000..8d1aeee2
 +	if (payload_len != payload.size()) {
 +		throw IOException("aux_catalog runtime operation %s returned mismatched payload length", operation);
 +	}
-+	return payload;
++	RuntimeResponsePage page;
++	page.payload = std::move(payload);
++	string next_page_offset;
++	if (TryHeaderValue(header, "next_page_offset", next_page_offset)) {
++		page.next_page_offset = optional_idx(ParsePayloadLength(next_page_offset, operation));
++		page.page_etag = HeaderValue(header, "page_etag");
++	}
++	return page;
 +}
 +
 +#ifndef _WIN32
@@ -6762,25 +6789,40 @@ index 00000000..8d1aeee2
 +	throw InvalidConfigurationException("aux_catalog runtime library loading is not implemented on Windows");
 +#else
 +	auto &library = RuntimeLibraryForPath(path);
-+	auto request = RuntimeRequest(operation, payload, catalog_id);
-+	DuckLakeRuntimeBuffer response {nullptr, 0};
-+	auto status = library.probe(reinterpret_cast<const uint8_t *>(request.data()), request.size(), &response);
-+	if (status != 0) {
-+		if (response.ptr) {
-+			library.free_buffer(response.ptr, response.len);
++	string output;
++	idx_t page_offset = 0;
++	string page_etag;
++	while (true) {
++		auto request = RuntimeRequest(operation, payload, catalog_id, page_offset, page_etag);
++		DuckLakeRuntimeBuffer response {nullptr, 0};
++		auto status = library.probe(reinterpret_cast<const uint8_t *>(request.data()), request.size(), &response);
++		if (status != 0) {
++			if (response.ptr) {
++				library.free_buffer(response.ptr, response.len);
++			}
++			throw IOException("aux_catalog runtime operation %s failed with ffi status %d", operation, status);
 +		}
-+		throw IOException("aux_catalog runtime operation %s failed with ffi status %d", operation, status);
-+	}
-+	if (!response.ptr || response.len > MAX_RESPONSE_BYTES) {
-+		if (response.ptr) {
-+			library.free_buffer(response.ptr, response.len);
++		if (!response.ptr || response.len > MAX_RESPONSE_BYTES) {
++			if (response.ptr) {
++				library.free_buffer(response.ptr, response.len);
++			}
++			throw IOException("aux_catalog runtime operation %s returned an invalid buffer", operation);
 +		}
-+		throw IOException("aux_catalog runtime operation %s returned an invalid buffer", operation);
++		string frame(reinterpret_cast<const char *>(response.ptr), response.len);
++		library.free_buffer(response.ptr, response.len);
++		auto page = DecodeRuntimePayload(frame, operation);
++		output += page.payload;
++		if (!page.next_page_offset.IsValid()) {
++			break;
++		}
++		auto next_page_offset = page.next_page_offset.GetIndex();
++		if (next_page_offset <= page_offset || page.page_etag.empty()) {
++			throw IOException("aux_catalog runtime operation %s returned an invalid page continuation", operation);
++		}
++		page_offset = next_page_offset;
++		page_etag = std::move(page.page_etag);
 +	}
-+	string frame(reinterpret_cast<const char *>(response.ptr), response.len);
-+	library.free_buffer(response.ptr, response.len);
-+	auto decoded = DecodeRuntimePayload(frame, operation);
-+	return "runtime_bridge=cpp_ffi\n" + decoded;
++	return "runtime_bridge=cpp_ffi\n" + output;
 +#endif
 +}
 +

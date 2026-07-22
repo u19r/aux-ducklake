@@ -14,6 +14,23 @@ use std::time::{SystemTime, UNIX_EPOCH};
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
+fn mutating_runtime_operation_rejects_page_continuation_before_execution() {
+    let request = RuntimeRequest::new(
+        "ffi-mutation-page",
+        RuntimeCatalogBackend::FoundationDb,
+        "CommitMetadataBatch",
+        Vec::new(),
+    )
+    .unwrap()
+    .with_page(1, "a".repeat(64))
+    .unwrap();
+
+    let error = runtime_response_from_request(request).unwrap_err();
+
+    assert!(error.to_string().contains("cannot be paginated"));
+}
+
+#[test]
 fn ffi_probe_round_trips_runtime_frame() {
     let request = RuntimeRequest::new(
         "ffi-probe",
