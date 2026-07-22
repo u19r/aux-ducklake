@@ -8,6 +8,10 @@ default:
 setup:
     @just _setup
 
+# Update sibling repositories to consume this release.
+update-aux-repos:
+    ./scripts/update-aux-repos.sh
+
 # Build the primary local DuckLake debug artifact.
 build:
     @just ducklake-build

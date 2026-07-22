@@ -6,6 +6,7 @@ use crate::{
     runtime_operations::payload_for_request,
     runtime_protocol::{
         RuntimeCatalogBackend, RuntimeRequest, RuntimeResponse, RuntimeResponseStatus,
+        paged_runtime_response,
     },
 };
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -196,6 +197,11 @@ fn runtime_probe_response(bytes: &[u8]) -> RuntimeProbeResult {
 fn runtime_response_from_request(request: RuntimeRequest) -> CatalogResult<RuntimeResponse> {
     let started = RuntimeMetricStage::start();
     let mutates_catalog = runtime_operation_mutates_catalog(&request.operation);
+    if mutates_catalog && request.page_offset != 0 {
+        return Err(crate::CatalogError::Decode(
+            "mutating runtime operations cannot be paginated".to_owned(),
+        ));
+    }
     let payload = match payload_for_request(&request) {
         Ok(payload) => {
             if mutates_catalog {
@@ -229,7 +235,16 @@ fn runtime_response_from_request(request: RuntimeRequest) -> CatalogResult<Runti
     if mutates_catalog {
         crate::store::invalidate_runtime_read_context(request.catalog_id);
     }
-    RuntimeResponse::ok(request_id, payload)
+    if mutates_catalog {
+        RuntimeResponse::ok(request_id, payload)
+    } else {
+        paged_runtime_response(
+            request_id,
+            payload,
+            request.page_offset,
+            request.page_etag.as_deref(),
+        )
+    }
 }
 
 fn runtime_operation_mutates_catalog(operation: &str) -> bool {
@@ -285,7 +300,7 @@ fn encode_response(response: RuntimeResponse) -> Result<Vec<u8>, Vec<u8>> {
         RuntimeResponse::error("encode-error", error.to_string().into_bytes())
             .and_then(|response| response.encode())
             .unwrap_or_else(|_| {
-                b"aux-ducklake-runtime/1\nrequest_id=encode-error\nstatus=error\npayload_len=0\n\n"
+                b"aux-ducklake-runtime/2\nrequest_id=encode-error\nstatus=error\npayload_len=0\n\n"
                     .to_vec()
             })
     })
@@ -297,6 +312,8 @@ fn error_response(error: crate::CatalogError) -> RuntimeResponse {
             request_id: "runtime-error".to_owned(),
             status: RuntimeResponseStatus::Error,
             payload: Vec::new(),
+            next_page_offset: None,
+            page_etag: None,
         }
     })
 }
@@ -307,6 +324,8 @@ fn panic_response(message: String) -> RuntimeResponse {
             request_id: "panic".to_owned(),
             status: RuntimeResponseStatus::Error,
             payload: Vec::new(),
+            next_page_offset: None,
+            page_etag: None,
         })
 }
 
