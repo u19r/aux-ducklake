@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM registry.access.redhat.com/ubi9/ubi:latest AS builder
+FROM registry.access.redhat.com/ubi9/ubi:9.8@sha256:50701171b9917ed51048b614924598d45b00bce9a64b73860c057922fc13bec2 AS builder
 
 ARG FDB_VERSION=7.4.6
 ARG CROARING_VERSION=4.3.12

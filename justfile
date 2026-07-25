@@ -292,6 +292,9 @@ ducklake-catalog-benchmark-realistic:
 ducklake-catalog-benchmark-varied:
     ./scripts/ducklake_catalog_benchmark.sh varied
 
+ducklake-catalog-benchmark-robustness:
+    ./scripts/ducklake-catalog-robustness-benchmark.sh
+
 ducklake-release-benchmark-smoke:
     AUX_DUCKLAKE_FDB_LIVE=1 ./scripts/cargo_with_sccache.sh run -q -p ducklake-catalog --no-default-features --features foundationdb --bin ducklake-fdb-benchmark -- --profile smoke
 

@@ -1,3 +1,5 @@
+#[cfg(debug_assertions)]
+use std::sync::Mutex;
 use std::{collections::BTreeSet, ops::Deref};
 
 use foundationdb::options::MutationType;
@@ -16,8 +18,9 @@ use crate::{
         stage_file_partition_value, stage_inline_file_deletion, stage_snapshot,
         stage_snapshot_operation, stage_table_file_stats_version,
     },
+    fdb_data_mutations::*,
     fdb_inline_flushes::{prepare_inline_flushes, stage_prepared_inline_flush_versionstamped},
-    fdb_runtime::{classify_fdb_error, map_fdb_commit_error, map_fdb_error},
+    fdb_runtime::{classify_fdb_error, map_fdb_error},
     fdb_versionstamp::{committed_order, incomplete_order, versionstamped_value},
     file_partitions::remove_cached_file_partition_values,
     file_stats::remove_cached_file_column_stats_for_data_file,
@@ -27,7 +30,9 @@ use crate::{
     store::latest_snapshot,
 };
 
-use crate::fdb_data_mutations::*;
+#[cfg(debug_assertions)]
+static LAST_COMMIT_UNKNOWN_INJECTION: Mutex<Option<String>> = Mutex::new(None);
+
 impl FdbOrderedCatalogKv {
     pub(super) fn commit_planned_data_mutation(
         &self,
@@ -310,8 +315,8 @@ impl FdbOrderedCatalogKv {
         }
 
         let versionstamp = trx.get_versionstamp();
-        if let Err(error) = block_on(trx.commit()) {
-            let error_class = classify_fdb_error(*error);
+        if let Err(error) = commit_transaction(trx) {
+            let error_class = classify_fdb_error(error);
             if !inline_flushes.is_empty()
                 && error_class == FoundationDbErrorClass::RetryableNotCommitted
             {
@@ -324,11 +329,11 @@ impl FdbOrderedCatalogKv {
                     }
                 }
                 MutationFailureAction::Retry => {
-                    return Ok(MutationCommitAttempt::Retry(map_fdb_commit_error(error)));
+                    return Ok(MutationCommitAttempt::Retry(map_fdb_error(error)));
                 }
                 MutationFailureAction::ReturnError => {}
             }
-            let catalog_error = map_fdb_commit_error(error);
+            let catalog_error = map_fdb_error(error);
             return Err(mutation_final_error(
                 catalog_error,
                 error_class,
@@ -371,4 +376,40 @@ impl FdbOrderedCatalogKv {
             dropped_data_file_count: dropped_data_file_ids.len(),
         }))
     }
+}
+
+fn commit_transaction(
+    transaction: foundationdb::Transaction,
+) -> Result<(), foundationdb::FdbError> {
+    inject_commit_unknown("before")?;
+    block_on(transaction.commit())
+        .map(|_| ())
+        .map_err(|error| *error)?;
+    inject_commit_unknown("after")
+}
+
+#[cfg(debug_assertions)]
+fn inject_commit_unknown(stage: &str) -> Result<(), foundationdb::FdbError> {
+    let Ok(request) = std::env::var("AUX_DUCKLAKE_TEST_FDB_COMMIT_UNKNOWN_ONCE") else {
+        return Ok(());
+    };
+    let Some((requested_stage, _case)) = request.split_once(':') else {
+        return Ok(());
+    };
+    if requested_stage != stage {
+        return Ok(());
+    }
+    let Ok(mut last_request) = LAST_COMMIT_UNKNOWN_INJECTION.lock() else {
+        return Ok(());
+    };
+    if last_request.as_ref() == Some(&request) {
+        return Ok(());
+    }
+    *last_request = Some(request);
+    Err(foundationdb::FdbError::from_code(1021))
+}
+
+#[cfg(not(debug_assertions))]
+const fn inject_commit_unknown(_stage: &str) -> Result<(), foundationdb::FdbError> {
+    Ok(())
 }

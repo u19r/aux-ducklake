@@ -9,7 +9,7 @@ use ducklake_catalog::{
     AppendCommitResult, CatalogError, CatalogId, CatalogOrderId, CatalogOrderKind,
     ColumnCommentChange, ColumnDefaultChange, ColumnDrop, ColumnId, ColumnRename, CommitAttemptId,
     CommitAttemptRow, DataFileChange, DataFileChangeKind, DataFileId, DataFileRow, DeleteFileId,
-    DeleteFileRow, DuckLakeSnapshotId, FdbOrderedCatalogKv, FilePartitionValueRow,
+    DeleteFileRow, DuckLakeSnapshotId, FdbDataMutation, FdbOrderedCatalogKv, FilePartitionValueRow,
     INLINE_PAYLOAD_LIMIT_BYTES, InlineFileDeletionRow, InlineRowChangeKind, InlineTableFlush,
     InlineTablePayloadCommit, InlinedTableRow, KvBatch, MacroId, MacroImplementationRow, MacroRow,
     MergeAdjacentCompaction, MutableCatalogKv, OrderedCatalogKv, PartitionKeyIndex,
@@ -35,6 +35,179 @@ use ducklake_catalog::{
     remove_old_data_files, remove_old_delete_files, remove_old_inline_table_payloads,
     snapshot_by_public_sequence,
 };
+
+#[test]
+fn given_commit_results_are_ambiguous_when_later_table_commits_then_reopen_lists_both_once() {
+    if live_fdb_disabled() {
+        return;
+    }
+
+    let catalog = CatalogId(83);
+    let first_table = TableId(81);
+    let second_table = TableId(82);
+    let prefix = unique_prefix("commit-unknown-ordering");
+    let kv = FdbOrderedCatalogKv::open_default_with_prefix(prefix.clone().into_bytes()).unwrap();
+    kv.initialize_catalog_if_absent_versionstamped(catalog)
+        .unwrap();
+    let first_table_row = create_current_table(&kv, catalog, first_table, "memberships").unwrap();
+    let second_table_row = create_current_table(&kv, catalog, second_table, "users").unwrap();
+    unsafe {
+        std::env::set_var(
+            "AUX_DUCKLAKE_TEST_FDB_COMMIT_UNKNOWN_ONCE",
+            "after:joined-visibility",
+        );
+    }
+
+    let first_mutation = FdbDataMutation {
+        data_files: vec![DataFileRow::new(
+            DataFileId(801),
+            first_table,
+            "membership.parquet",
+            1,
+            128,
+            first_table_row.order,
+        )],
+        ..FdbDataMutation::default()
+    };
+    let first_commit = kv
+        .commit_data_mutation_versionstamped(
+            catalog,
+            Some(CommitAttemptId(100)),
+            first_mutation.clone(),
+        )
+        .unwrap();
+    let first_retry = kv
+        .commit_data_mutation_versionstamped(catalog, Some(CommitAttemptId(100)), first_mutation)
+        .unwrap();
+    let second_commit = kv
+        .commit_data_mutation_versionstamped(
+            catalog,
+            Some(CommitAttemptId(101)),
+            FdbDataMutation {
+                data_files: vec![DataFileRow::new(
+                    DataFileId(802),
+                    second_table,
+                    "user.parquet",
+                    1,
+                    128,
+                    second_table_row.order,
+                )],
+                ..FdbDataMutation::default()
+            },
+        )
+        .unwrap();
+    unsafe {
+        std::env::remove_var("AUX_DUCKLAKE_TEST_FDB_COMMIT_UNKNOWN_ONCE");
+    }
+    drop(kv);
+
+    let reopened = FdbOrderedCatalogKv::open_default_with_prefix(prefix.into_bytes()).unwrap();
+    assert_eq!(first_commit.data_files.len(), 0);
+    assert_eq!(first_retry.data_files.len(), 0);
+    assert_eq!(second_commit.data_files.len(), 1);
+    assert_eq!(
+        list_current_data_files(&reopened, catalog, first_table)
+            .unwrap()
+            .iter()
+            .map(|file| file.data_file_id)
+            .collect::<Vec<_>>(),
+        vec![DataFileId(801)]
+    );
+    assert_eq!(
+        list_current_data_files(&reopened, catalog, second_table)
+            .unwrap()
+            .iter()
+            .map(|file| file.data_file_id)
+            .collect::<Vec<_>>(),
+        vec![DataFileId(802)]
+    );
+
+    let retry_catalog = CatalogId(84);
+    let retry_prefix = unique_prefix("commit-unknown-retry");
+    let retry_kv =
+        FdbOrderedCatalogKv::open_default_with_prefix(retry_prefix.clone().into_bytes()).unwrap();
+    retry_kv
+        .initialize_catalog_if_absent_versionstamped(retry_catalog)
+        .unwrap();
+    let retry_first =
+        create_current_table(&retry_kv, retry_catalog, first_table, "memberships").unwrap();
+    let retry_second =
+        create_current_table(&retry_kv, retry_catalog, second_table, "users").unwrap();
+    let retry_first_mutation = FdbDataMutation {
+        data_files: vec![DataFileRow::new(
+            DataFileId(811),
+            first_table,
+            "membership-retry.parquet",
+            1,
+            128,
+            retry_first.order,
+        )],
+        ..FdbDataMutation::default()
+    };
+    unsafe {
+        std::env::set_var(
+            "AUX_DUCKLAKE_TEST_FDB_COMMIT_UNKNOWN_ONCE",
+            "before:joined-visibility",
+        );
+    }
+    let first_error = retry_kv
+        .commit_data_mutation_versionstamped(
+            retry_catalog,
+            Some(CommitAttemptId(110)),
+            retry_first_mutation.clone(),
+        )
+        .unwrap_err();
+    unsafe {
+        std::env::remove_var("AUX_DUCKLAKE_TEST_FDB_COMMIT_UNKNOWN_ONCE");
+    }
+    assert!(matches!(
+        first_error,
+        CatalogError::FoundationDb {
+            class: ducklake_catalog::FoundationDbErrorClass::MaybeCommitted,
+            ..
+        }
+    ));
+    retry_kv
+        .commit_data_mutation_versionstamped(
+            retry_catalog,
+            Some(CommitAttemptId(111)),
+            FdbDataMutation {
+                data_files: vec![DataFileRow::new(
+                    DataFileId(812),
+                    second_table,
+                    "user-retry.parquet",
+                    1,
+                    128,
+                    retry_second.order,
+                )],
+                ..FdbDataMutation::default()
+            },
+        )
+        .unwrap();
+    retry_kv
+        .commit_data_mutation_versionstamped(
+            retry_catalog,
+            Some(CommitAttemptId(110)),
+            retry_first_mutation,
+        )
+        .unwrap();
+    drop(retry_kv);
+
+    let retry_reopened =
+        FdbOrderedCatalogKv::open_default_with_prefix(retry_prefix.into_bytes()).unwrap();
+    assert_eq!(
+        list_current_data_files(&retry_reopened, retry_catalog, first_table)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        list_current_data_files(&retry_reopened, retry_catalog, second_table)
+            .unwrap()
+            .len(),
+        1
+    );
+}
 
 #[test]
 fn fdb_live_catalog_initializes_appends_and_reverse_scans_latest_snapshot_when_enabled() {
