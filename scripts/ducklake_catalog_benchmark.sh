@@ -3,12 +3,13 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DUCKLAKE_DIR="$ROOT_DIR/third_party/ducklake"
-OUT_DIR="$ROOT_DIR/docs/benchmarks/ducklake-fdb-feature-parity"
+OUT_DIR="${AUX_DUCKLAKE_BENCHMARK_OUTPUT_DIR:-$ROOT_DIR/docs/benchmarks/ducklake-fdb-feature-parity}"
 BUILD_PROFILE="${AUX_DUCKLAKE_BENCHMARK_BUILD_PROFILE:-release}"
 DUCKDB_BIN="$DUCKLAKE_DIR/build/$BUILD_PROFILE/duckdb"
 POSTGRES_SCANNER_EXTENSION="$DUCKLAKE_DIR/build/$BUILD_PROFILE/extension/postgres_scanner/postgres_scanner.duckdb_extension"
 BENCHMARK_BACKEND="${AUX_DUCKLAKE_BENCHMARK_BACKEND:-both}"
 . "$ROOT_DIR/scripts/ducklake_build_common.sh"
+. "$ROOT_DIR/scripts/ducklake-catalog-benchmark-fixtures.sh"
 
 fail() {
     echo "ducklake catalog benchmark failure: $*" >&2
@@ -220,6 +221,7 @@ case "$profile" in
         inline_split_steps="${AUX_DUCKLAKE_INLINE_SPLIT_STEPS:-0}"
         inline_preload_tables="${AUX_DUCKLAKE_INLINE_PRELOAD_TABLES:-0}"
         inline_preload_rows="${AUX_DUCKLAKE_INLINE_PRELOAD_ROWS:-1}"
+        inline_flush_interval="${AUX_DUCKLAKE_INLINE_FLUSH_INTERVAL:-end}"
         realistic_row_bytes="${AUX_DUCKLAKE_REALISTIC_ROW_BYTES:-4096}"
         scan_rows=0
         parallel_workers=1
@@ -262,8 +264,20 @@ case "$profile" in
         preload_batch_rows="${AUX_DUCKLAKE_VARIED_PRELOAD_BATCH_ROWS:-4096}"
         preload_workers="${AUX_DUCKLAKE_VARIED_PRELOAD_WORKERS:-4}"
         varied_churn_rounds="${AUX_DUCKLAKE_VARIED_CHURN_ROUNDS:-4}"
+        varied_schema="${AUX_DUCKLAKE_VARIED_SCHEMA:-legacy}"
+        varied_concurrent_writers="${AUX_DUCKLAKE_VARIED_CONCURRENT_WRITERS:-0}"
         ;;
     *) fail "usage: $0 scan10|smoke|profile [scan_rows]|realistic|varied|inline" ;;
+esac
+
+case "${inline_flush_interval:-end}" in
+    each_batch | end | never) ;;
+    *) fail "AUX_DUCKLAKE_INLINE_FLUSH_INTERVAL must be each_batch, end, or never" ;;
+esac
+
+case "${varied_schema:-legacy}" in
+    legacy | mixed | narrow | wide) ;;
+    *) fail "AUX_DUCKLAKE_VARIED_SCHEMA must be legacy, mixed, narrow, or wide" ;;
 esac
 
 [[ -x "$DUCKDB_BIN" ]] || fail "missing $BUILD_PROFILE DuckDB binary: $DUCKDB_BIN"
@@ -472,10 +486,6 @@ SELECT 'inline_after_flush=' || count(*) || ',' || coalesce(sum(id), 0) FROM dl.
 SQL
 }
 
-parallel_setup_sql() {
-    :
-}
-
 parallel_worker_sql() {
     cat <<'SQL'
 SELECT count(*), coalesce(sum(id), 0) FROM dl.main.file_fact;
@@ -490,313 +500,6 @@ FROM dl.main.file_fact;
 SQL
 }
 
-realistic_table_name() {
-    printf 'bench_%03d' "$1"
-}
-
-realistic_row_sql() {
-    local table_index="$1" start_id="$2" end_id="$3"
-    local table_name
-    table_name="$(realistic_table_name "$table_index")"
-    cat <<SQL
-INSERT INTO dl.main.$table_name
-SELECT
-    i::INTEGER,
-    $table_index::INTEGER,
-    CASE WHEN i % 5 = 0 THEN 'a' WHEN i % 5 = 1 THEN 'b' WHEN i % 5 = 2 THEN 'c' WHEN i % 5 = 3 THEN 'd' ELSE 'e' END,
-    (i * 10)::BIGINT,
-    i + 1, i + 2, i + 3, i + 4, i + 5, i + 6, i + 7, i + 8, i + 9, i + 10,
-    i + 11, i + 12, i + 13, i + 14, i + 15, i + 16, i + 17, i + 18, i + 19,
-    repeat(md5((($table_index::BIGINT * 1000000000::BIGINT) + i::BIGINT)::VARCHAR), 128)
-FROM range($start_id, $end_id) t(i);
-SQL
-}
-
-realistic_schema_sql() {
-    local count="$1" table table_name
-    for ((table = 0; table < count; table++)); do
-        table_name="$(realistic_table_name "$table")"
-        cat <<SQL
-CREATE TABLE dl.main.$table_name(
-    id INTEGER,
-    table_index INTEGER,
-    bucket VARCHAR,
-    amount BIGINT,
-    c03 BIGINT,
-    c04 BIGINT,
-    c05 BIGINT,
-    c06 BIGINT,
-    c07 BIGINT,
-    c08 BIGINT,
-    c09 BIGINT,
-    c10 BIGINT,
-    c11 BIGINT,
-    c12 BIGINT,
-    c13 BIGINT,
-    c14 BIGINT,
-    c15 BIGINT,
-    c16 BIGINT,
-    c17 BIGINT,
-    c18 BIGINT,
-    c19 BIGINT,
-    c20 BIGINT,
-    c21 BIGINT,
-    payload VARCHAR
-);
-SQL
-        if [[ "$profile" == "varied" ]]; then
-            cat <<SQL
-ALTER TABLE dl.main.$table_name SET PARTITIONED BY (bucket);
-ALTER TABLE dl.main.$table_name SET SORTED BY (id ASC NULLS FIRST);
-SQL
-        fi
-    done
-}
-
-realistic_preload_sql() {
-    local count="$1" rows="$2" table start end chunk
-    realistic_schema_sql "$count"
-    for ((table = 0; table < count; table++)); do
-        start=1
-        while [[ "$start" -le "$rows" ]]; do
-            chunk=$((5 + ((table + start) % 16)))
-            end=$((start + chunk))
-            if [[ "$end" -gt $((rows + 1)) ]]; then
-                end=$((rows + 1))
-            fi
-            realistic_row_sql "$table" "$start" "$end"
-            start="$end"
-        done
-    done
-    cat <<SQL
-SELECT 'realistic_preload=' || $count || ',' || $rows || ',' || ($count * $rows) || ',' || ($count * $rows * $realistic_row_bytes);
-SQL
-}
-
-realistic_preload_worker_sql() {
-    local count="$1" rows="$2" worker="$3" workers="$4" batch_rows="$5"
-    local table start end
-    for ((table = worker; table < count; table += workers)); do
-        start=1
-        while [[ "$start" -le "$rows" ]]; do
-            end=$((start + batch_rows))
-            if [[ "$end" -gt $((rows + 1)) ]]; then
-                end=$((rows + 1))
-            fi
-            realistic_row_sql "$table" "$start" "$end"
-            start="$end"
-        done
-    done
-    cat <<SQL
-SELECT 'realistic_preload_worker=' || $worker || ',' || $workers || ',' || $batch_rows;
-SQL
-}
-
-realistic_sum_subqueries() {
-    local count="$1" table table_name sep=""
-    for ((table = 0; table < count; table++)); do
-        table_name="$(realistic_table_name "$table")"
-        printf '%sSELECT count(*) row_count, coalesce(sum(id), 0) id_sum FROM dl.main.%s' "$sep" "$table_name"
-        sep=$'\nUNION ALL\n'
-    done
-}
-
-realistic_latest_query_sql() {
-    local count="$1"
-    cat <<SQL
-SELECT 'realistic_latest=' || sum(row_count) || ',' || sum(id_sum)
-FROM (
-$(realistic_sum_subqueries "$count")
-);
-SQL
-}
-
-realistic_time_travel_query_sql() {
-    local count="$1" snapshot_var="$2" table table_name sep=""
-    printf "SELECT 'realistic_time_travel=' || sum(row_count) || ',' || sum(id_sum)\nFROM (\n"
-    for ((table = 0; table < count; table++)); do
-        table_name="$(realistic_table_name "$table")"
-        printf "%sSELECT count(*) row_count, coalesce(sum(id), 0) id_sum FROM dl.main.%s AT (VERSION => getvariable('%s')::BIGINT)" "$sep" "$table_name" "$snapshot_var"
-        sep=$'\nUNION ALL\n'
-    done
-    printf "\n);\n"
-}
-
-varied_join_query_sql() {
-    local count="$1" snapshot_var="${2:-}" group_count table_a table_b table_c table_d sep=""
-    group_count=$((count / 4))
-    if [[ "$group_count" -lt 1 ]]; then
-        group_count=1
-    fi
-    if [[ -n "$snapshot_var" ]]; then
-        printf "SELECT 'varied_join_time_travel=' || sum(join_count) || ',' || coalesce(sum(join_amount), 0)\nFROM (\n"
-    else
-        printf "SELECT 'varied_join_latest=' || sum(join_count) || ',' || coalesce(sum(join_amount), 0)\nFROM (\n"
-    fi
-    for ((group = 0; group < group_count; group++)); do
-        table_a="$(realistic_table_name "$((group * 4))")"
-        table_b="$(realistic_table_name "$(((group * 4 + 1) % count))")"
-        table_c="$(realistic_table_name "$(((group * 4 + 2) % count))")"
-        table_d="$(realistic_table_name "$(((group * 4 + 3) % count))")"
-        if [[ -n "$snapshot_var" ]]; then
-            printf "%sSELECT count(*) join_count, coalesce(sum(a.amount + b.amount + c.amount + d.amount), 0) join_amount\nFROM (SELECT * FROM dl.main.%s AT (VERSION => getvariable('%s')::BIGINT)) a\nJOIN (SELECT * FROM dl.main.%s AT (VERSION => getvariable('%s')::BIGINT)) b USING (bucket)\nJOIN (SELECT * FROM dl.main.%s AT (VERSION => getvariable('%s')::BIGINT)) c ON c.id = a.id\nJOIN (SELECT * FROM dl.main.%s AT (VERSION => getvariable('%s')::BIGINT)) d ON d.table_index <> a.table_index AND d.id = b.id\nWHERE a.id %% 97 = %s AND b.id %% 89 = %s" "$sep" "$table_a" "$snapshot_var" "$table_b" "$snapshot_var" "$table_c" "$snapshot_var" "$table_d" "$snapshot_var" "$((group % 97))" "$((group % 89))"
-        else
-            printf "%sSELECT count(*) join_count, coalesce(sum(a.amount + b.amount + c.amount + d.amount), 0) join_amount\nFROM dl.main.%s a\nJOIN dl.main.%s b USING (bucket)\nJOIN dl.main.%s c ON c.id = a.id\nJOIN dl.main.%s d ON d.table_index <> a.table_index AND d.id = b.id\nWHERE a.id %% 97 = %s AND b.id %% 89 = %s" "$sep" "$table_a" "$table_b" "$table_c" "$table_d" "$((group % 97))" "$((group % 89))"
-        fi
-        sep=$'\nUNION ALL\n'
-    done
-    printf "\n);\n"
-}
-
-realistic_mixed_sql() {
-    local count="$1" rows="$2" table table_name start_id
-    cat <<SQL
-SET VARIABLE realistic_before_mixed = (SELECT id FROM ducklake_current_snapshot('dl'));
-SQL
-    for ((table = 0; table < count; table++)); do
-        table_name="$(realistic_table_name "$table")"
-        start_id=$((rows + 1))
-        realistic_row_sql "$table" "$start_id" "$((start_id + 5))"
-        cat <<SQL
-DELETE FROM dl.main.$table_name WHERE id IN (1, 2);
-SELECT count(*), coalesce(sum(id), 0) FROM dl.main.$table_name WHERE bucket IN ('a', 'c');
-SQL
-    done
-    realistic_latest_query_sql "$count"
-    realistic_time_travel_query_sql "$count" "realistic_before_mixed"
-}
-
-realistic_delete_sql() {
-    local count="$1" table table_name
-    cat <<SQL
-SET VARIABLE realistic_before_deletes = (SELECT id FROM ducklake_current_snapshot('dl'));
-SQL
-    for ((table = 0; table < count; table++)); do
-        table_name="$(realistic_table_name "$table")"
-        cat <<SQL
-DELETE FROM dl.main.$table_name WHERE id = 3;
-DELETE FROM dl.main.$table_name WHERE id = 4;
-SQL
-    done
-    realistic_latest_query_sql "$count"
-    realistic_time_travel_query_sql "$count" "realistic_before_deletes"
-}
-
-varied_churn_sql() {
-    local count="$1" rows="$2" rounds="$3" round table table_name start_id delete_id update_id span
-    cat <<SQL
-SET VARIABLE varied_before_churn = (SELECT id FROM ducklake_current_snapshot('dl'));
-SQL
-    for ((round = 0; round < rounds; round++)); do
-        for ((table = 0; table < count; table++)); do
-            table_name="$(realistic_table_name "$table")"
-            span=$((5 + ((round + table) % 16)))
-            start_id=$((rows + 1000 + round * 100000 + table * 100))
-            delete_id=$((5 + ((round + table) % 31)))
-            update_id=$((40 + ((round * 7 + table) % 53)))
-            realistic_row_sql "$table" "$start_id" "$((start_id + span))"
-            cat <<SQL
-UPDATE dl.main.$table_name SET amount = amount + $((round + 1)), bucket = CASE WHEN bucket = 'a' THEN 'b' ELSE bucket END WHERE id = $update_id;
-DELETE FROM dl.main.$table_name WHERE id IN ($delete_id, $((delete_id + 1)));
-SQL
-        done
-        varied_join_query_sql "$count"
-    done
-    realistic_latest_query_sql "$count"
-    realistic_time_travel_query_sql "$count" "varied_before_churn"
-    varied_join_query_sql "$count" "varied_before_churn"
-}
-
-realistic_inline_sql() {
-    local count="$1" table table_name
-    for ((table = 0; table < count; table++)); do
-        table_name="inline_$(realistic_table_name "$table")"
-        cat <<SQL
-CREATE TABLE dl.main.$table_name(id INTEGER, table_index INTEGER, note VARCHAR);
-INSERT INTO dl.main.$table_name SELECT i::INTEGER, $table::INTEGER, 'inline_' || i::VARCHAR FROM range(1, 6) t(i);
-INSERT INTO dl.main.$table_name SELECT i::INTEGER, $table::INTEGER, 'inline_' || i::VARCHAR FROM range(6, 18) t(i);
-DELETE FROM dl.main.$table_name WHERE id IN (2, 3);
-CALL ducklake_flush_inlined_data('dl', table_name => '$table_name');
-SQL
-    done
-    cat <<SQL
-SELECT 'realistic_inline_tables=' || $count;
-SQL
-}
-
-inline_micro_table_sql() {
-    local table="$1" first_rows="$2" second_rows="$3" delete_rows="$4"
-    local table_name
-    table_name="inline_$(realistic_table_name "$table")"
-    cat <<SQL
-CREATE TABLE dl.main.$table_name(id INTEGER, table_index INTEGER, note VARCHAR);
-INSERT INTO dl.main.$table_name
-SELECT i::INTEGER, $table::INTEGER, 'inline_' || i::VARCHAR
-FROM range(1, $((first_rows + 1))) t(i);
-INSERT INTO dl.main.$table_name
-SELECT i::INTEGER, $table::INTEGER, 'inline_' || i::VARCHAR
-FROM range($((first_rows + 1)), $((first_rows + second_rows + 1))) t(i);
-DELETE FROM dl.main.$table_name WHERE id <= $delete_rows;
-CALL ducklake_flush_inlined_data('dl', table_name => '$table_name');
-SELECT 'inline_micro_table=' || '$table_name' || ',' || count(*) || ',' || coalesce(sum(id), 0)
-FROM dl.main.$table_name;
-SQL
-}
-
-inline_micro_step_sql() {
-    local step="$1" table="$2" first_rows="$3" second_rows="$4" delete_rows="$5"
-    local table_name
-    table_name="inline_$(realistic_table_name "$table")"
-    case "$step" in
-        create)
-            cat <<SQL
-CREATE TABLE dl.main.$table_name(id INTEGER, table_index INTEGER, note VARCHAR);
-SELECT 'inline_micro_step=' || '$table_name' || ',create';
-SQL
-            ;;
-        insert_first)
-            cat <<SQL
-INSERT INTO dl.main.$table_name
-SELECT i::INTEGER, $table::INTEGER, 'inline_' || i::VARCHAR
-FROM range(1, $((first_rows + 1))) t(i);
-SELECT 'inline_micro_step=' || '$table_name' || ',insert_first';
-SQL
-            ;;
-        insert_second)
-            cat <<SQL
-INSERT INTO dl.main.$table_name
-SELECT i::INTEGER, $table::INTEGER, 'inline_' || i::VARCHAR
-FROM range($((first_rows + 1)), $((first_rows + second_rows + 1))) t(i);
-SELECT 'inline_micro_step=' || '$table_name' || ',insert_second';
-SQL
-            ;;
-        delete)
-            cat <<SQL
-DELETE FROM dl.main.$table_name WHERE id <= $delete_rows;
-SELECT 'inline_micro_step=' || '$table_name' || ',delete';
-SQL
-            ;;
-        flush_read)
-            cat <<SQL
-CALL ducklake_flush_inlined_data('dl', table_name => '$table_name');
-SELECT 'inline_micro_table=' || '$table_name' || ',' || count(*) || ',' || coalesce(sum(id), 0)
-FROM dl.main.$table_name;
-SQL
-            ;;
-        *) fail "unknown inline micro step $step" ;;
-    esac
-}
-
-realistic_compaction_sql() {
-    local count="$1" table table_name
-    for ((table = 0; table < count; table++)); do
-        table_name="$(realistic_table_name "$table")"
-        cat <<SQL
-CALL ducklake_merge_adjacent_files('dl', '$table_name');
-SQL
-    done
-    realistic_latest_query_sql "$count"
-}
 
 backend_artifact() {
     local backend="$1" output="$2" generated="$3" elapsed="$4" labels_json="$5"
@@ -870,7 +573,6 @@ run_backend() {
     run_duckdb_sql "$prepare
 $attach_file
 $(file_backed_workload_sql "$scan_rows")
-$(parallel_setup_sql "$parallel_workers")
 DETACH dl;
 $attach_inline
 $(inline_workload_sql)
@@ -992,11 +694,13 @@ PY
 
 realistic_artifact() {
     local backend="$1" output="$2" generated="$3" elapsed="$4" batches_file="$5"
-    python3 - "$backend" "$output" "$generated" "$elapsed" "$batches_file" "$profile" "$BUILD_PROFILE" "$scan_rows" "$parallel_workers" "$table_count" "$target_data_bytes" "${preload_batch_rows:-0}" "${preload_workers:-0}" <<'PY'
+    local schema_columns
+    schema_columns="$(realistic_schema_column_count)"
+    python3 - "$backend" "$output" "$generated" "$elapsed" "$batches_file" "$profile" "$BUILD_PROFILE" "$scan_rows" "$parallel_workers" "$table_count" "$target_data_bytes" "${preload_batch_rows:-0}" "${preload_workers:-0}" "${varied_schema:-legacy}" "${realistic_row_bytes:-4096}" "${varied_concurrent_writers:-0}" "$schema_columns" <<'PY'
 import json
 import sys
 
-backend, output, generated, elapsed, batches_file, profile, build_profile, rows, workers, tables, target_bytes, preload_batch_rows, preload_workers = sys.argv[1:14]
+backend, output, generated, elapsed, batches_file, profile, build_profile, rows, workers, tables, target_bytes, preload_batch_rows, preload_workers, schema_shape, payload_bytes, concurrent_writers, schema_columns = sys.argv[1:18]
 with open(batches_file, "r", encoding="utf-8") as handle:
     batches = [json.loads(line) for line in handle if line.strip()]
 component_batches = [batch["name"] for batch in batches]
@@ -1013,10 +717,13 @@ artifact = {
         "rows_per_table": int(rows),
         "target_logical_data_bytes": int(target_bytes),
         "parallel_workers": int(workers),
-        "columns_per_table": 24,
+        "columns_per_table": int(schema_columns),
         "preload_batch_rows": int(preload_batch_rows),
         "small_write_batch_rows": "5-20",
         "preload_parallelism": int(preload_workers),
+        "schema_shape": schema_shape,
+        "payload_bytes": int(payload_bytes),
+        "concurrent_writers": int(concurrent_writers),
         "component_batches": component_batches,
     },
     "batches": batches,
@@ -1027,13 +734,23 @@ with open(output, "w", encoding="utf-8") as handle:
 PY
 }
 
+inline_operation_names() {
+    if [[ "${inline_flush_interval:-end}" == "never" ]]; then
+        printf '["create_inline_table","insert_inline_rows_first_batch","insert_inline_rows_second_batch","delete_inline_rows","read_current_rows"]\n'
+        return
+    fi
+    printf '["create_inline_table","insert_inline_rows_first_batch","insert_inline_rows_second_batch","delete_inline_rows","flush_inlined_data","read_current_rows"]\n'
+}
+
 inline_micro_artifact() {
     local backend="$1" output="$2" generated="$3" elapsed="$4" batches_file="$5"
-    python3 - "$backend" "$output" "$generated" "$elapsed" "$batches_file" "$profile" "$BUILD_PROFILE" "$inline_table_count" "$inline_first_rows" "$inline_second_rows" "$inline_delete_rows" "${inline_split_steps:-0}" "${inline_preload_tables:-0}" "${inline_preload_rows:-0}" <<'PY'
+    local operation_names
+    operation_names="$(inline_operation_names)"
+    python3 - "$backend" "$output" "$generated" "$elapsed" "$batches_file" "$profile" "$BUILD_PROFILE" "$inline_table_count" "$inline_first_rows" "$inline_second_rows" "$inline_delete_rows" "${inline_split_steps:-0}" "${inline_preload_tables:-0}" "${inline_preload_rows:-0}" "${inline_flush_interval:-end}" "$operation_names" <<'PY'
 import json
 import sys
 
-backend, output, generated, elapsed, batches_file, profile, build_profile, tables, first_rows, second_rows, delete_rows, split_steps, preload_tables, preload_rows = sys.argv[1:15]
+backend, output, generated, elapsed, batches_file, profile, build_profile, tables, first_rows, second_rows, delete_rows, split_steps, preload_tables, preload_rows, flush_interval, operation_names = sys.argv[1:17]
 with open(batches_file, "r", encoding="utf-8") as handle:
     batches = [json.loads(line) for line in handle if line.strip()]
 artifact = {
@@ -1050,16 +767,10 @@ artifact = {
         "second_insert_rows_per_table": int(second_rows),
         "deleted_rows_per_table": int(delete_rows),
         "split_steps": split_steps == "1",
+        "flush_interval": flush_interval,
         "preload_table_count": int(preload_tables),
         "preload_rows_per_table": int(preload_rows),
-        "operations_per_table": [
-            "create_inline_table",
-            "insert_inline_rows_first_batch",
-            "insert_inline_rows_second_batch",
-            "delete_inline_rows",
-            "flush_inlined_data",
-            "read_current_rows",
-        ],
+        "operations_per_table": json.loads(operation_names),
     },
     "batches": batches,
 }
@@ -1227,6 +938,93 @@ DETACH dl;
     rm -f "$runtime_before" "$runtime_after"
 }
 
+launch_concurrent_reader() {
+    local backend="$1" worker="$2" tmp_dir="$3"
+    local worker_attach="$attach_file"
+    if [[ "$backend" == "fdb" ]]; then
+        worker_attach="$(fdb_attach_sql "$tmp_dir/concurrent-reader-${worker}.duckdb" "$data_dir" 0)"
+    fi
+    local worker_sql="$session_prepare
+$worker_attach
+$(realistic_latest_query_sql "$table_count")
+DETACH dl;
+"
+    local worker_out="$tmp_dir/concurrent-reader-${worker}.out"
+    ("$DUCKDB_BIN" -unsigned -csv -batch > "$worker_out" 2>&1 <<< "$worker_sql") &
+    worker_pids+=("$!")
+    worker_outputs+=("$worker_out")
+}
+
+launch_concurrent_writer() {
+    local backend="$1" worker="$2" tmp_dir="$3"
+    local worker_attach="$attach_file"
+    if [[ "$backend" == "fdb" ]]; then
+        worker_attach="$(fdb_attach_sql "$tmp_dir/concurrent-writer-${worker}.duckdb" "$data_dir" 0)"
+    fi
+    local worker_sql="$session_prepare
+$worker_attach
+$(varied_concurrent_writer_sql "$table_count" "$scan_rows" "$worker")
+DETACH dl;
+"
+    local worker_out="$tmp_dir/concurrent-writer-${worker}.out"
+    ("$DUCKDB_BIN" -unsigned -csv -batch > "$worker_out" 2>&1 <<< "$worker_sql") &
+    worker_pids+=("$!")
+    worker_outputs+=("$worker_out")
+}
+
+await_concurrent_workers() {
+    local backend="$1" output_file="$2" index
+    for index in "${!worker_pids[@]}"; do
+        if ! wait "${worker_pids[$index]}"; then
+            cat "${worker_outputs[$index]}" >&2
+            fail "$backend concurrent read/write worker $index failed"
+        fi
+        cat "${worker_outputs[$index]}" >> "$output_file"
+    done
+}
+
+record_concurrent_readback() {
+    local backend="$1" output_file="$2"
+    run_duckdb_sql "$session_prepare
+$attach_file
+$(realistic_latest_query_sql "$table_count")
+DETACH dl;
+"
+    [[ "$duckdb_status" -eq 0 ]] || fail "$backend concurrent read/write readback failed"
+    printf '%s\n' "$duckdb_output" >> "$output_file"
+    printf 'concurrent_readers=%s\nconcurrent_writers=%s\n' "$parallel_workers" "$varied_concurrent_writers" >> "$output_file"
+}
+
+run_concurrent_read_write() {
+    local backend="$1" output_file="$2" tmp_dir="$3"
+    local started ended elapsed worker runtime_before runtime_after accounting_file
+    local worker_pids=()
+    local worker_outputs=()
+    benchmark_runtime_scope_enter concurrent_read_write
+    runtime_before="$(mktemp)"
+    runtime_after="$(mktemp)"
+    accounting_file="$(mktemp)"
+    copy_metric_snapshot "${AUX_DUCKLAKE_BENCHMARK_RUNTIME_METRICS_PATH:-}" "$runtime_before"
+    : > "$output_file"
+    started="$(now_micros)"
+    for ((worker = 0; worker < parallel_workers; worker++)); do
+        launch_concurrent_reader "$backend" "$worker" "$tmp_dir"
+    done
+    for ((worker = 0; worker < varied_concurrent_writers; worker++)); do
+        launch_concurrent_writer "$backend" "$worker" "$tmp_dir"
+    done
+    await_concurrent_workers "$backend" "$output_file"
+    record_concurrent_readback "$backend" "$output_file"
+    copy_metric_snapshot "${AUX_DUCKLAKE_BENCHMARK_RUNTIME_METRICS_PATH:-}" "$runtime_after"
+    benchmark_runtime_scope_restore
+    ended="$(now_micros)"
+    elapsed="$(elapsed_ms "$started" "$ended")"
+    write_metric_accounting "$accounting_file" "concurrent_read_write" "$elapsed" "$runtime_before" "$runtime_after"
+    REALISTIC_LAST_BATCH_MS="$elapsed"
+    REALISTIC_LAST_ACCOUNTING_FILE="$accounting_file"
+    rm -f "$runtime_before" "$runtime_after"
+}
+
 run_realistic_backend() {
     local backend="$1" output="$2" tmp_dir="$3"
     local data_dir="$tmp_dir/data"
@@ -1260,7 +1058,7 @@ run_realistic_backend() {
 
     local batches_file="$tmp_dir/batches.jsonl"
     : > "$batches_file"
-    local started ended elapsed batch_out before_delete_snapshot
+    local started ended elapsed batch_out
     started="$(now_micros)"
 
     batch_out="$tmp_dir/preload.out"
@@ -1311,6 +1109,12 @@ $(varied_join_query_sql "$table_count" "varied_join_snapshot")" "$session_prepar
         batch_out="$tmp_dir/mutation_churn.out"
         run_realistic_batch "$backend" "mutation_churn" "$batch_out" "$(varied_churn_sql "$table_count" "$scan_rows" "$varied_churn_rounds")" "$session_prepare" "$attach_file"
         append_realistic_batch_artifact "$batches_file" "mutation_churn" "$REALISTIC_LAST_BATCH_MS" "$batch_out" "$REALISTIC_LAST_ACCOUNTING_FILE"
+
+        if [[ "$varied_concurrent_writers" -gt 0 ]]; then
+            batch_out="$tmp_dir/concurrent-read-write.out"
+            run_concurrent_read_write "$backend" "$batch_out" "$tmp_dir"
+            append_realistic_batch_artifact "$batches_file" "concurrent_read_write" "$REALISTIC_LAST_BATCH_MS" "$batch_out" "$REALISTIC_LAST_ACCOUNTING_FILE"
+        fi
     fi
 
     batch_out="$tmp_dir/latest.out"
