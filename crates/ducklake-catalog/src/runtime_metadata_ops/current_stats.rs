@@ -1,8 +1,6 @@
 use crate::{
     CatalogId, CatalogResult, FileColumnStatsRow, FilePartitionValueRow, OrderedCatalogKv,
-    runtime_read_context::{
-        CatalogCurrentFileColumnStatsContext, CatalogCurrentFilePartitionValuesContext,
-    },
+    runtime_read_context::CatalogCurrentFileColumnStatsContext,
 };
 
 use crate::runtime_metadata_ops::*;
@@ -33,17 +31,6 @@ pub(super) fn cached_foundationdb_current_metadata_file_column_stats_rows(
     Ok(payload)
 }
 
-pub(super) fn current_metadata_file_partition_values(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-) -> CatalogResult<Vec<FilePartitionValueRow>> {
-    Ok(
-        CatalogCurrentFilePartitionValuesContext::for_current_file_partition_values(kv, catalog)?
-            .current_file_partition_values()
-            .to_vec(),
-    )
-}
-
 pub(super) fn current_metadata_file_column_stats(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
@@ -66,12 +53,6 @@ pub(super) fn file_partition_values_payload(
         ));
     }
     Ok(out.into_bytes())
-}
-
-pub(super) fn file_partition_values_mirror_sql(rows: Vec<FilePartitionValueRow>) -> String {
-    let mut out = "DELETE FROM {METADATA_CATALOG}.ducklake_file_partition_value;\n".to_owned();
-    append_file_partition_values_mirror_inserts(&mut out, rows);
-    out
 }
 
 pub(super) fn append_file_partition_values_mirror_inserts(
@@ -113,12 +94,6 @@ pub(super) fn file_column_stats_payload(rows: Vec<FileColumnStatsRow>) -> Catalo
         out.push('\n');
     }
     Ok(out.into_bytes())
-}
-
-pub(super) fn file_column_stats_mirror_sql(rows: Vec<FileColumnStatsRow>) -> String {
-    let mut out = "DELETE FROM {METADATA_CATALOG}.ducklake_file_column_stats;\n".to_owned();
-    append_file_column_stats_mirror_inserts(&mut out, rows);
-    out
 }
 
 pub(super) fn append_file_column_stats_mirror_inserts(

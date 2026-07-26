@@ -22,21 +22,18 @@ use crate::{
     },
     runtime_maintenance_ops::remove_cleanup_files,
     runtime_metadata_ops::{
-        attach_metadata, commit_column_mappings, commit_metadata_batch, initialize_ducklake,
-        list_column_mapping_rows, list_config_options, list_current_metadata_data_file_rows,
+        attach_metadata, commit_column_mappings, initialize_ducklake, list_column_mapping_rows,
+        list_config_options, list_current_metadata_data_file_rows,
         list_current_metadata_data_file_rows_for_data_file_ids,
         list_current_metadata_file_column_stats_rows,
-        list_current_metadata_file_column_stats_rows_for_data_file_ids,
-        list_current_metadata_file_partition_value_rows, list_data_file_rows,
+        list_current_metadata_file_column_stats_rows_for_data_file_ids, list_data_file_rows,
         list_delete_file_rows, list_delete_file_rows_for_delete_file_ids,
         list_file_column_stats_rows, list_file_partition_value_rows_for_data_file_ids,
         list_global_stats_for_snapshot, list_global_stats_inputs_for_snapshot,
         list_snapshot_stats_and_changes_inputs, lookup_begin_snapshot_for_schema_version,
         metadata_exists, render_bounded_append_mirror_sql, render_bounded_delete_file_mirror_sql,
-        render_current_metadata_data_file_mirror_sql,
-        render_current_metadata_file_column_stats_mirror_sql,
-        render_current_metadata_file_partition_value_mirror_sql, render_delete_file_mirror_sql,
-        render_scheduled_cleanup_mirror_sql, resolve_catalog_id, set_config_option,
+        render_bounded_partition_info_mirror_sql, render_bounded_scheduled_cleanup_mirror_sql,
+        resolve_catalog_id, set_config_option,
     },
     runtime_object_ops::{
         change_view_comment, create_macros, create_views, drop_macros, drop_tables, drop_views,
@@ -58,6 +55,117 @@ use crate::{
     },
 };
 
+#[derive(Clone, Copy)]
+pub(crate) struct RuntimeOperationPolicy {
+    #[cfg_attr(not(feature = "runtime-metrics"), allow(dead_code))]
+    pub(crate) family: &'static str,
+    pub(crate) mutates_catalog: bool,
+}
+
+impl RuntimeOperationPolicy {
+    const fn read(family: &'static str) -> Self {
+        Self {
+            family,
+            mutates_catalog: false,
+        }
+    }
+
+    const fn mutation(family: &'static str) -> Self {
+        Self {
+            family,
+            mutates_catalog: true,
+        }
+    }
+}
+
+pub(crate) fn runtime_operation_policy(operation: &str) -> RuntimeOperationPolicy {
+    match operation {
+        "InitializeDuckLake" | "SetConfigOption" | "CommitColumnMappings" => {
+            RuntimeOperationPolicy::mutation("metadata")
+        }
+        "CreateSchemas"
+        | "DropSchemas"
+        | "CreateTables"
+        | "ReplaceTables"
+        | "AddColumns"
+        | "RenameColumns"
+        | "ChangeColumnTypes"
+        | "ChangeColumnDefaults"
+        | "ChangeComments"
+        | "ChangePartitionKeys"
+        | "ChangeSortKeys"
+        | "DropColumns"
+        | "RenameTables" => RuntimeOperationPolicy::mutation("schema"),
+        "DropTables" | "CreateViews" | "RenameViews" | "DropViews" | "ChangeViewComment"
+        | "CreateMacros" | "DropMacros" => RuntimeOperationPolicy::mutation("object"),
+        "CommitDataMutation" | "CommitAttempt" => RuntimeOperationPolicy::mutation("data_mutation"),
+        "RegisterInlineTables" | "RegisterInlineRows" | "DeleteInlineRows" => {
+            RuntimeOperationPolicy::mutation("inline")
+        }
+        "RemoveCleanupFiles" => RuntimeOperationPolicy::mutation("cleanup"),
+        "ExpireSnapshots" => RuntimeOperationPolicy::mutation("snapshot_maintenance"),
+        "MergeAdjacentFiles" | "RewriteDeleteFiles" => {
+            RuntimeOperationPolicy::mutation("compaction")
+        }
+        "ResolveCatalogId"
+        | "AttachMetadata"
+        | "MetadataExists"
+        | "ListConfigOptions"
+        | "ListColumnMappings"
+        | "ListFilePartitionValuesForDataFileIds"
+        | "ListFileColumnStats"
+        | "RenderBoundedPartitionInfoMirrorSql"
+        | "ListCurrentMetadataFileColumnStats"
+        | "ListCurrentMetadataFileColumnStatsForDataFileIds"
+        | "ListCurrentMetadataDataFiles"
+        | "RenderBoundedAppendMirrorSql"
+        | "ListCurrentMetadataDataFilesForDataFileIds"
+        | "ListDataFiles"
+        | "RenderBoundedScheduledCleanupMirrorSql"
+        | "RenderBoundedDeleteFileMirrorSql"
+        | "ListDeleteFilesForDeleteFileIds"
+        | "GetBeginSnapshotForSchemaVersion"
+        | "GetNextColumnId"
+        | "IsColumnCreatedWithTable" => RuntimeOperationPolicy::read("metadata"),
+        "GetSnapshot"
+        | "GetConflictSnapshot"
+        | "GetSnapshotAt"
+        | "GetSnapshotAtTimestamp"
+        | "GetCatalogForSnapshot"
+        | "ListSnapshots"
+        | "ListSnapshotChangesAfter"
+        | "ListGlobalStatsInputsForSnapshot"
+        | "ListGlobalStatsForSnapshot"
+        | "ListSnapshotStatsAndChangesInputs"
+        | "ListDeleteFiles"
+        | "ListDataFilesAt"
+        | "ListRemovedDataFilesAfter"
+        | "ListCurrentDataFilesForPartitionScan"
+        | "ListCurrentDataFilesForPartitionScans"
+        | "ListCurrentDataFilesForPartitionPrune"
+        | "ListDataFilesForPartitionScanAt"
+        | "ListDataFilesForPartitionScansAt"
+        | "ListDataFilesForPartitionPruneAt" => RuntimeOperationPolicy::read("read"),
+        "ReadInlineRows"
+        | "ReadInlineRowsForFlush"
+        | "ReadInlineRowsForGlobalStats"
+        | "ReadInlineRowsForAggregateStats"
+        | "ReadInlineRowsForGlobalStatsBatch"
+        | "InlineFileDeletionsExist"
+        | "ListInlineFileDeletions"
+        | "ListInlineFileDeletionsForFlush"
+        | "ListInlineFlushDeletePositions"
+        | "ListCurrentInlineFlushDeletePositions"
+        | "ListInlineRowInsertions"
+        | "ListInlineRowDeletions" => RuntimeOperationPolicy::read("inline"),
+        "ListDataFileChanges" | "ListTableDeletions" => RuntimeOperationPolicy::read("change_feed"),
+        "ListOldFilesForCleanup" | "ListKnownFilesForCleanup" => {
+            RuntimeOperationPolicy::read("cleanup")
+        }
+        _ => RuntimeOperationPolicy::read("unknown"),
+    }
+}
+
 pub(crate) fn payload_for_request(request: &RuntimeRequest) -> CatalogResult<Vec<u8>> {
     let catalog = request.catalog_id;
     match request.operation.as_str() {
@@ -65,7 +173,6 @@ pub(crate) fn payload_for_request(request: &RuntimeRequest) -> CatalogResult<Vec
         "AttachMetadata" => attach_metadata(request.backend, catalog, &request.payload),
         "MetadataExists" => metadata_exists(request.backend, catalog),
         "InitializeDuckLake" => initialize_ducklake(request.backend, catalog, &request.payload),
-        "CommitMetadataBatch" => commit_metadata_batch(request.backend, catalog),
         "SetConfigOption" => set_config_option(request.backend, catalog, &request.payload),
         "ListConfigOptions" => list_config_options(request.backend, catalog),
         "CommitColumnMappings" => {
@@ -82,17 +189,11 @@ pub(crate) fn payload_for_request(request: &RuntimeRequest) -> CatalogResult<Vec
             )
         }
         "ListFileColumnStats" => list_file_column_stats_rows(request.backend, catalog),
-        "ListCurrentMetadataFilePartitionValues" => {
-            list_current_metadata_file_partition_value_rows(request.backend, catalog)
-        }
-        "RenderCurrentMetadataFilePartitionValueMirrorSql" => {
-            render_current_metadata_file_partition_value_mirror_sql(request.backend, catalog)
+        "RenderBoundedPartitionInfoMirrorSql" => {
+            render_bounded_partition_info_mirror_sql(request.backend, catalog, &request.payload)
         }
         "ListCurrentMetadataFileColumnStats" => {
             list_current_metadata_file_column_stats_rows(request.backend, catalog)
-        }
-        "RenderCurrentMetadataFileColumnStatsMirrorSql" => {
-            render_current_metadata_file_column_stats_mirror_sql(request.backend, catalog)
         }
         "ListCurrentMetadataFileColumnStatsForDataFileIds" => {
             list_current_metadata_file_column_stats_rows_for_data_file_ids(
@@ -113,9 +214,6 @@ pub(crate) fn payload_for_request(request: &RuntimeRequest) -> CatalogResult<Vec
         "ListCurrentMetadataDataFiles" => {
             list_current_metadata_data_file_rows(request.backend, catalog)
         }
-        "RenderCurrentMetadataDataFileMirrorSql" => {
-            render_current_metadata_data_file_mirror_sql(request.backend, catalog)
-        }
         "RenderBoundedAppendMirrorSql" => {
             render_bounded_append_mirror_sql(request.backend, catalog, &request.payload)
         }
@@ -128,9 +226,8 @@ pub(crate) fn payload_for_request(request: &RuntimeRequest) -> CatalogResult<Vec
         }
         "ListDataFiles" => list_data_file_rows(request.backend, catalog),
         "ListDeleteFiles" => list_delete_file_rows(request.backend, catalog),
-        "RenderDeleteFileMirrorSql" => render_delete_file_mirror_sql(request.backend, catalog),
-        "RenderScheduledCleanupMirrorSql" => {
-            render_scheduled_cleanup_mirror_sql(request.backend, catalog)
+        "RenderBoundedScheduledCleanupMirrorSql" => {
+            render_bounded_scheduled_cleanup_mirror_sql(request.backend, catalog, &request.payload)
         }
         "RenderBoundedDeleteFileMirrorSql" => {
             render_bounded_delete_file_mirror_sql(request.backend, catalog, &request.payload)
@@ -264,3 +361,7 @@ pub(crate) fn payload_for_request(request: &RuntimeRequest) -> CatalogResult<Vec
         .into_bytes()),
     }
 }
+
+#[cfg(test)]
+#[path = "runtime_operations_tests.rs"]
+mod tests;

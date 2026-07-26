@@ -83,6 +83,7 @@ _pre-push:
     @just _check
     @just _test
     @just _runtime-protocol-check
+    @just _benchmark-fixtures-verify
     @just _workload-inventory-verify
     @just _upstream-disabled-diff-temp
 
@@ -100,6 +101,9 @@ _runtime-protocol-check:
 
 _workload-inventory-verify:
     ./scripts/verify_ducklake_workload_inventory.sh
+
+_benchmark-fixtures-verify:
+    ./scripts/verify-ducklake-benchmark-fixtures.sh
 
 _upstream-disabled-diff-temp:
     #!/usr/bin/env bash
@@ -128,7 +132,7 @@ ducklake-fdb-sim-smoke:
     set -euo pipefail
     ./scripts/cargo_with_sccache.sh build -p ducklake-fdb-sim-workload --release
     target_dir="$(./scripts/cargo_with_sccache.sh metadata --format-version 1 --no-deps | rg -o '"target_directory":"[^"]+"' | cut -d '"' -f 4)"
-    for workload in catalog_smoke catalog_expire catalog_cleanup catalog_read_age catalog_recovery; do
+    for workload in catalog_smoke catalog_expire catalog_cleanup catalog_read_age catalog_recovery catalog_scale_maintenance; do
         ./scripts/cargo_with_sccache.sh run -p ducklake-fdb-sim-runner -- run --workload "$workload" --profile smoke --seed 1 --buggify off --library-path "$target_dir/release"
     done
 
@@ -137,7 +141,7 @@ ducklake-fdb-sim-multiclient:
     set -euo pipefail
     ./scripts/cargo_with_sccache.sh build -p ducklake-fdb-sim-workload --release
     target_dir="$(./scripts/cargo_with_sccache.sh metadata --format-version 1 --no-deps | rg -o '"target_directory":"[^"]+"' | cut -d '"' -f 4)"
-    for workload in catalog_smoke catalog_expire catalog_cleanup catalog_read_age catalog_recovery; do
+    for workload in catalog_smoke catalog_expire catalog_cleanup catalog_read_age catalog_recovery catalog_scale_maintenance; do
         ./scripts/cargo_with_sccache.sh run -p ducklake-fdb-sim-runner -- run --workload "$workload" --profile multi-client --seed 1 --buggify on --library-path "$target_dir/release"
     done
 
@@ -148,7 +152,7 @@ ducklake-runtime-protocol-check:
     ./scripts/cargo_with_sccache.sh test -p ducklake-catalog --no-default-features --features foundationdb ffi_probe_round_trips_runtime_frame
 
 ducklake-runtime-ffi-check:
-    CARGO_TARGET_DIR=target/codex-validation ./scripts/cargo_with_sccache.sh test -p ducklake-catalog runtime_ffi
+    ./scripts/cargo_with_sccache.sh test -p ducklake-catalog runtime_ffi
 
 ducklake-runtime-cpp-ffi-smoke:
     ./scripts/ducklake_runtime_cpp_ffi_smoke.sh
@@ -278,22 +282,43 @@ ducklake-workload-inventory-verify:
     ./scripts/verify_ducklake_workload_inventory.sh
 
 ducklake-catalog-benchmark-smoke:
-    ./scripts/ducklake_catalog_benchmark.sh smoke
+    ./scripts/ducklake-catalog-benchmark-run.sh ./scripts/ducklake_catalog_benchmark.sh smoke
 
 ducklake-catalog-benchmark-scan10:
-    ./scripts/ducklake_catalog_benchmark.sh scan10
+    ./scripts/ducklake-catalog-benchmark-run.sh ./scripts/ducklake_catalog_benchmark.sh scan10
 
 ducklake-catalog-benchmark-profile scan_files='10000':
-    ./scripts/ducklake_catalog_benchmark.sh profile {{scan_files}}
+    ./scripts/ducklake-catalog-benchmark-run.sh ./scripts/ducklake_catalog_benchmark.sh profile {{scan_files}}
+
+ducklake-catalog-benchmark-operational:
+    ./scripts/ducklake-catalog-benchmark-run.sh ./scripts/ducklake_catalog_benchmark.sh operational
+
+ducklake-catalog-benchmark-operational-growth:
+    ./scripts/ducklake-catalog-benchmark-run.sh ./scripts/ducklake_catalog_benchmark.sh operational-growth
+
+ducklake-catalog-benchmark-inline:
+    ./scripts/ducklake-catalog-benchmark-run.sh ./scripts/ducklake_catalog_benchmark.sh inline
 
 ducklake-catalog-benchmark-realistic:
-    ./scripts/ducklake_catalog_benchmark.sh realistic
+    ./scripts/ducklake-catalog-benchmark-run.sh ./scripts/ducklake_catalog_benchmark.sh realistic
 
 ducklake-catalog-benchmark-varied:
-    ./scripts/ducklake_catalog_benchmark.sh varied
+    ./scripts/ducklake-catalog-benchmark-run.sh ./scripts/ducklake_catalog_benchmark.sh varied
 
 ducklake-catalog-benchmark-robustness:
-    ./scripts/ducklake-catalog-robustness-benchmark.sh
+    ./scripts/ducklake-catalog-benchmark-run.sh ./scripts/ducklake-catalog-robustness-benchmark.sh
+
+ducklake-catalog-benchmark-full:
+    just ducklake-build-release
+    just ducklake-catalog-benchmark-smoke
+    just ducklake-catalog-benchmark-scan10
+    just ducklake-catalog-benchmark-profile
+    just ducklake-catalog-benchmark-inline
+    just ducklake-catalog-benchmark-operational
+    just ducklake-catalog-benchmark-operational-growth
+    just ducklake-catalog-benchmark-realistic
+    just ducklake-catalog-benchmark-varied
+    just ducklake-catalog-benchmark-robustness
 
 ducklake-release-benchmark-smoke:
     AUX_DUCKLAKE_FDB_LIVE=1 ./scripts/cargo_with_sccache.sh run -q -p ducklake-catalog --no-default-features --features foundationdb --bin ducklake-fdb-benchmark -- --profile smoke

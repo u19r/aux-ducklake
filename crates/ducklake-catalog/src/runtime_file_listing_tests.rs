@@ -33,10 +33,43 @@ mod tests {
         should_suppress_unflushed_inline_materialization_file,
     };
     #[cfg(feature = "foundationdb")]
-    use super::super::{PartitionPruneComparison, matching_partition_values};
+    use super::super::{
+        PartitionBatchFileIndex, PartitionPruneComparison, matching_partition_values,
+    };
+
+    #[cfg(feature = "foundationdb")]
+    #[test]
+    fn partition_batch_index_reuses_unpartitioned_files_across_ten_thousand_partitions() {
+        let files = (1..=10_000)
+            .map(|id| {
+                AttachedDataFile::new(
+                    DataFileRow::new(
+                        DataFileId(id),
+                        TableId(1),
+                        format!("file-{id}.parquet"),
+                        1,
+                        1,
+                        CatalogOrderId::uuid_v7(u128::from(id)),
+                    ),
+                    None,
+                )
+            })
+            .collect::<Vec<_>>();
+        let partitioned = (2..=10_000).map(DataFileId).collect();
+        let index = PartitionBatchFileIndex::new(&files, &partitioned);
+
+        assert_eq!(
+            index.positions_for(&[DataFileId(5_000)].into_iter().collect()),
+            vec![0, 4_999]
+        );
+        assert_eq!(
+            index.positions_for(&[DataFileId(10_000)].into_iter().collect()),
+            vec![0, 9_999]
+        );
+    }
 
     #[test]
-    fn given_latest_file_listing_when_resolving_snapshot_then_snapshot_history_is_not_scanned() {
+    fn given_latest_file_listing_when_rendering_then_snapshot_history_is_not_scanned() {
         let catalog = CatalogId(1);
         let table_id = TableId(10);
         let mut kv = FakeOrderedCatalogKv::new();
@@ -79,8 +112,8 @@ mod tests {
         assert!(payload.contains("main/orders/latest.parquet"), "{payload}");
         assert_eq!(
             kv.snapshot_timestamp_scan_count(),
-            1,
-            "latest snapshot resolution should use the latest row; the one remaining scan renders public snapshot ids"
+            0,
+            "latest file rendering should batch-read only the required snapshot rows"
         );
     }
 
@@ -137,7 +170,7 @@ mod tests {
     }
 
     #[test]
-    fn given_non_snapshot_schema_orders_when_rendering_files_then_schema_versions_are_reused() {
+    fn given_non_snapshot_schema_orders_when_rendering_files_then_table_history_is_not_scanned() {
         let catalog = CatalogId(1);
         let table_id = TableId(10);
         let mut kv = FakeOrderedCatalogKv::new();
@@ -184,14 +217,14 @@ mod tests {
         assert!(payload.contains("file_count=2"), "{payload}");
         assert_eq!(
             kv.table_object_scan_count(),
-            1,
-            "schema-version rendering should reuse the request map for non-snapshot file schema orders"
+            0,
+            "schema-version rendering should use the maintained schema-version history"
         );
     }
 
     #[test]
-    fn given_current_partition_render_context_when_rendering_files_then_schema_versions_are_reused()
-    {
+    fn given_current_partition_render_context_when_rendering_files_then_table_history_is_not_scanned()
+     {
         let catalog = CatalogId(1);
         let table_id = TableId(10);
         let mut kv = FakeOrderedCatalogKv::new();
@@ -240,8 +273,8 @@ mod tests {
         assert!(payload.contains("file_count=2"), "{payload}");
         assert_eq!(
             kv.table_object_scan_count(),
-            1,
-            "current partition file rendering should reuse the request map for non-snapshot file schema orders"
+            0,
+            "current partition rendering should use the maintained schema-version history"
         );
     }
 
@@ -440,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn given_historical_file_listing_when_rendering_then_snapshot_context_is_reused() {
+    fn given_historical_file_listing_when_rendering_then_snapshot_history_is_not_reloaded() {
         let catalog = CatalogId(1);
         let table_id = TableId(10);
         let mut kv = FakeOrderedCatalogKv::new();
@@ -483,8 +516,8 @@ mod tests {
         assert!(payload.contains("main/orders/later.parquet"), "{payload}");
         assert_eq!(
             kv.snapshot_timestamp_scan_count(),
-            1,
-            "historical resolution and render should share one snapshot context"
+            0,
+            "historical rendering should batch-read only the required snapshot rows"
         );
     }
 
@@ -669,6 +702,53 @@ mod tests {
 
         assert_eq!(payload, "file_count=0\n");
         assert_eq!(kv.end_order_scan_count(), 1);
+    }
+
+    #[test]
+    fn given_only_ordinary_files_when_listing_then_inline_suppression_storage_is_not_read() {
+        let catalog = CatalogId(1);
+        let table_id = TableId(10);
+        let mut inner = FakeOrderedCatalogKv::new();
+        initialize_catalog_if_absent(&mut inner, catalog).unwrap();
+        let mut table = table_with_columns(table_id, "orders", CatalogOrderId::uuid_v7(0));
+        table
+            .inlined_data_tables
+            .push(InlinedTableRow::new("ducklake_inlined_data_10_1", 1));
+        commit_create_table_row(&mut inner, catalog, table).unwrap();
+        let snapshot = latest_snapshot(&inner, catalog).unwrap().unwrap();
+        append_data_file(
+            &mut inner,
+            catalog,
+            DataFileRow::new(
+                DataFileId(7),
+                table_id,
+                "main/orders/ordinary.parquet",
+                1,
+                1024,
+                snapshot.order,
+            ),
+        )
+        .unwrap();
+        let kv = InlineEndOrderScanRecordingKv::new(inner, catalog, table_id);
+
+        let payload = String::from_utf8(
+            data_files_at_payload(
+                &kv,
+                catalog,
+                ListDataFilesAtPayload {
+                    snapshot_id: snapshot.sequence.0,
+                    table_id,
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(
+            payload.contains("main/orders/ordinary.parquet"),
+            "{payload}"
+        );
+        assert_eq!(kv.end_order_scan_count(), 0);
     }
 
     #[test]

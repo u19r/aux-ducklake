@@ -1,12 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::runtime_metrics::RuntimeMetricStage;
 #[cfg(feature = "runtime-metrics")]
 use crate::runtime_metrics::record_runtime_method_elapsed;
 use crate::{
     CatalogId, CatalogResult, DataFileChangeKind, DataFileId, DataFileRow, DeleteFileRow,
     InlineTableFlush, KvBatch, MutableCatalogKv, OrderedCatalogKv, TableId,
     conflict::write_data_file_change,
-    conflict_watermarks::stage_max_file_id_watermark,
+    conflict_watermarks::{
+        load_table_next_row_id, stage_max_file_id_watermark, stage_table_next_row_id,
+    },
     file_partitions::{
         delete_partition_lookups_for_data_file, delete_partition_values_for_data_file,
     },
@@ -22,33 +25,6 @@ use crate::{
         stage_snapshot,
     },
 };
-
-#[cfg(feature = "runtime-metrics")]
-#[derive(Clone, Copy)]
-struct RuntimeMetricStage(std::time::Instant);
-
-#[cfg(not(feature = "runtime-metrics"))]
-#[derive(Clone, Copy)]
-struct RuntimeMetricStage;
-
-impl RuntimeMetricStage {
-    #[inline]
-    fn start() -> Self {
-        #[cfg(feature = "runtime-metrics")]
-        {
-            Self(std::time::Instant::now())
-        }
-        #[cfg(not(feature = "runtime-metrics"))]
-        {
-            Self
-        }
-    }
-
-    #[cfg(feature = "runtime-metrics")]
-    fn elapsed_micros(self) -> u64 {
-        u64::try_from(self.0.elapsed().as_micros()).unwrap_or(u64::MAX)
-    }
-}
 
 #[cfg(feature = "runtime-metrics")]
 fn record_runtime_method_stage(operation: &str, started: RuntimeMetricStage) {
@@ -156,12 +132,63 @@ pub(crate) fn reject_current_data_file_row_id_overlaps_except_with_latest_order(
     allowed_current_file_ids: &BTreeSet<DataFileId>,
     latest_order: Option<CatalogOrderId>,
 ) -> CatalogResult<()> {
+    reject_proposed_data_file_row_id_overlaps(rows)?;
+
+    if allowed_current_file_ids.is_empty() {
+        return reject_allocated_table_row_id_reuse(kv, catalog, rows);
+    }
+
+    reject_current_data_file_row_id_overlaps_for_replacement(
+        kv,
+        catalog,
+        rows,
+        allowed_current_file_ids,
+        latest_order,
+    )
+}
+
+pub(crate) fn reject_proposed_data_file_row_id_overlaps(rows: &[DataFileRow]) -> CatalogResult<()> {
     for (index, row) in rows.iter().enumerate() {
         for other in rows.iter().skip(index + 1) {
             reject_row_id_overlap(row, other)?;
         }
     }
+    Ok(())
+}
 
+fn reject_allocated_table_row_id_reuse(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    rows: &[DataFileRow],
+) -> CatalogResult<()> {
+    for (table_id, table_rows) in data_files_by_table(rows) {
+        let next_row_id = load_table_next_row_id(kv, catalog, table_id)?;
+        for row in table_rows
+            .into_iter()
+            .filter(|row| row_id_overlap_check_needed(row))
+        {
+            if row.row_id_start < next_row_id {
+                return Err(crate::CatalogError::InvalidMutation(format!(
+                    "conflict committing data mutation: data file {} row ids [{}..{}) reuse allocated row ids below table {} next row id {}",
+                    row.data_file_id.0,
+                    row.row_id_start,
+                    row.row_id_start.saturating_add(row.record_count),
+                    table_id.0,
+                    next_row_id
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reject_current_data_file_row_id_overlaps_for_replacement(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    rows: &[DataFileRow],
+    allowed_current_file_ids: &BTreeSet<DataFileId>,
+    latest_order: Option<CatalogOrderId>,
+) -> CatalogResult<()> {
     for (table_id, table_rows) in data_files_by_table(rows) {
         let overlap_candidates = table_rows
             .into_iter()
@@ -182,6 +209,10 @@ pub(crate) fn reject_current_data_file_row_id_overlaps_except_with_latest_order(
         }
     }
     Ok(())
+}
+
+pub(crate) fn data_file_next_row_id(row: &DataFileRow) -> Option<u64> {
+    row_id_overlap_check_needed(row).then(|| row.row_id_start.saturating_add(row.record_count))
 }
 
 fn data_files_by_table(rows: &[DataFileRow]) -> Vec<(TableId, Vec<&DataFileRow>)> {
@@ -249,6 +280,9 @@ pub(crate) fn stage_append_data_file_without_change(
         row.encode(),
     );
     stage_max_file_id_watermark(kv, batch, catalog, row.data_file_id.0)?;
+    if let Some(next_row_id) = data_file_next_row_id(row) {
+        stage_table_next_row_id(kv, batch, catalog, row.table_id, next_row_id)?;
+    }
     delete_partition_values_for_data_file(kv, batch, catalog, row.data_file_id)
 }
 

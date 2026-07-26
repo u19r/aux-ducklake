@@ -2963,58 +2963,6 @@ fn given_old_snapshot_when_expired_then_time_travel_fails_closed_and_current_rea
 }
 
 #[test]
-fn given_multiple_internal_orders_for_public_snapshot_when_lookup_then_latest_order_is_returned() {
-    let mut kv = FakeOrderedCatalogKv::new();
-    let catalog = CatalogId(1);
-    let first = ducklake_catalog::SnapshotRow::with_created_at_micros(
-        CatalogOrderId::uuid_v7(10),
-        ducklake_catalog::RawSnapshotSequence(7),
-        100,
-    );
-    let second = ducklake_catalog::SnapshotRow::with_created_at_micros(
-        CatalogOrderId::uuid_v7(20),
-        ducklake_catalog::RawSnapshotSequence(7),
-        200,
-    );
-    let latest = ducklake_catalog::SnapshotRow::with_created_at_micros(
-        CatalogOrderId::uuid_v7(30),
-        ducklake_catalog::RawSnapshotSequence(8),
-        300,
-    );
-    let mut batch = ducklake_catalog::KvBatch::new();
-    for snapshot in [&first, &second, &latest] {
-        batch.put(snapshot_key(catalog, snapshot.order), snapshot.encode());
-        batch.put(
-            snapshot_timestamp_key(catalog, snapshot.created_at_micros, snapshot.order),
-            snapshot.sequence.to_be_bytes().to_vec(),
-        );
-    }
-    kv.commit(batch).unwrap();
-
-    assert_eq!(
-        snapshot_by_raw_sequence(&kv, catalog, RawSnapshotSequence(7))
-            .unwrap()
-            .unwrap()
-            .order,
-        second.order
-    );
-
-    let expired = expire_snapshots(
-        &mut kv,
-        catalog,
-        &[ducklake_catalog::RawSnapshotSequence(7)],
-    )
-    .unwrap();
-    assert_eq!(expired.len(), 2);
-    assert!(
-        list_snapshots(&kv, catalog)
-            .unwrap()
-            .iter()
-            .all(|snapshot| snapshot.sequence != RawSnapshotSequence(7))
-    );
-}
-
-#[test]
 fn given_latest_snapshot_when_expired_then_mutation_is_rejected() {
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);

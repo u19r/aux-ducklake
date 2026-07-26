@@ -112,8 +112,13 @@ silently truncated result.
 
 Each continuation carries a SHA-256 digest of the complete logical result. The runtime returns a
 retryable conflict if the result changes between pages; it never combines pages from different
-catalog states. Mutating operations are executed once and cannot accept a page continuation. Keep
-mutation responses request-bounded rather than adding transport retries that could repeat effects.
+catalog states. Mutating operations are executed once and cannot accept a page continuation.
+Atomic mutation request frames are bounded to 6 MiB, with 16 KiB reserved for protocol headers;
+the catalog asks FoundationDB for the approximate size of the fully staged transaction and rejects
+anything above 8,000,000 bytes. This includes mutation and conflict-range overhead and reserves
+2,000,000 bytes below FoundationDB's hard transaction limit. Consumers must split oversized
+multi-table work into smaller atomic batches. Keep mutation responses request-bounded rather than
+adding transport retries that could repeat effects.
 
 `cargo test -p ducklake-catalog runtime_protocol_tests` proves multi-page reassembly, legacy
 single-page compatibility, and changed-result rejection. `just ducklake-runtime-cpp-ffi-smoke`

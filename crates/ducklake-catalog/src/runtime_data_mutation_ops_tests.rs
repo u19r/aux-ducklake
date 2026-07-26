@@ -26,6 +26,19 @@ mod tests {
     }
 
     #[test]
+    fn given_recovery_attempt_when_data_mutation_is_parsed_then_identity_is_typed() {
+        let mutation = data_mutation_payload_values(
+            b"commit_snapshot\t8\nrecovery_attempt\t00112233-4455-6677-8899-aabbccddeeff\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            mutation.recovery_attempt_id,
+            Some(crate::CommitAttemptId(0x00112233445566778899aabbccddeeff))
+        );
+    }
+
+    #[test]
     fn given_multiple_inline_table_flush_intents_when_parsed_then_each_flush_is_preserved() {
         let mutation = data_mutation_payload_values(
             b"inline_table\tducklake_inlined_data_2_1\t7\n\
@@ -173,6 +186,33 @@ mod tests {
                 begin_order: snapshot.order,
                 max_partial_order: Some(snapshot.order),
             }
+        );
+    }
+
+    #[test]
+    fn given_data_file_max_partial_snapshot_is_current_commit_when_resolved_then_order_is_versionstamped()
+     {
+        let catalog = CatalogId(1);
+        let (kv, snapshot) = catalog_with_single_table_snapshot(catalog, TableId(10));
+        let proposed_sequence = snapshot.sequence.0 + 1;
+        let payload = format!(
+            "commit_snapshot\t{proposed_sequence}\nfile\t9\t10\tmain/orders/flushed.parquet\t3\t1024\t0\t\t151\t{}\t{proposed_sequence}\n",
+            snapshot.sequence.0
+        );
+        let mutation = data_mutation_payload_values(payload.as_bytes()).unwrap();
+
+        let resolved = resolve_data_file_visibility_orders(
+            &kv,
+            catalog,
+            mutation.data_file_visibility[0],
+            mutation.proposed_commit_snapshot,
+        )
+        .unwrap();
+
+        assert_eq!(resolved.begin_order, snapshot.order);
+        assert_eq!(
+            resolved.max_partial_order,
+            Some(crate::ids::incomplete_fdb_order())
         );
     }
 

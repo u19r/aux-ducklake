@@ -1,3 +1,5 @@
+#[cfg(feature = "foundationdb")]
+use std::collections::HashMap;
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(not(test))]
 use std::sync::OnceLock;
@@ -6,6 +8,7 @@ use std::sync::OnceLock;
 use crate::CatalogCacheNamespace;
 #[cfg(not(test))]
 use crate::bounded_cache::{BoundedCache, static_bounded_cache};
+use crate::runtime_metrics::RuntimeMetricStage;
 use crate::{
     AttachedDataFile, CatalogId, CatalogOrderId, CatalogResult, DataFileId, DuckLakeSnapshotId,
     OrderedCatalogKv, PartitionKeyIndex, SchemaId, SnapshotRow, TableId,
@@ -13,11 +16,10 @@ use crate::{
         inline_table_all_end_orders, list_inline_file_deletions_for_data_files_at,
         list_unflushed_inline_table_payloads_at_with_end_orders,
     },
+    keys::snapshot_key,
     list_all_snapshots, load_table_at,
-    runtime_snapshots::{
-        SharedOrderMap, SnapshotReadContext, public_snapshot_sequences_by_order_containing,
-        snapshot_schema_version, snapshot_schema_versions_by_order_shared,
-    },
+    runtime_snapshots::SnapshotReadContext,
+    schema_version_state::load_schema_versions_at,
 };
 
 #[cfg(feature = "foundationdb")]
@@ -25,7 +27,7 @@ use crate::data_file_store::without_backfilled_source_duplicates;
 #[cfg(feature = "foundationdb")]
 use crate::file_partitions::{
     PartitionScanFilter, list_current_data_files_for_partition_scan,
-    list_partition_lookup_values_for_key,
+    list_partition_lookup_values_for_key, partition_value_lookup_ids, partitioned_data_file_ids,
 };
 #[cfg(feature = "foundationdb")]
 use crate::latest_snapshot;
@@ -155,27 +157,8 @@ pub(crate) fn foundationdb_data_files_at_payload(
     let mut request = FileListingRequestContext::for_current_catalog(kv, catalog)?;
     let snapshot = request.resolve_snapshot(kv, catalog, payload.snapshot_id)?;
     record_list_data_files_at_stage("Snapshot", started);
-    let started = RuntimeMetricStage::start();
-    let files = foundationdb_visible_data_files_at(kv, catalog, payload.table_id, snapshot.order)?;
-    record_list_data_files_at_stage("ScanAndDedupe", started);
-    let started = RuntimeMetricStage::start();
-    let files = foundationdb_attached_visible_data_files_at(
-        kv,
-        catalog,
-        payload.table_id,
-        snapshot.order,
-        files,
-    )?;
-    record_list_data_files_at_stage("AttachDeletes", started);
-    let started = RuntimeMetricStage::start();
-    let files = suppress_unflushed_inline_materialization_files(
-        kv,
-        catalog,
-        payload.table_id,
-        snapshot.order,
-        files,
-    )?;
-    record_list_data_files_at_stage("InlineSuppression", started);
+    let files =
+        foundationdb_attached_data_files_at_order(kv, catalog, payload.table_id, snapshot.order)?;
     let started = RuntimeMetricStage::start();
     let mut out = String::new();
     push_files_payload(
@@ -193,6 +176,32 @@ pub(crate) fn foundationdb_data_files_at_payload(
         file_listing_payload_cache().insert(cache_key, payload.clone());
     }
     Ok(payload)
+}
+
+#[cfg(feature = "foundationdb")]
+pub(crate) fn foundationdb_attached_data_files_at_order(
+    kv: &crate::FdbOrderedCatalogKv,
+    catalog: CatalogId,
+    table_id: TableId,
+    snapshot_order: CatalogOrderId,
+) -> CatalogResult<Vec<AttachedDataFile>> {
+    let started = RuntimeMetricStage::start();
+    let files = foundationdb_visible_data_files_at(kv, catalog, table_id, snapshot_order)?;
+    record_list_data_files_at_stage("ScanAndDedupe", started);
+    let started = RuntimeMetricStage::start();
+    let files =
+        foundationdb_attached_visible_data_files_at(kv, catalog, table_id, snapshot_order, files)?;
+    record_list_data_files_at_stage("AttachDeletes", started);
+    let started = RuntimeMetricStage::start();
+    let files = suppress_unflushed_inline_materialization_files(
+        kv,
+        catalog,
+        table_id,
+        snapshot_order,
+        files,
+    )?;
+    record_list_data_files_at_stage("InlineSuppression", started);
+    Ok(files)
 }
 
 #[cfg(all(feature = "foundationdb", feature = "runtime-metrics"))]
@@ -407,19 +416,22 @@ pub(crate) fn foundationdb_partition_files_at_batch_payload(
             )?
         }
     };
+    let partitioned =
+        partitioned_data_file_ids(kv, catalog, payload.table_id, payload.partition_key_index)?;
+    let file_index = PartitionBatchFileIndex::new(&attached_files, &partitioned);
     let mut out = String::new();
     for partition_value in payload.partition_values {
-        let filter = PartitionScanFilter::load(
+        let matched = partition_value_lookup_ids(
             kv,
             catalog,
             payload.table_id,
             payload.partition_key_index,
             &partition_value,
         )?;
-        let files = attached_files
-            .iter()
-            .filter(|attached| filter.includes(attached.data_file.data_file_id))
-            .cloned()
+        let files = file_index
+            .positions_for(&matched)
+            .into_iter()
+            .map(|index| attached_files[index].clone())
             .collect();
         push_partition_files_payload_with_context(
             &mut out,
@@ -432,6 +444,47 @@ pub(crate) fn foundationdb_partition_files_at_batch_payload(
         )?;
     }
     Ok(out.into_bytes())
+}
+
+#[cfg(feature = "foundationdb")]
+struct PartitionBatchFileIndex {
+    positions_by_id: HashMap<DataFileId, usize>,
+    unpartitioned_positions: Vec<usize>,
+}
+
+#[cfg(feature = "foundationdb")]
+impl PartitionBatchFileIndex {
+    fn new(
+        files: &[AttachedDataFile],
+        partitioned: &std::collections::HashSet<DataFileId>,
+    ) -> Self {
+        Self {
+            positions_by_id: files
+                .iter()
+                .enumerate()
+                .map(|(index, attached)| (attached.data_file.data_file_id, index))
+                .collect(),
+            unpartitioned_positions: files
+                .iter()
+                .enumerate()
+                .filter_map(|(index, attached)| {
+                    (!partitioned.contains(&attached.data_file.data_file_id)).then_some(index)
+                })
+                .collect(),
+        }
+    }
+
+    fn positions_for(&self, matched: &std::collections::HashSet<DataFileId>) -> Vec<usize> {
+        let mut positions = self.unpartitioned_positions.clone();
+        positions.extend(
+            matched
+                .iter()
+                .filter_map(|data_file_id| self.positions_by_id.get(data_file_id).copied()),
+        );
+        positions.sort_unstable();
+        positions.dedup();
+        positions
+    }
 }
 
 #[cfg(feature = "foundationdb")]
@@ -731,23 +784,6 @@ impl FileListingRequestContext {
         })
     }
 
-    fn render_mappings(
-        &mut self,
-        kv: &impl OrderedCatalogKv,
-        catalog: CatalogId,
-        required_orders: &BTreeSet<CatalogOrderId>,
-    ) -> CatalogResult<(SharedOrderMap, SharedOrderMap)> {
-        let context = self.snapshot_context(kv, catalog)?;
-        let sequences = context.sequences_by_order();
-        if public_snapshot_sequences_cover(&sequences, required_orders) {
-            return Ok((sequences, context.schema_versions_by_order()));
-        }
-        Ok((
-            public_snapshot_sequences_containing_orders(kv, catalog, required_orders)?,
-            context.schema_versions_by_order(),
-        ))
-    }
-
     fn latest_or_next_raw_snapshot(&self, snapshot_id: DuckLakeSnapshotId) -> Option<SnapshotRow> {
         let latest = self.latest.clone()?;
         let latest_sequence = DuckLakeSnapshotId(latest.sequence.0);
@@ -764,9 +800,7 @@ impl FileListingRequestContext {
         catalog: CatalogId,
     ) -> CatalogResult<&SnapshotReadContext> {
         if self.snapshots.is_none() {
-            self.snapshots = Some(SnapshotReadContext::for_current_catalog_uncached(
-                kv, catalog,
-            )?);
+            self.snapshots = Some(SnapshotReadContext::for_current_catalog(kv, catalog)?);
         }
         self.snapshots.as_ref().ok_or_else(|| {
             crate::CatalogError::Decode("file-listing snapshot context was not initialized".into())
@@ -924,36 +958,6 @@ fn latest_or_next_public_snapshot(
     (snapshot_id > latest_public_snapshot_id).then_some(latest)
 }
 
-fn public_snapshot_sequences_containing_orders(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    required_orders: &BTreeSet<CatalogOrderId>,
-) -> CatalogResult<SharedOrderMap> {
-    let Some(first_order) = required_orders.first().copied() else {
-        return Err(crate::CatalogError::Decode(
-            "file payload has no snapshot orders".into(),
-        ));
-    };
-    let sequences = public_snapshot_sequences_by_order_containing(kv, catalog, first_order)?;
-    if public_snapshot_sequences_cover(&sequences, required_orders) {
-        return Ok(sequences);
-    }
-    let last_order = required_orders
-        .last()
-        .copied()
-        .ok_or_else(|| crate::CatalogError::Decode("file payload has no snapshot orders".into()))?;
-    public_snapshot_sequences_by_order_containing(kv, catalog, last_order)
-}
-
-fn public_snapshot_sequences_cover(
-    sequences: &SharedOrderMap,
-    required_orders: &BTreeSet<CatalogOrderId>,
-) -> bool {
-    required_orders
-        .iter()
-        .all(|order| sequences.get(order).is_some())
-}
-
 fn suppress_unflushed_inline_materialization_files(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
@@ -963,6 +967,18 @@ fn suppress_unflushed_inline_materialization_files(
 ) -> CatalogResult<Vec<AttachedDataFile>> {
     let started = RuntimeMetricStage::start();
     if files.is_empty() {
+        record_runtime_method_stage(
+            "method.runtime_file_listing.suppress_unflushed_inline_materialization_files",
+            started,
+        );
+        return Ok(files);
+    }
+    if !files.iter().any(|attached| {
+        matches!(
+            file_listing_role(&attached.data_file),
+            FileListingRole::InlineMaterializationFile { .. }
+        )
+    }) {
         record_runtime_method_stage(
             "method.runtime_file_listing.suppress_unflushed_inline_materialization_files",
             started,
@@ -1147,7 +1163,7 @@ fn push_files_payload(
     record_list_data_files_at_render_stage("InlineFileDeletions", started);
     let started = RuntimeMetricStage::start();
     let public_snapshot_orders = file_payload_public_snapshot_orders(snapshot_order, &files);
-    let mut render_context =
+    let render_context =
         FilePayloadRenderContext::new(kv, catalog, &public_snapshot_orders, request_context)?;
     record_list_data_files_at_render_stage("Context", started);
     let started = RuntimeMetricStage::start();
@@ -1319,33 +1335,6 @@ fn file_payload_public_snapshot_orders(
 }
 
 #[cfg(feature = "runtime-metrics")]
-#[derive(Clone, Copy)]
-struct RuntimeMetricStage(std::time::Instant);
-
-#[cfg(not(feature = "runtime-metrics"))]
-#[derive(Clone, Copy)]
-struct RuntimeMetricStage;
-
-impl RuntimeMetricStage {
-    #[inline]
-    fn start() -> Self {
-        #[cfg(feature = "runtime-metrics")]
-        {
-            Self(std::time::Instant::now())
-        }
-        #[cfg(not(feature = "runtime-metrics"))]
-        {
-            Self
-        }
-    }
-
-    #[cfg(feature = "runtime-metrics")]
-    fn elapsed_micros(self) -> u64 {
-        u64::try_from(self.0.elapsed().as_micros()).unwrap_or(u64::MAX)
-    }
-}
-
-#[cfg(feature = "runtime-metrics")]
 fn record_runtime_method_stage(operation: &str, started: RuntimeMetricStage) {
     record_runtime_method_elapsed(operation, started.elapsed_micros());
 }
@@ -1369,10 +1358,8 @@ fn record_list_data_files_at_render_stage(stage: &str, started: RuntimeMetricSta
 fn record_list_data_files_at_render_stage(_stage: &str, _started: RuntimeMetricStage) {}
 
 struct FilePayloadRenderContext {
-    catalog: CatalogId,
-    public_snapshot_by_order: SharedOrderMap,
-    schema_version_by_order: SharedOrderMap,
-    exact_schema_version_by_order: BTreeMap<CatalogOrderId, u64>,
+    public_snapshot_by_order: BTreeMap<CatalogOrderId, u64>,
+    schema_version_by_order: BTreeMap<CatalogOrderId, u64>,
 }
 
 impl FilePayloadRenderContext {
@@ -1380,36 +1367,24 @@ impl FilePayloadRenderContext {
         kv: &impl OrderedCatalogKv,
         catalog: CatalogId,
         public_snapshot_orders: &BTreeSet<CatalogOrderId>,
-        mut request_context: Option<&mut FileListingRequestContext>,
+        _request_context: Option<&mut FileListingRequestContext>,
     ) -> CatalogResult<Self> {
         let started = RuntimeMetricStage::start();
-        let request_mappings = match &mut request_context {
-            Some(context) => Some(context.render_mappings(kv, catalog, public_snapshot_orders)?),
-            None => None,
-        };
-        let public_snapshot_by_order = match request_mappings.as_ref() {
-            Some((sequences, _)) => sequences.clone(),
-            None => {
-                public_snapshot_sequences_containing_orders(kv, catalog, public_snapshot_orders)?
-            }
-        };
+        let public_snapshot_by_order =
+            public_snapshot_sequences_for_orders(kv, catalog, public_snapshot_orders)?;
         record_list_data_files_at_render_stage("ContextPublicSnapshots", started);
         let started = RuntimeMetricStage::start();
-        let schema_version_by_order = match request_mappings {
-            Some((_, schema_versions)) => schema_versions,
-            None => snapshot_schema_versions_by_order_shared(kv, catalog)?,
-        };
+        let schema_version_by_order = load_schema_versions_at(kv, catalog, public_snapshot_orders)?;
         record_list_data_files_at_render_stage("ContextSchemaVersions", started);
         Ok(Self {
-            catalog,
             public_snapshot_by_order,
             schema_version_by_order,
-            exact_schema_version_by_order: BTreeMap::new(),
         })
     }
 
     fn public_snapshot_id_for_order(&self, order: CatalogOrderId) -> CatalogResult<u64> {
-        order_mapping_at_or_after_oldest(self.public_snapshot_by_order.as_ref(), order)
+        self.public_snapshot_by_order
+            .get(&order)
             .copied()
             .ok_or_else(|| {
                 crate::CatalogError::Decode(format!("snapshot order {order} does not exist"))
@@ -1417,82 +1392,38 @@ impl FilePayloadRenderContext {
     }
 
     fn schema_version_for_order(
-        &mut self,
-        kv: &impl OrderedCatalogKv,
+        &self,
+        _kv: &impl OrderedCatalogKv,
         order: CatalogOrderId,
     ) -> CatalogResult<u64> {
-        if let Some(version) = self.schema_version_by_order.get(&order).copied() {
-            return Ok(version);
-        }
-        if let Some(version) = self.exact_schema_version_by_order.get(&order).copied() {
-            return Ok(version);
-        }
-        let previous = self
-            .schema_version_by_order
-            .as_ref()
-            .range(..=order)
-            .next_back()
-            .map(|(_, version)| *version);
-        let next = self
-            .schema_version_by_order
-            .as_ref()
-            .range(order..)
-            .next()
-            .map(|(_, version)| *version);
-        if let (Some(previous_version), Some(next_version)) = (previous, next)
-            && previous_version != next_version
-        {
-            let version = snapshot_schema_version(kv, self.catalog, order)?;
-            self.exact_schema_version_by_order.insert(order, version);
-            return Ok(version);
-        }
-        if let Some(version) = previous {
-            return Ok(version);
-        }
-        let all_schema_versions = snapshot_schema_versions_by_order_shared(kv, self.catalog)?;
-        if let Some(version) = all_schema_versions.get(&order).copied() {
-            return Ok(version);
-        }
-        let previous = all_schema_versions
-            .as_ref()
-            .range(..=order)
-            .next_back()
-            .map(|(_, version)| *version);
-        let next = all_schema_versions
-            .as_ref()
-            .range(order..)
-            .next()
-            .map(|(_, version)| *version);
-        if let (Some(previous_version), Some(next_version)) = (previous, next)
-            && previous_version != next_version
-        {
-            let version = snapshot_schema_version(kv, self.catalog, order)?;
-            self.exact_schema_version_by_order.insert(order, version);
-            return Ok(version);
-        }
-        previous
-            .or_else(|| {
-                all_schema_versions
-                    .as_ref()
-                    .iter()
-                    .next()
-                    .map(|(_, value)| *value)
-            })
+        self.schema_version_by_order
+            .get(&order)
+            .copied()
             .ok_or_else(|| {
                 crate::CatalogError::Decode(format!("snapshot order {order} does not exist"))
             })
     }
 }
 
-fn order_mapping_at_or_after_oldest<T>(
-    mappings: &std::collections::BTreeMap<CatalogOrderId, T>,
-    order: CatalogOrderId,
-) -> Option<&T> {
-    mappings
-        .range(..=order)
-        .next_back()
-        .or_else(|| mappings.iter().next())
-        .map(|(_, value)| value)
+fn public_snapshot_sequences_for_orders(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    orders: &BTreeSet<CatalogOrderId>,
+) -> CatalogResult<BTreeMap<CatalogOrderId, u64>> {
+    let keys = orders
+        .iter()
+        .map(|order| snapshot_key(catalog, *order))
+        .collect::<Vec<_>>();
+    let mut sequences = BTreeMap::new();
+    for (order, value) in orders.iter().zip(kv.batch_get(&keys)?) {
+        let value = value.as_deref().ok_or_else(|| {
+            crate::CatalogError::Decode(format!("snapshot order {order} does not exist"))
+        })?;
+        let snapshot =
+            crate::store::decode_snapshot_item(catalog, &snapshot_key(catalog, *order), value)?;
+        sequences.insert(*order, snapshot.sequence.0);
+    }
+    Ok(sequences)
 }
 
 fn file_schema_order(file: &crate::DataFileRow) -> CatalogOrderId {

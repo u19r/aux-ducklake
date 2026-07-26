@@ -117,10 +117,7 @@ pub(crate) fn register_inline_rows(
     payload: &[u8],
 ) -> CatalogResult<Vec<u8>> {
     let requests = inline_rows_payloads(payload)?;
-    let mut chunk_count = 0;
-    for request in requests {
-        chunk_count += runtime_foundationdb_register_inline_rows(catalog, request)?.len();
-    }
+    let chunk_count = runtime_foundationdb_register_inline_rows(catalog, requests)?.len();
     Ok(format!("inline_chunk_count={chunk_count}\n").into_bytes())
 }
 
@@ -374,23 +371,11 @@ pub(crate) struct RuntimeInlineDeleteTarget {
     pub(crate) row_ids: Vec<u64>,
 }
 
-pub(crate) fn inline_table_for_register(
-    kv: &impl crate::OrderedCatalogKv,
-    catalog: CatalogId,
-    request: &RuntimeInlineRows,
-) -> CatalogResult<TableRow> {
-    let _ = latest_snapshot(kv, catalog)?.ok_or(CatalogError::NotFound("catalog snapshot"))?;
-    let mut table = load_current_table_row(kv, catalog, request.table_id)?
-        .ok_or(CatalogError::NotFound("inline table"))?;
-    register_inlined_table(
-        &mut table,
-        request.table_name.clone(),
-        request.schema_version,
-    );
-    Ok(table)
-}
-
-fn register_inlined_table(table: &mut TableRow, table_name: String, schema_version: u64) -> bool {
+pub(crate) fn register_inlined_table(
+    table: &mut TableRow,
+    table_name: String,
+    schema_version: u64,
+) -> bool {
     if table
         .inlined_data_tables
         .iter()
@@ -617,7 +602,7 @@ fn inline_rows_payload(payload: &[u8]) -> CatalogResult<RuntimeInlineRows> {
     }
 }
 
-fn inline_rows_payloads(payload: &[u8]) -> CatalogResult<Vec<RuntimeInlineRows>> {
+pub(crate) fn inline_rows_payloads(payload: &[u8]) -> CatalogResult<Vec<RuntimeInlineRows>> {
     let mut read_snapshot = None;
     let mut commit_snapshot = None;
     let mut commit_metadata = SnapshotCommitMetadata::default();
@@ -804,7 +789,7 @@ fn inline_materialization_request(payload: &[u8]) -> CatalogResult<InlineMateria
     })
 }
 
-fn inline_delete_payload(payload: &[u8]) -> CatalogResult<RuntimeInlineDelete> {
+pub(crate) fn inline_delete_payload(payload: &[u8]) -> CatalogResult<RuntimeInlineDelete> {
     let mut commit_snapshot = None;
     let mut targets = Vec::<RuntimeInlineDeleteTarget>::new();
     for row in TabularPayload::new("DeleteInlineRows", payload)? {

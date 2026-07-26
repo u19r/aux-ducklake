@@ -15,7 +15,7 @@ use crate::{
     delete_change_feed::list_table_deletion_scan_files,
     file_partitions::{remove_cached_file_partition_values, stage_file_partition_value},
     file_stats::{
-        list_file_column_stats_for_data_file_ids, remove_cached_file_column_stats_for_data_file,
+        list_file_column_stats_for_data_file_ids, remove_cached_file_column_stats_rows,
         stage_file_column_stats, stage_table_file_stats_versions_for_rows,
     },
     file_visibility::{
@@ -110,9 +110,7 @@ pub fn commit_merge_adjacent_data_files(
     for row in &compaction.partition_values {
         remove_cached_file_partition_values(kv, catalog, row.data_file_id);
     }
-    for row in &file_column_stats {
-        remove_cached_file_column_stats_for_data_file(kv, catalog, row.data_file_id);
-    }
+    remove_cached_file_column_stats_rows(kv, catalog, &file_column_stats);
     Ok(compaction)
 }
 
@@ -263,9 +261,7 @@ pub fn commit_rewrite_delete_data_files(
     for row in &compaction.partition_values {
         remove_cached_file_partition_values(kv, catalog, row.data_file_id);
     }
-    for row in &file_column_stats {
-        remove_cached_file_column_stats_for_data_file(kv, catalog, row.data_file_id);
-    }
+    remove_cached_file_column_stats_rows(kv, catalog, &file_column_stats);
     Ok(compaction)
 }
 

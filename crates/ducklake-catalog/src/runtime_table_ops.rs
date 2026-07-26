@@ -1,7 +1,7 @@
 use crate::{
     CatalogError, CatalogId, CatalogOrderId, CatalogResult, ColumnId, OrderedCatalogKv,
     RawSnapshotSequence, SchemaId, TableColumnRow, TableId, TableRow, latest_snapshot,
-    list_tables_at, load_table_at,
+    load_table_at,
     runtime_foundationdb::{
         runtime_foundationdb_create_tables, runtime_foundationdb_replace_tables,
     },
@@ -9,7 +9,7 @@ use crate::{
     runtime_tabular_payload::{
         TabularPayload, default_value_to_option, empty_to_none, parse_bool_field, parse_u64_field,
     },
-    table_store::list_table_rows,
+    table_store::{list_current_table_rows, list_table_rows_for_table},
 };
 
 pub(crate) const CREATE_TABLES: &str = "CreateTables";
@@ -240,9 +240,8 @@ fn next_column_id(
     catalog: CatalogId,
     table_id: TableId,
 ) -> CatalogResult<u64> {
-    let max_column_id = list_table_rows(kv, catalog)?
+    let max_column_id = list_table_rows_for_table(kv, catalog, table_id)?
         .iter()
-        .filter(|table| table.table_id == table_id)
         .flat_map(|table| table.columns.iter())
         .map(|column| column.column_id.0)
         .max();
@@ -261,9 +260,8 @@ fn column_created_with_table(
     table_name: &str,
     column_name: &str,
 ) -> CatalogResult<bool> {
-    let snapshot =
-        latest_snapshot(kv, catalog)?.ok_or(CatalogError::NotFound("catalog snapshot"))?;
-    let tables = list_tables_at(kv, catalog, snapshot.order)?;
+    latest_snapshot(kv, catalog)?.ok_or(CatalogError::NotFound("catalog snapshot"))?;
+    let tables = list_current_table_rows(kv, catalog)?;
     Ok(tables
         .iter()
         .find(|table| table.name.eq_ignore_ascii_case(table_name))

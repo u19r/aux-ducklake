@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use crate::{
     CatalogError, CatalogId, CatalogOrderId, CatalogResult, ColumnDefaultChange, ColumnRename,
     ColumnTypeChange, DuckLakeSnapshotId, KvBatch, MutableCatalogKv, OrderedCatalogKv,
@@ -386,6 +388,11 @@ pub(crate) fn split_add_columns_by_current_table(
     let _ = latest_snapshot(kv, catalog)?.ok_or(CatalogError::NotFound("catalog snapshot"))?;
     let table =
         load_current_table_row(kv, catalog, table_id)?.ok_or(CatalogError::NotFound("table"))?;
+    let current_columns = table
+        .columns
+        .iter()
+        .map(|column| (column.column_id, column))
+        .collect::<BTreeMap<_, _>>();
     let mut append_columns = Vec::new();
     let mut default_changes = Vec::new();
     let mut renames = Vec::new();
@@ -395,11 +402,7 @@ pub(crate) fn split_add_columns_by_current_table(
                 "AddColumns only supports one table per operation".to_owned(),
             ));
         }
-        match table
-            .columns
-            .iter()
-            .find(|existing| existing.column_id == column.column_id)
-        {
+        match current_columns.get(&column.column_id).copied() {
             Some(existing) if same_column_identity(existing, &column) => {
                 default_changes.push(ColumnDefaultChange::new(table_id, column));
             }

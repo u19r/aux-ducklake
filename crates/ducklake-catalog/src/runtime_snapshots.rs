@@ -1,27 +1,33 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 #[cfg(not(test))]
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 #[cfg(not(test))]
 use crate::bounded_cache::{BoundedCache, static_bounded_cache};
+#[cfg(not(test))]
+use crate::runtime_metrics::RuntimeMetricStage;
+#[cfg(not(test))]
+use crate::schema_version_state::load_catalog_snapshot_version;
 use crate::{
-    CatalogId, CatalogOrderId, CatalogOrderKind, CatalogResult, DataFileChangeKind, DataFileId,
+    CatalogId, CatalogOrderId, CatalogOrderKind, CatalogResult, DataFileChangeKind,
     DuckLakeSnapshotId, InlineRowChangeKind, MacroRow, OrderedCatalogKv, RangeDirection,
     RawSnapshotSequence, SchemaRow, SnapshotRow, TableRow, ViewRow,
-    data_file_store::attach_delete_file_at,
-    inline_data::{inline_file_deletion_changed_table_ids_at, inline_table_flushes_ending_at},
+    inline_data::inline_file_deletion_changed_table_ids_at,
     keys::{
-        data_file_key, inline_table_change_prefix, order_delete_file_change_prefix,
+        inline_table_change_prefix, order_delete_file_change_prefix,
         order_delete_file_change_scan_end, order_delete_file_change_scan_start,
         snapshot_data_file_change_prefix,
     },
     latest_snapshot, list_all_snapshots, list_snapshots, list_snapshots_older_than,
     macro_store::{list_macro_rows, list_macro_rows_for_snapshot_cache},
-    rows::DataFileRow,
     runtime_catalog_snapshot::snapshot_watermarks,
     runtime_read_context::CatalogInlineDeletionReadContext,
     schema_store::{list_schema_rows, list_schema_rows_for_snapshot_cache, load_schema_at},
-    snapshot_operations::{SnapshotOperationKind, snapshot_operation_table_ids_at},
+    schema_version_state::{load_schema_version_at, load_schema_versions_at},
+    snapshot_operations::{
+        SnapshotOperationKind, snapshot_operation_table_ids_at, snapshot_operations_by_order,
+    },
     table_store::{list_table_rows, list_table_rows_with_snapshot_cache},
     view_store::{list_view_rows, list_view_rows_for_snapshot_cache},
 };
@@ -33,60 +39,12 @@ use crate::{
 
 const EMPTY_SNAPSHOT_STRING_FIELD: &str = "\\0";
 
-#[cfg(all(not(test), feature = "runtime-metrics"))]
-#[derive(Clone, Copy)]
-struct RuntimeMetricStage(Option<std::time::Instant>);
-
-#[cfg(all(not(test), not(feature = "runtime-metrics")))]
-#[derive(Clone, Copy)]
-struct RuntimeMetricStage;
-
-#[cfg(not(test))]
-impl RuntimeMetricStage {
-    #[inline]
-    fn start() -> Self {
-        #[cfg(feature = "runtime-metrics")]
-        {
-            Self(Some(std::time::Instant::now()))
-        }
-        #[cfg(not(feature = "runtime-metrics"))]
-        {
-            Self
-        }
-    }
-
-    #[inline]
-    fn zero() -> Self {
-        #[cfg(feature = "runtime-metrics")]
-        {
-            Self(None)
-        }
-        #[cfg(not(feature = "runtime-metrics"))]
-        {
-            Self
-        }
-    }
-
-    #[cfg(feature = "runtime-metrics")]
-    fn elapsed_micros(self) -> u64 {
-        self.0
-            .map(|started| u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX))
-            .unwrap_or(0)
-    }
-}
-
 pub fn snapshot_schema_version(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
     order: CatalogOrderId,
 ) -> CatalogResult<u64> {
-    let mut schema_version = 0;
-    for change_order in catalog_schema_change_candidate_orders(kv, catalog, order)? {
-        if catalog_schema_changed_at(kv, catalog, change_order)? {
-            schema_version += 1;
-        }
-    }
-    Ok(schema_version)
+    load_schema_version_at(kv, catalog, order)
 }
 
 pub(crate) fn snapshot_schema_versions_by_order(
@@ -129,25 +87,11 @@ fn snapshot_schema_versions_by_order_uncached(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
 ) -> CatalogResult<BTreeMap<CatalogOrderId, u64>> {
-    let schemas = list_schema_rows(kv, catalog)?;
-    let tables = list_table_rows(kv, catalog)?;
-    let views = list_view_rows(kv, catalog)?;
-    let macros = list_macro_rows(kv, catalog)?;
-    let change_orders = catalog_schema_change_orders(&schemas, &tables, &views, &macros);
-    let mut versions = BTreeMap::new();
-    let mut schema_version = 0;
-    let mut change_orders = change_orders.into_iter().peekable();
-    for snapshot in list_all_snapshots(kv, catalog)? {
-        while change_orders
-            .peek()
-            .is_some_and(|change_order| *change_order <= snapshot.order)
-        {
-            schema_version += 1;
-            change_orders.next();
-        }
-        versions.insert(snapshot.order, schema_version);
-    }
-    Ok(versions)
+    let orders = list_all_snapshots(kv, catalog)?
+        .into_iter()
+        .map(|snapshot| snapshot.order)
+        .collect::<BTreeSet<_>>();
+    load_schema_versions_at(kv, catalog, &orders)
 }
 
 #[cfg(not(test))]
@@ -213,39 +157,57 @@ fn catalog_schema_change_orders(
     views: &[ViewRow],
     macros: &[MacroRow],
 ) -> BTreeSet<CatalogOrderId> {
-    let mut candidate_orders = BTreeSet::new();
+    let mut change_orders = BTreeSet::new();
     for schema in schemas {
         push_all_validity_orders(
-            &mut candidate_orders,
+            &mut change_orders,
             schema.validity.begin_order,
             schema.validity.end_order,
         );
     }
-    for table in tables {
-        push_all_validity_orders(
-            &mut candidate_orders,
-            table.validity.begin_order,
-            table.validity.end_order,
-        );
-    }
     for view in views {
         push_all_validity_orders(
-            &mut candidate_orders,
+            &mut change_orders,
             view.validity.begin_order,
             view.validity.end_order,
         );
     }
     for macro_row in macros {
         push_all_validity_orders(
-            &mut candidate_orders,
+            &mut change_orders,
             macro_row.validity.begin_order,
             macro_row.validity.end_order,
         );
     }
-    candidate_orders
-        .into_iter()
-        .filter(|order| catalog_schema_changed_at_from_rows(*order, schemas, tables, views, macros))
-        .collect()
+
+    let begun_tables = tables
+        .iter()
+        .map(|table| ((table.validity.begin_order, table.table_id), table))
+        .collect::<BTreeMap<_, _>>();
+    let ended_tables = tables
+        .iter()
+        .filter_map(|table| {
+            table
+                .validity
+                .end_order
+                .map(|order| ((order, table.table_id), table))
+        })
+        .collect::<BTreeMap<_, _>>();
+    for table in tables {
+        let begin_key = (table.validity.begin_order, table.table_id);
+        if ended_tables
+            .get(&begin_key)
+            .is_none_or(|previous| !previous.same_user_visible_schema_as(table))
+        {
+            change_orders.insert(table.validity.begin_order);
+        }
+        if let Some(end_order) = table.validity.end_order
+            && !begun_tables.contains_key(&(end_order, table.table_id))
+        {
+            change_orders.insert(end_order);
+        }
+    }
+    change_orders
 }
 
 fn push_all_validity_orders(
@@ -257,154 +219,6 @@ fn push_all_validity_orders(
     if let Some(end_order) = end_order {
         orders.insert(end_order);
     }
-}
-
-fn catalog_schema_changed_at_from_rows(
-    order: CatalogOrderId,
-    schemas: &[SchemaRow],
-    tables: &[TableRow],
-    views: &[ViewRow],
-    macros: &[MacroRow],
-) -> bool {
-    schemas.iter().any(|schema| {
-        schema.validity.begin_order == order || schema.validity.end_order == Some(order)
-    }) || table_schema_changed_at_from_rows(tables, order)
-        || views.iter().any(|view| {
-            view.validity.begin_order == order || view.validity.end_order == Some(order)
-        })
-        || macros.iter().any(|macro_row| {
-            macro_row.validity.begin_order == order || macro_row.validity.end_order == Some(order)
-        })
-}
-
-fn table_schema_changed_at_from_rows(tables: &[TableRow], order: CatalogOrderId) -> bool {
-    for table in tables {
-        if table.validity.begin_order == order {
-            let previous = tables.iter().find(|previous| {
-                previous.table_id == table.table_id && previous.validity.end_order == Some(order)
-            });
-            if previous.is_none_or(|previous| !previous.same_user_visible_schema_as(table)) {
-                return true;
-            }
-        }
-        if table.validity.end_order == Some(order)
-            && !tables
-                .iter()
-                .any(|next| next.table_id == table.table_id && next.validity.begin_order == order)
-        {
-            return true;
-        }
-    }
-    false
-}
-
-fn catalog_schema_change_candidate_orders(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    order: CatalogOrderId,
-) -> CatalogResult<BTreeSet<CatalogOrderId>> {
-    let mut orders = BTreeSet::new();
-    for schema in list_schema_rows(kv, catalog)? {
-        push_validity_orders(
-            &mut orders,
-            schema.validity.begin_order,
-            schema.validity.end_order,
-            order,
-        );
-    }
-    for table in list_table_rows(kv, catalog)? {
-        push_validity_orders(
-            &mut orders,
-            table.validity.begin_order,
-            table.validity.end_order,
-            order,
-        );
-    }
-    for view in list_view_rows(kv, catalog)? {
-        push_validity_orders(
-            &mut orders,
-            view.validity.begin_order,
-            view.validity.end_order,
-            order,
-        );
-    }
-    for macro_row in list_macro_rows(kv, catalog)? {
-        push_validity_orders(
-            &mut orders,
-            macro_row.validity.begin_order,
-            macro_row.validity.end_order,
-            order,
-        );
-    }
-    Ok(orders)
-}
-
-fn push_validity_orders(
-    orders: &mut BTreeSet<CatalogOrderId>,
-    begin_order: CatalogOrderId,
-    end_order: Option<CatalogOrderId>,
-    upper_bound: CatalogOrderId,
-) {
-    if begin_order <= upper_bound {
-        orders.insert(begin_order);
-    }
-    if let Some(end_order) = end_order
-        && end_order <= upper_bound
-    {
-        orders.insert(end_order);
-    }
-}
-
-fn catalog_schema_changed_at(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    order: CatalogOrderId,
-) -> CatalogResult<bool> {
-    for schema in list_schema_rows(kv, catalog)? {
-        if schema.validity.begin_order == order || schema.validity.end_order == Some(order) {
-            return Ok(true);
-        }
-    }
-    if table_schema_changed_at(kv, catalog, order)? {
-        return Ok(true);
-    }
-    for view in list_view_rows(kv, catalog)? {
-        if view.validity.begin_order == order || view.validity.end_order == Some(order) {
-            return Ok(true);
-        }
-    }
-    for macro_row in list_macro_rows(kv, catalog)? {
-        if macro_row.validity.begin_order == order || macro_row.validity.end_order == Some(order) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn table_schema_changed_at(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    order: CatalogOrderId,
-) -> CatalogResult<bool> {
-    let table_rows = list_table_rows(kv, catalog)?;
-    for table in &table_rows {
-        if table.validity.begin_order == order {
-            let previous = table_rows.iter().find(|previous| {
-                previous.table_id == table.table_id && previous.validity.end_order == Some(order)
-            });
-            if previous.is_none_or(|previous| !previous.same_user_visible_schema_as(table)) {
-                return Ok(true);
-            }
-        }
-        if table.validity.end_order == Some(order)
-            && !table_rows
-                .iter()
-                .any(|next| next.table_id == table.table_id && next.validity.begin_order == order)
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 #[derive(Clone)]
@@ -423,16 +237,31 @@ pub(crate) fn list_snapshots_payload(
     let (snapshots, context) =
         coalesced_public_snapshot_groups_with_context(kv, catalog, selected)?;
     let public_schema_versions = public_schema_versions_for_groups(&snapshots, &context);
+    let metadata_changes = SnapshotMetadataChangeIndex::new(
+        &context.schemas,
+        &context.tables,
+        &context.views,
+        &context.macros,
+    );
+    let watermarks = snapshots
+        .last()
+        .map(|snapshot| snapshot_watermarks(kv, catalog, snapshot.last_order()))
+        .transpose()?;
+    let renderer = SnapshotListRenderer {
+        kv,
+        catalog,
+        metadata_changes,
+        watermarks,
+        context: &context,
+    };
     let mut out = format!("snapshot_count={}\n", snapshots.len());
     for public_sequence in 0..snapshots.len() {
         let snapshot_id = snapshots[public_sequence].representative.sequence.0;
         push_snapshot(
             &mut out,
-            kv,
-            catalog,
+            &renderer,
             snapshot_id,
-            &snapshots,
-            public_sequence,
+            &snapshots[public_sequence],
             public_schema_versions[public_sequence],
         )?;
     }
@@ -462,6 +291,11 @@ pub fn snapshot_by_public_sequence(
     catalog: CatalogId,
     snapshot_id: DuckLakeSnapshotId,
 ) -> CatalogResult<Option<SnapshotRow>> {
+    if let Some(latest) = latest_snapshot(kv, catalog)?
+        && latest.sequence.0 == snapshot_id.0
+    {
+        return Ok(Some(latest));
+    }
     #[cfg(test)]
     {
         snapshot_by_public_sequence_uncached(kv, catalog, snapshot_id)
@@ -478,46 +312,21 @@ pub(crate) struct SnapshotReadContext {
     #[cfg_attr(test, allow(dead_code))]
     latest: Option<SnapshotRow>,
     #[cfg_attr(test, allow(dead_code))]
-    by_order: BTreeMap<CatalogOrderId, SnapshotRow>,
-    by_public_sequence: BTreeMap<DuckLakeSnapshotId, SnapshotRow>,
-    public_span_by_sequence: BTreeMap<DuckLakeSnapshotId, (CatalogOrderId, CatalogOrderId)>,
-    by_ducklake_sequence: BTreeMap<DuckLakeSnapshotId, SnapshotRow>,
-    ducklake_span_by_sequence: BTreeMap<DuckLakeSnapshotId, (CatalogOrderId, CatalogOrderId)>,
+    by_order: Arc<BTreeMap<CatalogOrderId, SnapshotRow>>,
+    by_public_sequence: Arc<BTreeMap<DuckLakeSnapshotId, SnapshotRow>>,
+    public_span_by_sequence: Arc<BTreeMap<DuckLakeSnapshotId, (CatalogOrderId, CatalogOrderId)>>,
+    by_ducklake_sequence: Arc<BTreeMap<DuckLakeSnapshotId, SnapshotRow>>,
+    ducklake_span_by_sequence: Arc<BTreeMap<DuckLakeSnapshotId, (CatalogOrderId, CatalogOrderId)>>,
     #[allow(dead_code)]
     sequences_by_order: SharedOrderMap,
-    schema_versions_by_order: SharedOrderMap,
-    schemas: Vec<SchemaRow>,
-    tables: Vec<TableRow>,
-    views: Vec<ViewRow>,
-    macros: Vec<MacroRow>,
+    schemas: Arc<Vec<SchemaRow>>,
+    tables: Arc<Vec<TableRow>>,
+    views: Arc<Vec<ViewRow>>,
+    macros: Arc<Vec<MacroRow>>,
 }
 
 impl SnapshotReadContext {
     pub(crate) fn for_current_catalog(
-        kv: &impl OrderedCatalogKv,
-        catalog: CatalogId,
-    ) -> CatalogResult<Self> {
-        #[cfg(test)]
-        {
-            Self::load(kv, catalog)
-        }
-        #[cfg(not(test))]
-        {
-            let latest = latest_snapshot(kv, catalog)?.map(|snapshot| snapshot.order);
-            let key = (kv.catalog_cache_namespace(), catalog);
-            let cache = snapshot_read_context_cache();
-            if let Some(context) = cache.get(key)
-                && context.latest_order_is(latest)
-            {
-                return Ok(context);
-            }
-            let context = Self::load(kv, catalog)?;
-            cache.insert(key, context.clone());
-            Ok(context)
-        }
-    }
-
-    pub(crate) fn for_current_catalog_uncached(
         kv: &impl OrderedCatalogKv,
         catalog: CatalogId,
     ) -> CatalogResult<Self> {
@@ -646,24 +455,20 @@ impl SnapshotReadContext {
         self.sequences_by_order.clone()
     }
 
-    pub(crate) fn schema_versions_by_order(&self) -> SharedOrderMap {
-        self.schema_versions_by_order.clone()
-    }
-
     pub(crate) fn schemas(&self) -> &[SchemaRow] {
-        &self.schemas
+        self.schemas.as_slice()
     }
 
     pub(crate) fn tables(&self) -> &[TableRow] {
-        &self.tables
+        self.tables.as_slice()
     }
 
     pub(crate) fn views(&self) -> &[ViewRow] {
-        &self.views
+        self.views.as_slice()
     }
 
     pub(crate) fn macros(&self) -> &[MacroRow] {
-        &self.macros
+        self.macros.as_slice()
     }
 
     fn load(kv: &impl OrderedCatalogKv, catalog: CatalogId) -> CatalogResult<Self> {
@@ -719,49 +524,39 @@ impl SnapshotReadContext {
                 by_public_sequence.insert(DuckLakeSnapshotId(sequence), snapshot.clone());
             }
         }
-        let schema_versions_by_order =
-            schema_versions_by_order_from_loaded_facts(&by_order, &coalesce_context);
         Self {
             latest,
-            by_order,
-            by_public_sequence,
-            public_span_by_sequence,
-            by_ducklake_sequence,
-            ducklake_span_by_sequence,
+            by_order: Arc::new(by_order),
+            by_public_sequence: Arc::new(by_public_sequence),
+            public_span_by_sequence: Arc::new(public_span_by_sequence),
+            by_ducklake_sequence: Arc::new(by_ducklake_sequence),
+            ducklake_span_by_sequence: Arc::new(ducklake_span_by_sequence),
             sequences_by_order: SharedOrderMap::new(sequences_by_order),
-            schema_versions_by_order: SharedOrderMap::new(schema_versions_by_order),
             schemas: coalesce_context.schemas,
             tables: coalesce_context.tables,
             views: coalesce_context.views,
             macros: coalesce_context.macros,
         }
     }
-}
 
-fn schema_versions_by_order_from_loaded_facts(
-    snapshots_by_order: &BTreeMap<CatalogOrderId, SnapshotRow>,
-    context: &PublicSnapshotCoalesceContext,
-) -> BTreeMap<CatalogOrderId, u64> {
-    let change_orders = catalog_schema_change_orders(
-        &context.schemas,
-        &context.tables,
-        &context.views,
-        &context.macros,
-    );
-    let mut versions = BTreeMap::new();
-    let mut schema_version = 0;
-    let mut change_orders = change_orders.into_iter().peekable();
-    for order in snapshots_by_order.keys() {
-        while change_orders
-            .peek()
-            .is_some_and(|change_order| change_order <= order)
-        {
-            schema_version += 1;
-            change_orders.next();
-        }
-        versions.insert(*order, schema_version);
+    #[cfg(test)]
+    pub(crate) fn shares_loaded_facts_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.by_order, &other.by_order)
+            && Arc::ptr_eq(&self.by_public_sequence, &other.by_public_sequence)
+            && Arc::ptr_eq(
+                &self.public_span_by_sequence,
+                &other.public_span_by_sequence,
+            )
+            && Arc::ptr_eq(&self.by_ducklake_sequence, &other.by_ducklake_sequence)
+            && Arc::ptr_eq(
+                &self.ducklake_span_by_sequence,
+                &other.ducklake_span_by_sequence,
+            )
+            && Arc::ptr_eq(&self.schemas, &other.schemas)
+            && Arc::ptr_eq(&self.tables, &other.tables)
+            && Arc::ptr_eq(&self.views, &other.views)
+            && Arc::ptr_eq(&self.macros, &other.macros)
     }
-    versions
 }
 
 #[cfg(not(test))]
@@ -773,6 +568,19 @@ static SNAPSHOT_READ_CONTEXT_CACHE: OnceLock<
 fn snapshot_read_context_cache()
 -> &'static BoundedCache<(crate::CatalogCacheNamespace, CatalogId), SnapshotReadContext> {
     static_bounded_cache(&SNAPSHOT_READ_CONTEXT_CACHE, 64)
+}
+
+#[cfg(not(test))]
+pub(crate) fn invalidate_runtime_snapshot_context(catalog: CatalogId) {
+    if let Some(cache) = SNAPSHOT_READ_CONTEXT_CACHE.get() {
+        cache.retain(|(_, cached_catalog), _| *cached_catalog != catalog);
+    }
+    if let Some(cache) = SNAPSHOT_SCHEMA_VERSIONS_CACHE.get() {
+        cache.retain(|key, _| key.catalog != catalog);
+    }
+    if let Some(cache) = INLINE_ROW_CHANGE_INDEX_CACHE.get() {
+        cache.retain(|key, _| key.catalog != catalog);
+    }
 }
 
 #[cfg(test)]
@@ -802,14 +610,16 @@ pub fn snapshot_by_ducklake_sequence(
     catalog: CatalogId,
     snapshot_id: DuckLakeSnapshotId,
 ) -> CatalogResult<Option<SnapshotRow>> {
+    if let Some(latest) = latest_snapshot(kv, catalog)?
+        && latest.sequence.0 == snapshot_id.0
+    {
+        return Ok(Some(latest));
+    }
     let context = SnapshotReadContext::for_ducklake_snapshot(kv, catalog, snapshot_id)?;
     if let Some(snapshot) = context.ducklake_snapshot(snapshot_id) {
         return Ok(Some(snapshot));
     }
-    Ok(list_all_snapshots(kv, catalog)?
-        .into_iter()
-        .filter(|snapshot| snapshot.sequence.0 == snapshot_id.0)
-        .max_by_key(|snapshot| snapshot.order))
+    crate::snapshot_by_raw_sequence(kv, catalog, RawSnapshotSequence(snapshot_id.0))
 }
 
 pub fn next_public_snapshot_sequence(
@@ -973,27 +783,40 @@ fn selected_snapshots(
         snapshots.retain(|snapshot| requested.contains(&snapshot.sequence));
     }
     if payload.protect_latest
-        && let Some(latest) = list_snapshots(kv, catalog)?
-            .into_iter()
-            .max_by_key(|row| row.sequence)
+        && let Some(latest) = latest_snapshot(kv, catalog)?
     {
         snapshots.retain(|snapshot| snapshot.sequence != latest.sequence);
     }
     Ok(snapshots)
 }
 
-fn push_snapshot(
-    out: &mut String,
-    kv: &impl OrderedCatalogKv,
+struct SnapshotListRenderer<'a, K> {
+    kv: &'a K,
     catalog: CatalogId,
+    metadata_changes: SnapshotMetadataChangeIndex<'a>,
+    watermarks: Option<crate::runtime_catalog_snapshot::SnapshotWatermarks>,
+    context: &'a PublicSnapshotCoalesceContext,
+}
+
+fn push_snapshot<K: OrderedCatalogKv>(
+    out: &mut String,
+    renderer: &SnapshotListRenderer<'_, K>,
     public_sequence: u64,
-    snapshots: &[PublicSnapshot],
-    snapshot_index: usize,
+    snapshot: &PublicSnapshot,
     schema_version: u64,
 ) -> CatalogResult<()> {
-    let snapshot = &snapshots[snapshot_index];
-    let watermarks = snapshot_watermarks(kv, catalog, snapshot.representative.order)?;
-    let changes_made = public_snapshot_changes_made(kv, catalog, snapshot)?;
+    let watermarks = renderer.watermarks.ok_or_else(|| {
+        crate::CatalogError::Decode(
+            "public snapshot list is missing allocator watermarks".to_owned(),
+        )
+    })?;
+    let changes_made = public_snapshot_changes_made(
+        renderer.kv,
+        renderer.catalog,
+        snapshot,
+        &renderer.metadata_changes,
+        renderer.context,
+    )?;
     let changes_made = if changes_made.is_empty()
         && snapshot.representative.sequence == crate::RawSnapshotSequence::initial()
     {
@@ -1106,29 +929,31 @@ fn coalesced_public_snapshot_groups_with_context(
     catalog: CatalogId,
     snapshots: impl IntoIterator<Item = SnapshotRow>,
 ) -> CatalogResult<(Vec<PublicSnapshot>, PublicSnapshotCoalesceContext)> {
-    let mut groups = public_snapshot_groups(snapshots);
+    let groups = public_snapshot_groups(snapshots);
     let context = PublicSnapshotCoalesceContext::load(kv, catalog, &groups)?;
-    let mut index = 1;
-    while index < groups.len() {
-        if should_merge_public_snapshot_groups(&context, &groups[index - 1], &groups[index])? {
-            let current = groups.remove(index);
-            groups[index - 1].orders.extend(current.orders);
+    let mut coalesced = Vec::<PublicSnapshot>::with_capacity(groups.len());
+    for current in groups {
+        if let Some(previous) = coalesced.last_mut()
+            && should_merge_public_snapshot_groups(&context, previous, &current)?
+        {
+            previous.orders.extend(current.orders);
         } else {
-            index += 1;
+            coalesced.push(current);
         }
     }
-    Ok((groups, context))
+    Ok((coalesced, context))
 }
 
 struct PublicSnapshotCoalesceContext {
-    schemas: Vec<SchemaRow>,
-    tables: Vec<TableRow>,
-    views: Vec<ViewRow>,
-    macros: Vec<MacroRow>,
+    schemas: Arc<Vec<SchemaRow>>,
+    tables: Arc<Vec<TableRow>>,
+    views: Arc<Vec<ViewRow>>,
+    macros: Arc<Vec<MacroRow>>,
     data_changes: BTreeMap<CatalogOrderId, Vec<SnapshotDataFileChange>>,
     inline_rows: InlineRowChangeIndex,
     inline_file_deletions: BTreeMap<CatalogOrderId, BTreeSet<crate::TableId>>,
     delete_file_changes: BTreeMap<CatalogOrderId, BTreeSet<crate::TableId>>,
+    operations: BTreeMap<(CatalogOrderId, SnapshotOperationKind), BTreeSet<crate::TableId>>,
 }
 
 impl PublicSnapshotCoalesceContext {
@@ -1145,15 +970,17 @@ impl PublicSnapshotCoalesceContext {
             .last()
             .map(PublicSnapshot::last_order)
             .unwrap_or_else(|| CatalogOrderId::from_bytes(order_kind, [0; CatalogOrderId::LEN]));
+        let facts = PublicSnapshotCoalesceFacts::for_catalog(kv, catalog, latest_order)?;
         Ok(Self {
-            schemas: list_schema_rows_for_snapshot_cache(kv, catalog, latest_order)?,
-            tables: list_table_rows_with_snapshot_cache(kv, catalog, latest_order)?,
-            views: list_view_rows_for_snapshot_cache(kv, catalog, latest_order)?,
-            macros: list_macro_rows_for_snapshot_cache(kv, catalog, latest_order)?,
+            schemas: facts.schemas,
+            tables: facts.tables,
+            views: facts.views,
+            macros: facts.macros,
             data_changes: data_file_changes_by_order(kv, catalog, order_kind)?,
             inline_rows: InlineRowChangeIndex::load(kv, catalog, order_kind)?,
             inline_file_deletions: inline_file_deletions_by_order(kv, catalog)?,
             delete_file_changes: delete_file_changes_by_order(kv, catalog, order_kind)?,
+            operations: snapshot_operations_by_order(kv, catalog, order_kind)?,
         })
     }
 
@@ -1295,6 +1122,101 @@ impl PublicSnapshotCoalesceContext {
         }
         replaced
     }
+}
+
+#[derive(Clone)]
+struct PublicSnapshotCoalesceFacts {
+    schemas: Arc<Vec<SchemaRow>>,
+    tables: Arc<Vec<TableRow>>,
+    views: Arc<Vec<ViewRow>>,
+    macros: Arc<Vec<MacroRow>>,
+}
+
+impl PublicSnapshotCoalesceFacts {
+    fn for_catalog(
+        kv: &impl OrderedCatalogKv,
+        catalog: CatalogId,
+        latest_order: CatalogOrderId,
+    ) -> CatalogResult<Self> {
+        #[cfg(not(test))]
+        {
+            let version = load_catalog_snapshot_version(kv, catalog)?.map_or(
+                PublicSnapshotCoalesceFactsVersion::LatestOrder(latest_order),
+                PublicSnapshotCoalesceFactsVersion::Maintained,
+            );
+            let key = PublicSnapshotCoalesceFactsCacheKey {
+                namespace: kv.catalog_cache_namespace().without_read_context(),
+                catalog,
+                version,
+            };
+            let cache = public_snapshot_coalesce_facts_cache();
+            if let Some(facts) = cache.get(key) {
+                return Ok(facts);
+            }
+            let facts = Self::load(kv, catalog, latest_order)?;
+            cache.insert(key, facts.clone());
+            Ok(facts)
+        }
+        #[cfg(test)]
+        {
+            Self::load(kv, catalog, latest_order)
+        }
+    }
+
+    fn load(
+        kv: &impl OrderedCatalogKv,
+        catalog: CatalogId,
+        latest_order: CatalogOrderId,
+    ) -> CatalogResult<Self> {
+        Ok(Self {
+            schemas: Arc::new(list_schema_rows_for_snapshot_cache(
+                kv,
+                catalog,
+                latest_order,
+            )?),
+            tables: Arc::new(list_table_rows_with_snapshot_cache(
+                kv,
+                catalog,
+                latest_order,
+            )?),
+            views: Arc::new(list_view_rows_for_snapshot_cache(
+                kv,
+                catalog,
+                latest_order,
+            )?),
+            macros: Arc::new(list_macro_rows_for_snapshot_cache(
+                kv,
+                catalog,
+                latest_order,
+            )?),
+        })
+    }
+}
+
+#[cfg(not(test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct PublicSnapshotCoalesceFactsCacheKey {
+    namespace: crate::CatalogCacheNamespace,
+    catalog: CatalogId,
+    version: PublicSnapshotCoalesceFactsVersion,
+}
+
+#[cfg(not(test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum PublicSnapshotCoalesceFactsVersion {
+    Maintained(u64),
+    LatestOrder(CatalogOrderId),
+}
+
+#[cfg(not(test))]
+static PUBLIC_SNAPSHOT_COALESCE_FACTS_CACHE: OnceLock<
+    BoundedCache<PublicSnapshotCoalesceFactsCacheKey, PublicSnapshotCoalesceFacts>,
+> = OnceLock::new();
+
+#[cfg(not(test))]
+fn public_snapshot_coalesce_facts_cache()
+-> &'static BoundedCache<PublicSnapshotCoalesceFactsCacheKey, PublicSnapshotCoalesceFacts> {
+    static_bounded_cache(&PUBLIC_SNAPSHOT_COALESCE_FACTS_CACHE, 64)
 }
 
 fn group_order_set(group: &PublicSnapshot) -> BTreeSet<CatalogOrderId> {
@@ -1462,14 +1384,280 @@ fn should_merge_schema_helper_table_group(
         && !context.created_table_ids(current).is_empty()
 }
 
+#[derive(Clone, Copy)]
+enum MetadataEvent<'a, T> {
+    Begin(&'a T),
+    End(&'a T),
+}
+
+struct SnapshotMetadataChangeIndex<'a> {
+    schemas: BTreeMap<CatalogOrderId, Vec<MetadataEvent<'a, SchemaRow>>>,
+    tables: BTreeMap<CatalogOrderId, Vec<MetadataEvent<'a, TableRow>>>,
+    table_begins: BTreeMap<(CatalogOrderId, crate::TableId), &'a TableRow>,
+    table_ends: BTreeMap<(CatalogOrderId, crate::TableId), &'a TableRow>,
+    views: BTreeMap<CatalogOrderId, Vec<MetadataEvent<'a, ViewRow>>>,
+    view_begins: BTreeMap<(CatalogOrderId, crate::TableId), &'a ViewRow>,
+    macros: BTreeMap<CatalogOrderId, Vec<MetadataEvent<'a, MacroRow>>>,
+}
+
+impl<'a> SnapshotMetadataChangeIndex<'a> {
+    fn new(
+        schemas: &'a [SchemaRow],
+        tables: &'a [TableRow],
+        views: &'a [ViewRow],
+        macros: &'a [MacroRow],
+    ) -> Self {
+        let mut index = Self {
+            schemas: BTreeMap::new(),
+            tables: BTreeMap::new(),
+            table_begins: BTreeMap::new(),
+            table_ends: BTreeMap::new(),
+            views: BTreeMap::new(),
+            view_begins: BTreeMap::new(),
+            macros: BTreeMap::new(),
+        };
+        for schema in schemas {
+            index
+                .schemas
+                .entry(schema.validity.begin_order)
+                .or_default()
+                .push(MetadataEvent::Begin(schema));
+            if let Some(order) = schema.validity.end_order {
+                index
+                    .schemas
+                    .entry(order)
+                    .or_default()
+                    .push(MetadataEvent::End(schema));
+            }
+        }
+        for table in tables {
+            index
+                .tables
+                .entry(table.validity.begin_order)
+                .or_default()
+                .push(MetadataEvent::Begin(table));
+            index
+                .table_begins
+                .insert((table.validity.begin_order, table.table_id), table);
+            if let Some(order) = table.validity.end_order {
+                index
+                    .tables
+                    .entry(order)
+                    .or_default()
+                    .push(MetadataEvent::End(table));
+                index.table_ends.insert((order, table.table_id), table);
+            }
+        }
+        for view in views {
+            index
+                .views
+                .entry(view.validity.begin_order)
+                .or_default()
+                .push(MetadataEvent::Begin(view));
+            index
+                .view_begins
+                .insert((view.validity.begin_order, view.view_id), view);
+            if let Some(order) = view.validity.end_order {
+                index
+                    .views
+                    .entry(order)
+                    .or_default()
+                    .push(MetadataEvent::End(view));
+            }
+        }
+        for macro_row in macros {
+            index
+                .macros
+                .entry(macro_row.validity.begin_order)
+                .or_default()
+                .push(MetadataEvent::Begin(macro_row));
+            if let Some(order) = macro_row.validity.end_order {
+                index
+                    .macros
+                    .entry(order)
+                    .or_default()
+                    .push(MetadataEvent::End(macro_row));
+            }
+        }
+        index
+    }
+
+    fn changes_at(
+        &self,
+        kv: &impl OrderedCatalogKv,
+        catalog: CatalogId,
+        order: CatalogOrderId,
+    ) -> CatalogResult<Vec<String>> {
+        let mut changes = Vec::new();
+        for event in self.schemas.get(&order).into_iter().flatten() {
+            match event {
+                MetadataEvent::Begin(schema) => {
+                    changes.push(format!("created_schema:{}", quoted_value(&schema.name)));
+                }
+                MetadataEvent::End(schema) => {
+                    changes.push(format!("dropped_schema:{}", schema.schema_id.0));
+                }
+            }
+        }
+
+        let table_events = self.tables.get(&order).map_or(&[][..], Vec::as_slice);
+        let altered_tables = table_events
+            .iter()
+            .filter_map(|event| match event {
+                MetadataEvent::End(table) => self
+                    .table_begins
+                    .get(&(order, table.table_id))
+                    .filter(|next| !table.same_user_visible_schema_as(next))
+                    .map(|_| table.table_id),
+                MetadataEvent::Begin(_) => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let renamed_tables = table_events
+            .iter()
+            .filter_map(|event| match event {
+                MetadataEvent::Begin(table) => self
+                    .table_ends
+                    .get(&(order, table.table_id))
+                    .filter(|previous| {
+                        previous.name != table.name || previous.schema_id != table.schema_id
+                    })
+                    .map(|_| table.table_id),
+                MetadataEvent::End(_) => None,
+            })
+            .collect::<BTreeSet<_>>();
+        for event in table_events {
+            match event {
+                MetadataEvent::Begin(table) => {
+                    if self
+                        .table_ends
+                        .get(&(order, table.table_id))
+                        .is_some_and(|previous| previous.same_user_visible_schema_as(table))
+                    {
+                        continue;
+                    }
+                    if altered_tables.contains(&table.table_id)
+                        && !renamed_tables.contains(&table.table_id)
+                    {
+                        continue;
+                    }
+                    let schema_name = schema_name_at(kv, catalog, table.schema_id, order)?;
+                    changes.push(format!(
+                        "created_table:{}.{}",
+                        quoted_value(&schema_name),
+                        quoted_value(&table.name)
+                    ));
+                    if !renamed_tables.contains(&table.table_id)
+                        && (table.partition.is_some() || table.sort.is_some())
+                    {
+                        changes.push(format!("altered_table:{}", table.table_id.0));
+                    }
+                }
+                MetadataEvent::End(table) => {
+                    if altered_tables.contains(&table.table_id) {
+                        changes.push(format!("altered_table:{}", table.table_id.0));
+                    } else if self
+                        .table_begins
+                        .get(&(order, table.table_id))
+                        .is_some_and(|next| table.same_user_visible_schema_as(next))
+                    {
+                        continue;
+                    } else {
+                        changes.push(format!("dropped_table:{}", table.table_id.0));
+                    }
+                }
+            }
+        }
+
+        let view_events = self.views.get(&order).map_or(&[][..], Vec::as_slice);
+        let altered_views = view_events
+            .iter()
+            .filter_map(|event| match event {
+                MetadataEvent::End(view)
+                    if self.view_begins.contains_key(&(order, view.view_id)) =>
+                {
+                    Some(view.view_id)
+                }
+                MetadataEvent::Begin(_) | MetadataEvent::End(_) => None,
+            })
+            .collect::<BTreeSet<_>>();
+        for event in view_events {
+            match event {
+                MetadataEvent::Begin(view) => {
+                    if altered_views.contains(&view.view_id) {
+                        continue;
+                    }
+                    let schema_name = schema_name_at(kv, catalog, view.schema_id, order)?;
+                    changes.push(format!(
+                        "created_view:{}.{}",
+                        quoted_value(&schema_name),
+                        quoted_value(&view.name)
+                    ));
+                }
+                MetadataEvent::End(view) => {
+                    if altered_views.contains(&view.view_id) {
+                        changes.push(format!("altered_view:{}", view.view_id.0));
+                    } else {
+                        changes.push(format!("dropped_view:{}", view.view_id.0));
+                    }
+                }
+            }
+        }
+
+        for event in self.macros.get(&order).into_iter().flatten() {
+            let (macro_row, prefix) = match event {
+                MetadataEvent::Begin(macro_row) => {
+                    let prefix = if macro_row
+                        .implementations
+                        .iter()
+                        .any(|implementation| implementation.macro_type == "table")
+                    {
+                        "created_table_macro"
+                    } else {
+                        "created_scalar_macro"
+                    };
+                    (macro_row, prefix)
+                }
+                MetadataEvent::End(macro_row) => {
+                    let prefix = if macro_row
+                        .implementations
+                        .iter()
+                        .any(|implementation| implementation.macro_type == "table")
+                    {
+                        "dropped_table_macro"
+                    } else {
+                        "dropped_scalar_macro"
+                    };
+                    changes.push(format!("{prefix}:{}", macro_row.macro_id.0));
+                    continue;
+                }
+            };
+            let schema_name = schema_name_at(kv, catalog, macro_row.schema_id, order)?;
+            changes.push(format!(
+                "{prefix}:{}.{}",
+                quoted_value(&schema_name),
+                quoted_value(&macro_row.name)
+            ));
+        }
+        Ok(changes)
+    }
+}
+
 fn public_snapshot_changes_made(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
     snapshot: &PublicSnapshot,
+    metadata_changes: &SnapshotMetadataChangeIndex<'_>,
+    context: &PublicSnapshotCoalesceContext,
 ) -> CatalogResult<String> {
     let mut changes = Vec::new();
     for order in &snapshot.orders {
-        let order_changes = snapshot_changes_made(kv, catalog, *order)?;
+        let order_changes = snapshot_changes_made_from_facts(
+            kv,
+            catalog,
+            *order,
+            metadata_changes,
+            SnapshotChangeFacts::from_context(context, *order),
+        )?;
         if !order_changes.is_empty() {
             changes.push(order_changes);
         }
@@ -1482,10 +1670,113 @@ pub fn snapshot_changes_made(
     catalog: CatalogId,
     order: CatalogOrderId,
 ) -> CatalogResult<String> {
+    let schemas = list_schema_rows(kv, catalog)?;
+    let tables = list_table_rows(kv, catalog)?;
+    let views = list_view_rows(kv, catalog)?;
+    let macros = list_macro_rows(kv, catalog)?;
+    let metadata = SnapshotMetadataChangeIndex::new(&schemas, &tables, &views, &macros);
+    snapshot_changes_made_with_metadata(kv, catalog, order, &metadata)
+}
+
+fn snapshot_changes_made_with_metadata(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    order: CatalogOrderId,
+    metadata: &SnapshotMetadataChangeIndex<'_>,
+) -> CatalogResult<String> {
+    let facts = SnapshotChangeFacts::load(kv, catalog, order)?;
+    snapshot_changes_made_from_facts(kv, catalog, order, metadata, facts)
+}
+
+struct SnapshotChangeFacts {
+    data_file_changes: Vec<SnapshotDataFileChange>,
+    delete_marked: BTreeSet<crate::TableId>,
+    inlined_inserted: BTreeSet<crate::TableId>,
+    inlined_deleted: BTreeSet<crate::TableId>,
+    inline_file_deleted: BTreeSet<crate::TableId>,
+    flushed_inlined: BTreeSet<crate::TableId>,
+    explicit_rewrite_deletes: BTreeSet<crate::TableId>,
+}
+
+impl SnapshotChangeFacts {
+    fn load(
+        kv: &impl OrderedCatalogKv,
+        catalog: CatalogId,
+        order: CatalogOrderId,
+    ) -> CatalogResult<Self> {
+        Ok(Self {
+            data_file_changes: snapshot_data_file_changes_at(kv, catalog, order)?,
+            delete_marked: snapshot_delete_file_changed_table_ids_at(kv, catalog, order)?,
+            inlined_inserted: snapshot_inline_row_changed_table_ids_at(
+                kv,
+                catalog,
+                order,
+                InlineRowChangeKind::Inserted,
+            )?,
+            inlined_deleted: snapshot_inline_row_changed_table_ids_at(
+                kv,
+                catalog,
+                order,
+                InlineRowChangeKind::Deleted,
+            )?,
+            inline_file_deleted: inline_file_deletion_changed_table_ids_at(kv, catalog, order)?,
+            flushed_inlined: snapshot_flushed_inline_table_ids_at(kv, catalog, order)?,
+            explicit_rewrite_deletes: snapshot_operation_table_ids_at(
+                kv,
+                catalog,
+                order,
+                SnapshotOperationKind::RewriteDelete,
+            )?,
+        })
+    }
+
+    fn from_context(context: &PublicSnapshotCoalesceContext, order: CatalogOrderId) -> Self {
+        Self {
+            data_file_changes: context
+                .data_changes
+                .get(&order)
+                .cloned()
+                .unwrap_or_default(),
+            delete_marked: context
+                .delete_file_changes
+                .get(&order)
+                .cloned()
+                .unwrap_or_default(),
+            inlined_inserted: context
+                .inline_rows
+                .tables(order, InlineRowChangeKind::Inserted),
+            inlined_deleted: context
+                .inline_rows
+                .tables(order, InlineRowChangeKind::Deleted),
+            inline_file_deleted: context
+                .inline_file_deletions
+                .get(&order)
+                .cloned()
+                .unwrap_or_default(),
+            flushed_inlined: context
+                .operations
+                .get(&(order, SnapshotOperationKind::InlineFlush))
+                .cloned()
+                .unwrap_or_default(),
+            explicit_rewrite_deletes: context
+                .operations
+                .get(&(order, SnapshotOperationKind::RewriteDelete))
+                .cloned()
+                .unwrap_or_default(),
+        }
+    }
+}
+
+fn snapshot_changes_made_from_facts(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    order: CatalogOrderId,
+    metadata: &SnapshotMetadataChangeIndex<'_>,
+    facts: SnapshotChangeFacts,
+) -> CatalogResult<String> {
     let mut added = BTreeSet::new();
     let mut removed = BTreeSet::new();
-    let data_file_changes = snapshot_data_file_changes_at(kv, catalog, order)?;
-    for change in &data_file_changes {
+    for change in &facts.data_file_changes {
         match change.kind {
             DataFileChangeKind::Added => {
                 added.insert(change.table_id);
@@ -1495,23 +1786,9 @@ pub fn snapshot_changes_made(
             }
         }
     }
-    let mut delete_marked = snapshot_delete_file_changed_table_ids_at(kv, catalog, order)?;
-    delete_marked.extend(rewrite_source_delete_evidence_table_ids(
-        kv,
-        catalog,
-        order,
-        &data_file_changes,
-    )?);
-    let inlined_inserted = snapshot_inline_row_changed_table_ids_at(
-        kv,
-        catalog,
-        order,
-        InlineRowChangeKind::Inserted,
-    )?;
-    let inlined_deleted =
-        snapshot_inline_row_changed_table_ids_at(kv, catalog, order, InlineRowChangeKind::Deleted)?;
-    let inline_file_deleted = inline_file_deletion_changed_table_ids_at(kv, catalog, order)?;
-    let flushed_inlined = snapshot_flushed_inline_table_ids_at(kv, catalog, order)?
+    let mut delete_marked = facts.delete_marked;
+    let flushed_inlined = facts
+        .flushed_inlined
         .intersection(&added)
         .copied()
         .collect::<BTreeSet<_>>();
@@ -1519,13 +1796,11 @@ pub fn snapshot_changes_made(
         .intersection(&removed)
         .copied()
         .collect::<BTreeSet<_>>();
-    let explicit_rewrite_deletes =
-        snapshot_operation_table_ids_at(kv, catalog, order, SnapshotOperationKind::RewriteDelete)?;
     let mut rewrite_delete_candidates = delete_marked
-        .union(&inline_file_deleted)
+        .union(&facts.inline_file_deleted)
         .copied()
         .collect::<BTreeSet<_>>();
-    rewrite_delete_candidates.extend(explicit_rewrite_deletes);
+    rewrite_delete_candidates.extend(facts.explicit_rewrite_deletes);
     let rewrite_deletes = rewrites
         .intersection(&rewrite_delete_candidates)
         .copied()
@@ -1548,145 +1823,18 @@ pub fn snapshot_changes_made(
         .difference(&rewrite_deletes)
         .copied()
         .collect::<BTreeSet<_>>();
-    let mut changes = Vec::new();
-    for schema in list_schema_rows(kv, catalog)? {
-        if schema.validity.begin_order == order {
-            changes.push(format!("created_schema:{}", quoted_value(&schema.name)));
-        }
-        if schema.validity.end_order == Some(order) {
-            changes.push(format!("dropped_schema:{}", schema.schema_id.0));
-        }
-    }
-    let table_rows = list_table_rows(kv, catalog)?;
-    let altered_tables = table_rows
-        .iter()
-        .filter(|table| table.validity.end_order == Some(order))
-        .filter(|dropped| {
-            table_rows.iter().any(|created| {
-                created.table_id == dropped.table_id
-                    && created.validity.begin_order == order
-                    && !dropped.same_user_visible_schema_as(created)
-            })
-        })
-        .map(|table| table.table_id)
-        .collect::<BTreeSet<_>>();
-    let renamed_tables = renamed_table_ids_at_order(&table_rows, order);
-    for table in &table_rows {
-        if table.validity.begin_order == order {
-            if table_rows.iter().any(|previous| {
-                previous.table_id == table.table_id
-                    && previous.validity.end_order == Some(order)
-                    && previous.same_user_visible_schema_as(table)
-            }) {
-                continue;
-            }
-            if renamed_tables.contains(&table.table_id) {
-                let schema_name = schema_name_at(kv, catalog, table.schema_id, order)?;
-                changes.push(format!(
-                    "created_table:{}.{}",
-                    quoted_value(&schema_name),
-                    quoted_value(&table.name)
-                ));
-                continue;
-            }
-            if altered_tables.contains(&table.table_id) {
-                continue;
-            }
-            let schema_name = schema_name_at(kv, catalog, table.schema_id, order)?;
-            changes.push(format!(
-                "created_table:{}.{}",
-                quoted_value(&schema_name),
-                quoted_value(&table.name)
-            ));
-            if table.partition.is_some() || table.sort.is_some() {
-                changes.push(format!("altered_table:{}", table.table_id.0));
-            }
-        }
-        if table.validity.end_order == Some(order) {
-            if altered_tables.contains(&table.table_id) {
-                changes.push(format!("altered_table:{}", table.table_id.0));
-            } else if table_rows.iter().any(|next| {
-                next.table_id == table.table_id
-                    && next.validity.begin_order == order
-                    && table.same_user_visible_schema_as(next)
-            }) {
-                continue;
-            } else {
-                changes.push(format!("dropped_table:{}", table.table_id.0));
-            }
-        }
-    }
-    let view_rows = list_view_rows(kv, catalog)?;
-    let altered_views = view_rows
-        .iter()
-        .filter(|view| view.validity.end_order == Some(order))
-        .filter(|dropped| {
-            view_rows.iter().any(|created| {
-                created.view_id == dropped.view_id && created.validity.begin_order == order
-            })
-        })
-        .map(|view| view.view_id)
-        .collect::<BTreeSet<_>>();
-    for view in view_rows {
-        if view.validity.begin_order == order {
-            if altered_views.contains(&view.view_id) {
-                continue;
-            }
-            let schema_name = schema_name_at(kv, catalog, view.schema_id, order)?;
-            changes.push(format!(
-                "created_view:{}.{}",
-                quoted_value(&schema_name),
-                quoted_value(&view.name)
-            ));
-        }
-        if view.validity.end_order == Some(order) {
-            if altered_views.contains(&view.view_id) {
-                changes.push(format!("altered_view:{}", view.view_id.0));
-            } else {
-                changes.push(format!("dropped_view:{}", view.view_id.0));
-            }
-        }
-    }
-    for macro_row in list_macro_rows(kv, catalog)? {
-        if macro_row.validity.begin_order == order {
-            let schema_name = schema_name_at(kv, catalog, macro_row.schema_id, order)?;
-            let change = if macro_row
-                .implementations
-                .iter()
-                .any(|implementation| implementation.macro_type == "table")
-            {
-                "created_table_macro"
-            } else {
-                "created_scalar_macro"
-            };
-            changes.push(format!(
-                "{change}:{}.{}",
-                quoted_value(&schema_name),
-                quoted_value(&macro_row.name)
-            ));
-        }
-        if macro_row.validity.end_order == Some(order) {
-            let change = if macro_row
-                .implementations
-                .iter()
-                .any(|implementation| implementation.macro_type == "table")
-            {
-                "dropped_table_macro"
-            } else {
-                "dropped_scalar_macro"
-            };
-            changes.push(format!("{change}:{}", macro_row.macro_id.0));
-        }
-    }
+    let mut changes = metadata.changes_at(kv, catalog, order)?;
     changes.extend(
-        inlined_inserted
+        facts
+            .inlined_inserted
             .into_iter()
             .map(|table_id| format!("inlined_insert:{}", table_id.0)),
     );
     changes.extend(
-        inlined_deleted
+        facts
+            .inlined_deleted
             .into_iter()
-            .chain(inline_file_deleted)
+            .chain(facts.inline_file_deleted)
             .map(|table_id| format!("inlined_delete:{}", table_id.0)),
     );
     changes.extend(
@@ -1715,58 +1863,6 @@ pub fn snapshot_changes_made(
             .map(|table_id| format!("rewrite_delete:{}", table_id.0)),
     );
     Ok(changes.join(","))
-}
-
-fn rewrite_source_delete_evidence_table_ids(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    order: CatalogOrderId,
-    changes: &[SnapshotDataFileChange],
-) -> CatalogResult<BTreeSet<crate::TableId>> {
-    let mut table_ids = BTreeSet::new();
-    for change in changes
-        .iter()
-        .filter(|change| change.kind == DataFileChangeKind::Removed)
-    {
-        let Some(source) = load_snapshot_data_file(kv, catalog, change.data_file_id)? else {
-            continue;
-        };
-        if attach_delete_file_at(kv, catalog, source, order)?
-            .delete_file
-            .is_some()
-        {
-            table_ids.insert(change.table_id);
-        }
-    }
-    Ok(table_ids)
-}
-
-fn load_snapshot_data_file(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    data_file_id: DataFileId,
-) -> CatalogResult<Option<DataFileRow>> {
-    kv.get(&data_file_key(catalog, data_file_id))?
-        .map(|value| DataFileRow::decode(&value))
-        .transpose()
-}
-
-fn renamed_table_ids_at_order(
-    table_rows: &[crate::TableRow],
-    order: CatalogOrderId,
-) -> BTreeSet<crate::TableId> {
-    table_rows
-        .iter()
-        .filter(|table| table.validity.begin_order == order)
-        .filter(|created| {
-            table_rows.iter().any(|previous| {
-                previous.table_id == created.table_id
-                    && previous.validity.end_order == Some(order)
-                    && (previous.name != created.name || previous.schema_id != created.schema_id)
-            })
-        })
-        .map(|table| table.table_id)
-        .collect()
 }
 
 fn snapshot_inline_row_changed_table_ids_at(
@@ -1924,7 +2020,7 @@ fn snapshot_flushed_inline_table_ids_at(
     catalog: CatalogId,
     order: CatalogOrderId,
 ) -> CatalogResult<BTreeSet<crate::TableId>> {
-    inline_table_flushes_ending_at(kv, catalog, order)
+    snapshot_operation_table_ids_at(kv, catalog, order, SnapshotOperationKind::InlineFlush)
 }
 
 fn schema_name_at(
@@ -2008,6 +2104,7 @@ fn decode_order_delete_file_change_key(
     Ok((order, table_id))
 }
 
+#[derive(Clone)]
 pub(crate) struct SnapshotDataFileChange {
     pub(crate) table_id: crate::TableId,
     pub(crate) kind: DataFileChangeKind,

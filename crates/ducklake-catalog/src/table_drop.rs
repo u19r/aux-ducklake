@@ -47,7 +47,7 @@ pub fn commit_drop_tables_at(
     let mut batch = KvBatch::new();
     let mut dropped = Vec::with_capacity(table_ids.len());
     stage_snapshot(&mut batch, catalog, &snapshot);
-    stage_next_schema_version(kv, &mut batch, catalog)?;
+    stage_next_schema_version(kv, &mut batch, catalog, &snapshot)?;
 
     for table_id in table_ids {
         let mut table = load_current_table_row(kv, catalog, *table_id)?

@@ -1,5 +1,5 @@
 use crate::{
-    CatalogError, CatalogOrderKind, CatalogResult,
+    CatalogError, CatalogOrderKind, CatalogResult, RawSnapshotSequence,
     ids::{
         CatalogId, CatalogOrderId, ColumnId, DataFileId, DeleteFileId, PartitionKeyIndex, SchemaId,
         TableId,
@@ -59,6 +59,8 @@ pub enum KeyFamily {
     InlineRowChange,
     InlineTableChange,
     InlineRowChangeBySchemaKind,
+    InlineLiveRow,
+    InlineCurrentRow,
     MetadataSetting,
     MetadataVersion,
     ColumnMapping,
@@ -96,6 +98,8 @@ impl KeyFamily {
             Self::InlineRowChange => b'R',
             Self::InlineTableChange => b'H',
             Self::InlineRowChangeBySchemaKind => b'K',
+            Self::InlineLiveRow => b'L',
+            Self::InlineCurrentRow => b'r',
             Self::MetadataSetting => b'm',
             Self::MetadataVersion => b'v',
             Self::ColumnMapping => b'M',
@@ -132,6 +136,8 @@ impl KeyFamily {
             b'R' => Ok(Self::InlineRowChange),
             b'H' => Ok(Self::InlineTableChange),
             b'K' => Ok(Self::InlineRowChangeBySchemaKind),
+            b'L' => Ok(Self::InlineLiveRow),
+            b'r' => Ok(Self::InlineCurrentRow),
             b'm' => Ok(Self::MetadataSetting),
             b'v' => Ok(Self::MetadataVersion),
             b'M' => Ok(Self::ColumnMapping),
@@ -172,6 +178,8 @@ impl KeyFamily {
             Self::InlineRowChange => "inline-row-change",
             Self::InlineTableChange => "inline-table-change",
             Self::InlineRowChangeBySchemaKind => "inline-row-change-by-schema-kind",
+            Self::InlineLiveRow => "inline-live-row",
+            Self::InlineCurrentRow => "inline-current-row",
             Self::MetadataSetting => "metadata-setting",
             Self::MetadataVersion => "metadata-version",
             Self::ColumnMapping => "column-mapping",
@@ -196,6 +204,70 @@ pub fn family_prefix(catalog: CatalogId, family: KeyFamily) -> Vec<u8> {
     let mut key = catalog_prefix(catalog);
     key.push(family.code());
     key.push(b'/');
+    key
+}
+
+#[must_use]
+pub fn inline_live_row_key(
+    catalog: CatalogId,
+    table_id: TableId,
+    schema_id: SchemaId,
+    row_id: u64,
+) -> Vec<u8> {
+    let mut key = family_prefix(catalog, KeyFamily::InlineLiveRow);
+    key.extend_from_slice(&table_id.0.to_be_bytes());
+    key.push(b'/');
+    key.extend_from_slice(&schema_id.0.to_be_bytes());
+    key.push(b'/');
+    key.extend_from_slice(&row_id.to_be_bytes());
+    key
+}
+
+#[must_use]
+pub fn inline_current_row_key(
+    catalog: CatalogId,
+    table_id: TableId,
+    schema_id: SchemaId,
+    row_id: u64,
+) -> Vec<u8> {
+    let mut key = inline_current_row_prefix(catalog, table_id, schema_id);
+    key.extend_from_slice(&row_id.to_be_bytes());
+    key
+}
+
+#[must_use]
+pub fn inline_current_row_prefix(
+    catalog: CatalogId,
+    table_id: TableId,
+    schema_id: SchemaId,
+) -> Vec<u8> {
+    let mut key = family_prefix(catalog, KeyFamily::InlineCurrentRow);
+    key.extend_from_slice(&table_id.0.to_be_bytes());
+    key.push(b'/');
+    key.extend_from_slice(&schema_id.0.to_be_bytes());
+    key.push(b'/');
+    key
+}
+
+#[must_use]
+pub fn inline_next_row_id_key(
+    catalog: CatalogId,
+    table_id: TableId,
+    schema_id: SchemaId,
+) -> Vec<u8> {
+    let mut key = family_prefix(catalog, KeyFamily::MetadataVersion);
+    key.extend_from_slice(b"inline-next-row-id/");
+    key.extend_from_slice(&table_id.0.to_be_bytes());
+    key.push(b'/');
+    key.extend_from_slice(&schema_id.0.to_be_bytes());
+    key
+}
+
+#[must_use]
+pub fn table_next_row_id_key(catalog: CatalogId, table_id: TableId) -> Vec<u8> {
+    let mut key = family_prefix(catalog, KeyFamily::MetadataVersion);
+    key.extend_from_slice(b"table-next-row-id/");
+    key.extend_from_slice(&table_id.0.to_be_bytes());
     key
 }
 
@@ -243,6 +315,40 @@ pub fn current_schema_version_key(catalog: CatalogId) -> Vec<u8> {
 }
 
 #[must_use]
+pub fn schema_version_history_prefix(catalog: CatalogId) -> Vec<u8> {
+    let mut key = family_prefix(catalog, KeyFamily::MetadataVersion);
+    key.extend_from_slice(b"schema-version-history/");
+    key
+}
+
+#[must_use]
+pub fn schema_version_history_key(catalog: CatalogId, order: CatalogOrderId) -> Vec<u8> {
+    let mut key = schema_version_history_prefix(catalog);
+    key.extend_from_slice(&order.as_bytes());
+    key
+}
+
+#[must_use]
+pub fn schema_version_history_scan_end(catalog: CatalogId, order: CatalogOrderId) -> Vec<u8> {
+    let mut key = schema_version_history_key(catalog, order);
+    key.push(u8::MAX);
+    key
+}
+
+#[must_use]
+pub fn schema_version_history_key_order_offset(catalog: CatalogId) -> usize {
+    schema_version_history_prefix(catalog).len()
+}
+
+#[must_use]
+pub fn schema_version_begin_snapshot_key(catalog: CatalogId, schema_version: u64) -> Vec<u8> {
+    let mut key = family_prefix(catalog, KeyFamily::MetadataVersion);
+    key.extend_from_slice(b"schema-version-begin-snapshot/");
+    key.extend_from_slice(&schema_version.to_be_bytes());
+    key
+}
+
+#[must_use]
 pub fn catalog_snapshot_version_key(catalog: CatalogId) -> Vec<u8> {
     let mut key = family_prefix(catalog, KeyFamily::MetadataVersion);
     key.extend_from_slice(b"catalog-snapshot-version");
@@ -253,6 +359,14 @@ pub fn catalog_snapshot_version_key(catalog: CatalogId) -> Vec<u8> {
 pub fn latest_snapshot_row_key(catalog: CatalogId) -> Vec<u8> {
     let mut key = family_prefix(catalog, KeyFamily::MetadataVersion);
     key.extend_from_slice(b"latest-snapshot-row");
+    key
+}
+
+#[must_use]
+pub fn raw_snapshot_row_key(catalog: CatalogId, raw_sequence: RawSnapshotSequence) -> Vec<u8> {
+    let mut key = family_prefix(catalog, KeyFamily::MetadataVersion);
+    key.extend_from_slice(b"raw-snapshot-row/");
+    key.extend_from_slice(&raw_sequence.to_be_bytes());
     key
 }
 

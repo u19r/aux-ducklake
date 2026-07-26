@@ -326,6 +326,9 @@ impl DataFileRow {
     #[cfg_attr(not(feature = "foundationdb"), allow(dead_code))]
     pub(crate) const END_ORDER_BYTES_OFFSET: usize =
         Self::BEGIN_ORDER_BYTES_OFFSET + STORED_ORDER_LEN + 1;
+    #[cfg_attr(not(feature = "foundationdb"), allow(dead_code))]
+    pub(crate) const MAX_PARTIAL_ORDER_BYTES_OFFSET: usize =
+        Self::END_ORDER_BYTES_OFFSET + STORED_ORDER_LEN + 1;
 
     #[must_use]
     pub fn new(
@@ -698,8 +701,11 @@ impl DeleteFileRow {
     #[cfg_attr(not(feature = "foundationdb"), allow(dead_code))]
     pub(crate) const BEGIN_ORDER_BYTES_OFFSET: usize = 1 + 8 + 8 + 8 + 8 + 1;
     #[cfg_attr(not(feature = "foundationdb"), allow(dead_code))]
-    pub(crate) const MAX_PARTIAL_ORDER_BYTES_OFFSET: usize =
+    pub(crate) const END_ORDER_BYTES_OFFSET: usize =
         Self::BEGIN_ORDER_BYTES_OFFSET + STORED_ORDER_LEN + 1;
+    #[cfg_attr(not(feature = "foundationdb"), allow(dead_code))]
+    pub(crate) const MAX_PARTIAL_ORDER_BYTES_OFFSET: usize =
+        Self::END_ORDER_BYTES_OFFSET + STORED_ORDER_LEN + 1;
 
     #[must_use]
     pub fn new(

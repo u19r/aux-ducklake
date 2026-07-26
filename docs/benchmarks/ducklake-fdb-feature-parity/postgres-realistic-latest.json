@@ -1,0 +1,253 @@
+{
+  "artifact": "ducklake-fdb-feature-parity-realistic-component-benchmark",
+  "batches": [
+    {
+      "accounting": {
+        "duckdb_extension_outside_storage_ms": 25355.692,
+        "fdb_bytes_read": 0,
+        "fdb_rows_read": 0,
+        "inside_rust_fdb_kv_ms": 0.0,
+        "inside_rust_nested_measurements_ms": 0.0,
+        "inside_rust_storage_call_ms": 0.0,
+        "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
+        "measured_storage_call_ms": 0.0,
+        "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
+        "runtime_metric_calls": 0,
+        "rust_runtime_reported_storage_ms": 0.0,
+        "scenario_wall_ms": 25355.692,
+        "scope": "preload",
+        "unaccounted_wall_ms": 25355.692
+      },
+      "duration_ms": 25355.692,
+      "labels": {
+        "realistic_preload": "50,10486,524300,2147532800",
+        "realistic_preload_batch_rows": "16384",
+        "realistic_preload_parallelism": "1",
+        "realistic_preload_worker": "0,1,16384"
+      },
+      "name": "preload",
+      "peak_rss_kib": 247024
+    },
+    {
+      "accounting": {
+        "duckdb_extension_outside_storage_ms": 56938.486,
+        "fdb_bytes_read": 0,
+        "fdb_rows_read": 0,
+        "inside_rust_fdb_kv_ms": 0.0,
+        "inside_rust_nested_measurements_ms": 0.0,
+        "inside_rust_storage_call_ms": 0.0,
+        "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
+        "measured_storage_call_ms": 0.0,
+        "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
+        "runtime_metric_calls": 0,
+        "rust_runtime_reported_storage_ms": 0.0,
+        "scenario_wall_ms": 56938.486,
+        "scope": "mixed",
+        "unaccounted_wall_ms": 56938.486
+      },
+      "duration_ms": 56938.486,
+      "labels": {
+        "realistic_latest": "524450,2751789150",
+        "realistic_time_travel": "524300,2749167050"
+      },
+      "name": "mixed",
+      "peak_rss_kib": 132416
+    },
+    {
+      "accounting": {
+        "duckdb_extension_outside_storage_ms": 63100.53,
+        "fdb_bytes_read": 0,
+        "fdb_rows_read": 0,
+        "inside_rust_fdb_kv_ms": 0.0,
+        "inside_rust_nested_measurements_ms": 0.0,
+        "inside_rust_storage_call_ms": 0.0,
+        "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
+        "measured_storage_call_ms": 0.0,
+        "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
+        "runtime_metric_calls": 0,
+        "rust_runtime_reported_storage_ms": 0.0,
+        "scenario_wall_ms": 63100.53,
+        "scope": "dedicated_deletes",
+        "unaccounted_wall_ms": 63100.53
+      },
+      "duration_ms": 63100.53,
+      "labels": {
+        "realistic_latest": "524350,2751788800",
+        "realistic_time_travel": "524450,2751789150"
+      },
+      "name": "dedicated_deletes",
+      "peak_rss_kib": 144912
+    },
+    {
+      "accounting": {
+        "duckdb_extension_outside_storage_ms": 78074.609,
+        "fdb_bytes_read": 0,
+        "fdb_rows_read": 0,
+        "inside_rust_fdb_kv_ms": 0.0,
+        "inside_rust_nested_measurements_ms": 0.0,
+        "inside_rust_storage_call_ms": 0.0,
+        "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
+        "measured_storage_call_ms": 0.0,
+        "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
+        "runtime_metric_calls": 0,
+        "rust_runtime_reported_storage_ms": 0.0,
+        "scenario_wall_ms": 78074.609,
+        "scope": "dedicated_inlining",
+        "unaccounted_wall_ms": 78074.609
+      },
+      "duration_ms": 78074.609,
+      "labels": {
+        "realistic_inline_tables": "50"
+      },
+      "name": "dedicated_inlining",
+      "peak_rss_kib": 143312
+    },
+    {
+      "accounting": {
+        "duckdb_extension_outside_storage_ms": 23163.569,
+        "fdb_bytes_read": 0,
+        "fdb_rows_read": 0,
+        "inside_rust_fdb_kv_ms": 0.0,
+        "inside_rust_nested_measurements_ms": 0.0,
+        "inside_rust_storage_call_ms": 0.0,
+        "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
+        "measured_storage_call_ms": 0.0,
+        "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
+        "runtime_metric_calls": 0,
+        "rust_runtime_reported_storage_ms": 0.0,
+        "scenario_wall_ms": 23163.569,
+        "scope": "dedicated_compaction",
+        "unaccounted_wall_ms": 23163.569
+      },
+      "duration_ms": 23163.569,
+      "labels": {
+        "realistic_latest": "524350,2751788800"
+      },
+      "name": "dedicated_compaction",
+      "peak_rss_kib": 159520
+    },
+    {
+      "accounting": {
+        "duckdb_extension_outside_storage_ms": 10976.564,
+        "fdb_bytes_read": 0,
+        "fdb_rows_read": 0,
+        "inside_rust_fdb_kv_ms": 0.0,
+        "inside_rust_nested_measurements_ms": 0.0,
+        "inside_rust_storage_call_ms": 0.0,
+        "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
+        "measured_storage_call_ms": 0.0,
+        "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
+        "runtime_metric_calls": 0,
+        "rust_runtime_reported_storage_ms": 0.0,
+        "scenario_wall_ms": 10976.564,
+        "scope": "latest_queries",
+        "unaccounted_wall_ms": 10976.564
+      },
+      "duration_ms": 10976.564,
+      "labels": {
+        "realistic_latest": "524350,2751788800"
+      },
+      "name": "latest_queries",
+      "peak_rss_kib": 121328
+    },
+    {
+      "accounting": {
+        "duckdb_extension_outside_storage_ms": 10990.559,
+        "fdb_bytes_read": 0,
+        "fdb_rows_read": 0,
+        "inside_rust_fdb_kv_ms": 0.0,
+        "inside_rust_nested_measurements_ms": 0.0,
+        "inside_rust_storage_call_ms": 0.0,
+        "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
+        "measured_storage_call_ms": 0.0,
+        "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
+        "runtime_metric_calls": 0,
+        "rust_runtime_reported_storage_ms": 0.0,
+        "scenario_wall_ms": 10990.559,
+        "scope": "time_travel_queries",
+        "unaccounted_wall_ms": 10990.559
+      },
+      "duration_ms": 10990.559,
+      "labels": {
+        "realistic_time_travel": "524350,2751788800"
+      },
+      "name": "time_travel_queries",
+      "peak_rss_kib": 121136
+    },
+    {
+      "accounting": {
+        "duckdb_extension_outside_storage_ms": 9849.657,
+        "fdb_bytes_read": 0,
+        "fdb_rows_read": 0,
+        "inside_rust_fdb_kv_ms": 0.0,
+        "inside_rust_nested_measurements_ms": 0.0,
+        "inside_rust_storage_call_ms": 0.0,
+        "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
+        "measured_storage_call_ms": 0.0,
+        "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
+        "runtime_metric_calls": 0,
+        "rust_runtime_reported_storage_ms": 0.0,
+        "scenario_wall_ms": 9849.657,
+        "scope": "parallel_latest_queries",
+        "unaccounted_wall_ms": 9849.657
+      },
+      "duration_ms": 9849.657,
+      "labels": {
+        "realistic_latest": "524350,2751788800",
+        "realistic_parallel_workers": "8"
+      },
+      "name": "parallel_latest_queries"
+    }
+  ],
+  "elapsed_ms": 279921.68,
+  "fixture": {
+    "backend": "postgres",
+    "churn_mode": "all",
+    "churn_rounds": 0,
+    "columns_per_table": 24,
+    "component_batches": [
+      "preload",
+      "mixed",
+      "dedicated_deletes",
+      "dedicated_inlining",
+      "dedicated_compaction",
+      "latest_queries",
+      "time_travel_queries",
+      "parallel_latest_queries"
+    ],
+    "concurrent_writers": 0,
+    "duckdb_build_profile": "release",
+    "duckdb_memory_limit": "1024MiB",
+    "mutation_tables_per_transaction": 0,
+    "mutation_transaction_scope": "table_batch",
+    "parallel_workers": 8,
+    "payload_bytes": 4096,
+    "preload_batch_rows": 16384,
+    "preload_parallelism": 1,
+    "rows_per_table": 10486,
+    "same_sql_for_backends": true,
+    "schema_shape": "legacy",
+    "small_write_batch_rows": "5-20",
+    "table_count": 50,
+    "target_logical_data_bytes": 2147483648
+  },
+  "generated_at_micros": 1785164368883217,
+  "peak_rss_kib": 247024,
+  "profile": "realistic"
+}

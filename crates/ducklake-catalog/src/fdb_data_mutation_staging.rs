@@ -6,7 +6,7 @@ use futures::executor::block_on;
 use crate::{
     CatalogError, CatalogOrderId, CatalogResult, DataFileChangeKind, DataFileId, DataFileRow,
     DeleteFileId, DeleteFileRow, FdbOrderedCatalogKv, FileColumnStatsRow, FilePartitionValueRow,
-    InlineFileDeletionRow, RangeDirection, SnapshotRow, TableId,
+    InlineFileDeletionRow, RangeDirection, RangeItem, SnapshotRow, TableId,
     conflict_watermarks::stage_fdb_max_file_id_watermark,
     fdb_runtime::map_fdb_error,
     fdb_versionstamp::{
@@ -33,7 +33,7 @@ use crate::{
     maintenance::encode_scheduled_delete_cleanup_value,
     rows::{STORED_ORDER_LEN, current_timestamp_micros},
     snapshot_operations::{SnapshotOperationKind, snapshot_operation_key},
-    store::stage_fdb_latest_snapshot_value,
+    store::stage_fdb_snapshot_indexes,
 };
 
 const DELETE_FILE_END_ORDER_BYTES_OFFSET: usize =
@@ -67,7 +67,7 @@ pub(crate) fn stage_snapshot(
         &snapshot.sequence.to_be_bytes(),
         MutationType::SetVersionstampedKey,
     );
-    stage_fdb_latest_snapshot_value(kv, trx, catalog, snapshot)?;
+    stage_fdb_snapshot_indexes(kv, trx, catalog, snapshot)?;
     Ok(())
 }
 
@@ -115,7 +115,7 @@ pub(crate) fn stage_data_file_without_watermark(
     row: &DataFileRow,
 ) -> CatalogResult<()> {
     if row.max_partial_order.is_some() {
-        stage_compacted_data_file(kv, trx, catalog, row);
+        stage_compacted_data_file(kv, trx, catalog, row)?;
         return stage_data_file_change(kv, trx, catalog, row.table_id, row.data_file_id);
     }
     trx.atomic_op(
@@ -153,28 +153,42 @@ fn stage_compacted_data_file(
     trx: &foundationdb::Transaction,
     catalog: crate::CatalogId,
     row: &DataFileRow,
-) {
-    trx.set(
-        &kv.namespaced_key(&current_data_file_key(
+) -> CatalogResult<()> {
+    if row.validity.begin_order == incomplete_order()
+        && row.max_partial_order == Some(incomplete_order())
+    {
+        return Err(CatalogError::InvalidMutation(
+            "data file begin and max partial orders cannot both reference the current commit"
+                .to_owned(),
+        ));
+    }
+    let encoded = row.encode();
+    let keys = [
+        kv.namespaced_key(&current_data_file_key(
             catalog,
             row.table_id,
             row.data_file_id,
         )),
-        &row.encode(),
-    );
-    trx.set(
-        &kv.namespaced_key(&data_file_key(catalog, row.data_file_id)),
-        &row.encode(),
-    );
-    trx.set(
-        &kv.namespaced_key(&data_file_begin_key(
+        kv.namespaced_key(&data_file_key(catalog, row.data_file_id)),
+        kv.namespaced_key(&data_file_begin_key(
             catalog,
             row.table_id,
             row.validity.begin_order,
             row.data_file_id,
         )),
-        &row.encode(),
-    );
+    ];
+    if row.max_partial_order == Some(incomplete_order()) {
+        let versionstamped =
+            versionstamped_value(&encoded, DataFileRow::MAX_PARTIAL_ORDER_BYTES_OFFSET)?;
+        for key in keys {
+            trx.atomic_op(&key, &versionstamped, MutationType::SetVersionstampedValue);
+        }
+    } else {
+        for key in keys {
+            trx.set(&key, &encoded);
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn stage_delete_file_without_watermark(
@@ -199,6 +213,14 @@ pub(crate) fn stage_delete_file_without_watermark(
     } else {
         row.validity.begin_order
     };
+    if delete_file_begin_order == incomplete_order()
+        && row.max_partial_order == Some(incomplete_order())
+    {
+        return Err(CatalogError::InvalidMutation(
+            "delete file begin and max partial orders cannot both reference the current commit"
+                .to_owned(),
+        ));
+    }
     if delete_file_begin_order == incomplete_order() {
         trx.atomic_op(
             &kv.namespaced_key(&current_delete_file_key(catalog, row.data_file_id)),
@@ -428,13 +450,27 @@ pub(crate) fn stage_expired_data_file(
     catalog: crate::CatalogId,
     row: &DataFileRow,
 ) -> CatalogResult<()> {
+    let partition_values = kv.scan_prefix(
+        &file_partition_value_prefix(catalog, row.data_file_id),
+        RangeDirection::Forward,
+        usize::MAX,
+    )?;
+    stage_partition_value_lookup_clears(kv, trx, catalog, &partition_values)?;
+    stage_expired_data_file_after_partition_lookup_cleanup(kv, trx, catalog, row)
+}
+
+pub(crate) fn stage_expired_data_file_after_partition_lookup_cleanup(
+    kv: &FdbOrderedCatalogKv,
+    trx: &foundationdb::Transaction,
+    catalog: crate::CatalogId,
+    row: &DataFileRow,
+) -> CatalogResult<()> {
     let end_order = row.validity.end_order.unwrap_or_else(incomplete_order);
     trx.clear(&kv.namespaced_key(&current_data_file_key(
         catalog,
         row.table_id,
         row.data_file_id,
     )));
-    clear_partition_values_for_data_file(kv, trx, catalog, row.data_file_id)?;
     trx.atomic_op(
         &kv.namespaced_key(&data_file_key(catalog, row.data_file_id)),
         &versionstamped_value(&row.encode(), DataFileRow::END_ORDER_BYTES_OFFSET)?,
@@ -461,17 +497,13 @@ pub(crate) fn stage_expired_data_file(
     stage_removed_data_file_change(kv, trx, catalog, row.table_id, row.data_file_id, end_order)
 }
 
-fn clear_partition_values_for_data_file(
+pub(crate) fn stage_partition_value_lookup_clears(
     kv: &FdbOrderedCatalogKv,
     trx: &foundationdb::Transaction,
     catalog: crate::CatalogId,
-    data_file_id: DataFileId,
+    partition_values: &[RangeItem],
 ) -> CatalogResult<()> {
-    for item in kv.scan_prefix(
-        &file_partition_value_prefix(catalog, data_file_id),
-        RangeDirection::Forward,
-        usize::MAX,
-    )? {
+    for item in partition_values {
         let row = FilePartitionValueRow::decode(&item.value)?;
         trx.clear(&kv.namespaced_key(&partition_value_lookup_key(
             catalog,

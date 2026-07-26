@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     CatalogError, CatalogId, CatalogResult, OrderedCatalogKv, TableColumnRow, TableId, TableRow,
@@ -313,20 +313,20 @@ where
 
     fn reject_duplicate_table_names(&self) -> CatalogResult<()> {
         let mut tables = list_tables_at(self.kv, self.catalog, self.base_order)?;
+        let indexes = tables
+            .iter()
+            .enumerate()
+            .map(|(index, table)| (table.table_id, index))
+            .collect::<BTreeMap<_, _>>();
         for (table_id, table) in &self.tables {
-            if let Some(existing) = tables
-                .iter_mut()
-                .find(|existing| existing.table_id == *table_id)
-            {
-                *existing = table.next.clone();
+            if let Some(index) = indexes.get(table_id) {
+                tables[*index] = table.next.clone();
             }
         }
         tables.extend(self.created_tables.values().cloned());
-        for (index, table) in tables.iter().enumerate() {
-            if tables[..index].iter().any(|previous| {
-                previous.schema_id == table.schema_id
-                    && previous.name.eq_ignore_ascii_case(&table.name)
-            }) {
+        let mut names = BTreeSet::new();
+        for table in &tables {
+            if !names.insert((table.schema_id, table.name.to_ascii_lowercase())) {
                 return Err(CatalogError::InvalidMutation(format!(
                     "conflict creating table {}: name already exists in schema {}",
                     table.name, table.schema_id.0

@@ -18,14 +18,9 @@ pub fn list_current_data_files(
     catalog: CatalogId,
     table_id: TableId,
 ) -> CatalogResult<Vec<DataFileRow>> {
-    #[cfg(not(test))]
     if crate::store::runtime_read_context_enabled() {
-        return Ok(
-            crate::runtime_read_context::CatalogCurrentFilesContext::for_current_files(
-                kv, catalog,
-            )?
-            .current_data_files_for_table(table_id),
-        );
+        return TableCurrentDataFilesContext::for_table(kv, catalog, table_id)
+            .map(|context| context.rows);
     }
     let started = RuntimeMetricStage::start();
     let rows = scan_current_data_files(kv, catalog, table_id)?;
@@ -221,18 +216,6 @@ pub(crate) fn attach_data_files_without_deletes(
         .into_iter()
         .map(|data_file| AttachedDataFile::new(data_file, None))
         .collect()
-}
-
-pub(crate) fn attach_delete_file_at(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    data_file: DataFileRow,
-    snapshot_order: CatalogOrderId,
-) -> CatalogResult<AttachedDataFile> {
-    let started = RuntimeMetricStage::start();
-    let delete_file = load_delete_file_at(kv, catalog, data_file.data_file_id, snapshot_order)?;
-    record_runtime_method_stage("method.data_file_store.attach_delete_file_at", started);
-    Ok(AttachedDataFile::new(data_file, delete_file))
 }
 
 pub fn list_data_files_at(

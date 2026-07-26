@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use crate::{
     CatalogId, CatalogResult, ColumnId, DataFileId, DataFileRow, DuckLakeSnapshotId,
@@ -19,7 +19,7 @@ pub(crate) fn merge_adjacent_files(
     payload: &[u8],
 ) -> CatalogResult<Vec<u8>> {
     let parsed = compaction_payload_values(MERGE_ADJACENT_FILES, payload)?;
-    let source_count = parsed.source_file_ids.len();
+    let source_count = parsed.source_files.len();
     let new_file_count = parsed.new_files.len();
     {
         merge_foundationdb_adjacent_files_from_payload(catalog, parsed)?;
@@ -43,7 +43,7 @@ pub(crate) fn commit_compaction_intent(
     match operation {
         MERGE_ADJACENT_FILES => {
             let parsed = compaction_payload_values(MERGE_ADJACENT_FILES, payload)?;
-            let source_count = parsed.source_file_ids.len();
+            let source_count = parsed.source_files.len();
             let new_file_count = parsed.new_files.len();
             {
                 merge_foundationdb_adjacent_files_from_payload_at(
@@ -62,7 +62,7 @@ pub(crate) fn commit_compaction_intent(
         }
         REWRITE_DELETE_FILES => {
             let parsed = compaction_payload_values(REWRITE_DELETE_FILES, payload)?;
-            let source_count = parsed.source_file_ids.len();
+            let source_count = parsed.source_files.len();
             let new_file_count = parsed.new_files.len();
             let operation = RewriteDeleteOperation::from_payload(parsed)?;
             {
@@ -92,7 +92,7 @@ pub(crate) fn rewrite_delete_files(
     payload: &[u8],
 ) -> CatalogResult<Vec<u8>> {
     let parsed = compaction_payload_values(REWRITE_DELETE_FILES, payload)?;
-    let source_count = parsed.source_file_ids.len();
+    let source_count = parsed.source_files.len();
     let new_file_count = parsed.new_files.len();
     let operation = RewriteDeleteOperation::from_payload(parsed)?;
     {
@@ -132,6 +132,7 @@ fn merge_foundationdb_adjacent_files_from_payload_at(
     commit_metadata: SnapshotCommitMetadata,
 ) -> CatalogResult<()> {
     let kv = crate::runtime_foundationdb::open_foundationdb_catalog()?;
+    let mut compactions = Vec::new();
     for mut intent in merge_adjacent_compactions_from_payload(parsed)? {
         resolve_compaction_file_visibility(
             &kv,
@@ -139,31 +140,16 @@ fn merge_foundationdb_adjacent_files_from_payload_at(
             &mut intent.compaction,
             &intent.file_visibility,
         )?;
-        if let Some(read_snapshot) = read_snapshot {
-            let Some(base) = crate::snapshot_by_public_sequence(&kv, catalog, read_snapshot)?
-            else {
-                return Err(crate::CatalogError::NotFound("read snapshot"));
-            };
-            let through = crate::latest_snapshot(&kv, catalog)?
-                .ok_or(crate::CatalogError::NotFound("catalog snapshot"))?;
-            kv.commit_merge_adjacent_data_files_versionstamped_with_conflict_check_and_metadata(
-                catalog,
-                base.order,
-                through.order,
-                proposed_commit_snapshot.map(ProposedCommitSnapshot::commit_attempt_id),
-                commit_metadata.clone(),
-                intent.compaction,
-            )?;
-        } else {
-            kv.commit_merge_adjacent_data_files_versionstamped_with_metadata(
-                catalog,
-                proposed_commit_snapshot.map(ProposedCommitSnapshot::commit_attempt_id),
-                commit_metadata.clone(),
-                intent.compaction,
-            )?;
-        }
+        compactions.push(intent.compaction);
     }
-    Ok(())
+    let conflict_window = compaction_conflict_window(&kv, catalog, read_snapshot)?;
+    kv.commit_merge_adjacent_data_files_batch_versionstamped(
+        catalog,
+        conflict_window,
+        proposed_commit_snapshot.map(ProposedCommitSnapshot::commit_attempt_id),
+        commit_metadata,
+        compactions,
+    )
 }
 
 #[cfg(not(feature = "foundationdb"))]
@@ -212,36 +198,30 @@ fn rewrite_foundationdb_delete_files_at(
     commit_metadata: SnapshotCommitMetadata,
 ) -> CatalogResult<()> {
     let kv = crate::runtime_foundationdb::open_foundationdb_catalog()?;
-    let conflict_window = if let Some(read_snapshot) = read_snapshot {
-        let Some(base) = crate::snapshot_by_public_sequence(&kv, catalog, read_snapshot)? else {
-            return Err(crate::CatalogError::NotFound("read snapshot"));
-        };
-        let through = crate::latest_snapshot(&kv, catalog)?
-            .ok_or(crate::CatalogError::NotFound("catalog snapshot"))?;
-        Some((base.order, through.order))
-    } else {
-        None
+    let conflict_window = compaction_conflict_window(&kv, catalog, read_snapshot)?;
+    kv.commit_rewrite_delete_data_files_batch_versionstamped(
+        catalog,
+        conflict_window,
+        proposed_commit_snapshot.map(ProposedCommitSnapshot::commit_attempt_id),
+        commit_metadata,
+        compactions,
+    )
+}
+
+#[cfg(feature = "foundationdb")]
+fn compaction_conflict_window(
+    kv: &crate::FdbOrderedCatalogKv,
+    catalog: CatalogId,
+    read_snapshot: Option<DuckLakeSnapshotId>,
+) -> CatalogResult<Option<(crate::CatalogOrderId, crate::CatalogOrderId)>> {
+    let Some(read_snapshot) = read_snapshot else {
+        return Ok(None);
     };
-    for compaction in compactions {
-        if let Some((base_order, through_order)) = conflict_window {
-            kv.commit_rewrite_delete_data_files_versionstamped_with_conflict_check_and_metadata(
-                catalog,
-                base_order,
-                through_order,
-                proposed_commit_snapshot.map(ProposedCommitSnapshot::commit_attempt_id),
-                commit_metadata.clone(),
-                compaction,
-            )?;
-        } else {
-            kv.commit_rewrite_delete_data_files_versionstamped_with_metadata(
-                catalog,
-                proposed_commit_snapshot.map(ProposedCommitSnapshot::commit_attempt_id),
-                commit_metadata.clone(),
-                compaction,
-            )?;
-        }
-    }
-    Ok(())
+    let base = crate::snapshot_by_public_sequence(kv, catalog, read_snapshot)?
+        .ok_or(crate::CatalogError::NotFound("read snapshot"))?;
+    let through = crate::latest_snapshot(kv, catalog)?
+        .ok_or(crate::CatalogError::NotFound("catalog snapshot"))?;
+    Ok(Some((base.order, through.order)))
 }
 
 #[cfg(not(feature = "foundationdb"))]
@@ -275,56 +255,108 @@ struct MergeAdjacentCompactionIntent {
 fn merge_adjacent_compactions_from_payload(
     parsed: CompactionPayload,
 ) -> CatalogResult<Vec<MergeAdjacentCompactionIntent>> {
-    let table_ids = parsed
-        .source_files
-        .iter()
-        .map(|source| source.table_id)
-        .collect::<BTreeSet<_>>();
-    let mut compactions = Vec::new();
-    for table_id in table_ids {
-        let source_file_ids = parsed
-            .source_files
-            .iter()
-            .filter(|source| source.table_id == table_id)
-            .map(|source| source.data_file_id)
-            .collect::<Vec<_>>();
-        let new_file_ids = parsed
-            .new_files
-            .iter()
-            .filter(|file| file.table_id == table_id)
-            .map(|file| file.data_file_id)
-            .collect::<BTreeSet<_>>();
-        compactions.push(MergeAdjacentCompactionIntent {
-            compaction: MergeAdjacentCompaction {
-                source_file_ids,
-                new_files: parsed
-                    .new_files
-                    .iter()
-                    .filter(|file| file.table_id == table_id)
-                    .cloned()
-                    .collect(),
-                partition_values: parsed
-                    .partition_values
-                    .iter()
-                    .filter(|row| row.table_id == table_id)
-                    .cloned()
-                    .collect(),
-                file_column_stats: parsed
-                    .file_column_stats
-                    .iter()
-                    .filter(|row| row.table_id == table_id)
-                    .cloned()
-                    .collect(),
-            },
-            file_visibility: parsed
-                .file_visibility
-                .iter()
-                .filter(|visibility| new_file_ids.contains(&visibility.data_file_id))
-                .copied()
-                .collect(),
-        });
+    compaction_tables_from_payload(parsed)?
+        .into_iter()
+        .map(|(table_id, table)| {
+            require_compaction_sources(table_id, &table)?;
+            Ok(MergeAdjacentCompactionIntent {
+                compaction: MergeAdjacentCompaction {
+                    source_file_ids: table.source_file_ids,
+                    new_files: table.new_files,
+                    partition_values: table.partition_values,
+                    file_column_stats: table.file_column_stats,
+                },
+                file_visibility: table.file_visibility,
+            })
+        })
+        .collect()
+}
+
+#[derive(Default)]
+struct CompactionTablePayload {
+    source_file_ids: Vec<DataFileId>,
+    new_files: Vec<DataFileRow>,
+    partition_values: Vec<FilePartitionValueRow>,
+    file_column_stats: Vec<FileColumnStatsRow>,
+    file_visibility: Vec<CompactionFileVisibility>,
+}
+
+fn compaction_tables_from_payload(
+    parsed: CompactionPayload,
+) -> CatalogResult<BTreeMap<TableId, CompactionTablePayload>> {
+    let CompactionPayload {
+        source_files,
+        new_files,
+        partition_values,
+        file_column_stats,
+        file_visibility,
+    } = parsed;
+    let mut tables = BTreeMap::<TableId, CompactionTablePayload>::new();
+    for source in source_files {
+        tables
+            .entry(source.table_id)
+            .or_default()
+            .source_file_ids
+            .push(source.data_file_id);
     }
-    Ok(compactions)
+    let mut new_file_tables = BTreeMap::new();
+    for file in new_files {
+        if new_file_tables
+            .insert(file.data_file_id, file.table_id)
+            .is_some()
+        {
+            return Err(crate::CatalogError::Decode(format!(
+                "compaction payload repeats replacement data file {}",
+                file.data_file_id.0
+            )));
+        }
+        tables
+            .entry(file.table_id)
+            .or_default()
+            .new_files
+            .push(file);
+    }
+    for row in partition_values {
+        tables
+            .entry(row.table_id)
+            .or_default()
+            .partition_values
+            .push(row);
+    }
+    for row in file_column_stats {
+        tables
+            .entry(row.table_id)
+            .or_default()
+            .file_column_stats
+            .push(row);
+    }
+    for visibility in file_visibility {
+        let Some(table_id) = new_file_tables.get(&visibility.data_file_id) else {
+            return Err(crate::CatalogError::Decode(format!(
+                "compaction visibility references missing data file {}",
+                visibility.data_file_id.0
+            )));
+        };
+        tables
+            .entry(*table_id)
+            .or_default()
+            .file_visibility
+            .push(visibility);
+    }
+    Ok(tables)
+}
+
+fn require_compaction_sources(
+    table_id: TableId,
+    table: &CompactionTablePayload,
+) -> CatalogResult<()> {
+    if table.source_file_ids.is_empty() {
+        return Err(crate::CatalogError::Decode(format!(
+            "compaction payload has replacement metadata for table {} without source files",
+            table_id.0
+        )));
+    }
+    Ok(())
 }
 
 struct RewriteDeleteOperation {
@@ -333,56 +365,24 @@ struct RewriteDeleteOperation {
 
 impl RewriteDeleteOperation {
     fn from_payload(parsed: CompactionPayload) -> CatalogResult<Self> {
-        let mut table_ids = parsed
-            .source_files
-            .iter()
-            .map(|source| source.table_id)
-            .collect::<BTreeSet<_>>();
-        table_ids.extend(parsed.new_files.iter().map(|file| file.table_id));
-
-        let mut compactions = Vec::new();
-        for table_id in table_ids {
-            let source_file_ids = parsed
-                .source_files
-                .iter()
-                .filter(|source| source.table_id == table_id)
-                .map(|source| source.data_file_id)
-                .collect::<Vec<_>>();
-            if source_file_ids.is_empty() {
-                return Err(crate::CatalogError::Decode(format!(
-                    "rewrite-delete payload has replacement files for table {} without source files",
-                    table_id.0
-                )));
-            }
-            compactions.push(RewriteDeleteCompaction {
-                source_file_ids,
-                new_files: parsed
-                    .new_files
-                    .iter()
-                    .filter(|file| file.table_id == table_id)
-                    .cloned()
-                    .collect(),
-                partition_values: parsed
-                    .partition_values
-                    .iter()
-                    .filter(|row| row.table_id == table_id)
-                    .cloned()
-                    .collect(),
-                file_column_stats: parsed
-                    .file_column_stats
-                    .iter()
-                    .filter(|row| row.table_id == table_id)
-                    .cloned()
-                    .collect(),
-            });
-        }
+        let compactions = compaction_tables_from_payload(parsed)?
+            .into_iter()
+            .map(|(table_id, table)| {
+                require_compaction_sources(table_id, &table)?;
+                Ok(RewriteDeleteCompaction {
+                    source_file_ids: table.source_file_ids,
+                    new_files: table.new_files,
+                    partition_values: table.partition_values,
+                    file_column_stats: table.file_column_stats,
+                })
+            })
+            .collect::<CatalogResult<Vec<_>>>()?;
         Ok(Self { compactions })
     }
 }
 
 struct CompactionPayload {
     source_files: Vec<CompactionSourceFile>,
-    source_file_ids: Vec<DataFileId>,
     new_files: Vec<DataFileRow>,
     partition_values: Vec<FilePartitionValueRow>,
     file_column_stats: Vec<FileColumnStatsRow>,
@@ -414,7 +414,6 @@ fn compaction_payload_values(
     payload: &[u8],
 ) -> CatalogResult<CompactionPayload> {
     let mut source_files = Vec::new();
-    let mut source_file_ids = Vec::new();
     let mut new_files = Vec::new();
     let mut partition_values = Vec::new();
     let mut file_column_stats = Vec::new();
@@ -434,7 +433,6 @@ fn compaction_payload_values(
                     table_id,
                     data_file_id,
                 });
-                source_file_ids.push(data_file_id);
             }
             [
                 "file",
@@ -592,7 +590,6 @@ fn compaction_payload_values(
     }
     Ok(CompactionPayload {
         source_files,
-        source_file_ids,
         new_files,
         partition_values,
         file_column_stats,
@@ -606,28 +603,57 @@ fn resolve_compaction_file_visibility(
     compaction: &mut MergeAdjacentCompaction,
     file_visibility: &[CompactionFileVisibility],
 ) -> CatalogResult<()> {
+    let file_positions = compaction
+        .new_files
+        .iter()
+        .enumerate()
+        .map(|(index, file)| (file.data_file_id, index))
+        .collect::<BTreeMap<_, _>>();
+    if file_positions.len() != compaction.new_files.len() {
+        return Err(crate::CatalogError::Decode(
+            "compaction replacement data file ids are not unique".to_owned(),
+        ));
+    }
+    let mut snapshot_orders = BTreeMap::new();
     for visibility in file_visibility {
-        let resolved = resolve_compaction_file_visibility_orders(kv, catalog, *visibility)?;
-        let Some(file) = compaction
-            .new_files
-            .iter_mut()
-            .find(|file| file.data_file_id == resolved.data_file_id)
-        else {
+        let resolved = resolve_compaction_file_visibility_orders_with_cache(
+            kv,
+            catalog,
+            *visibility,
+            &mut snapshot_orders,
+        )?;
+        let Some(index) = file_positions.get(&resolved.data_file_id) else {
             return Err(crate::CatalogError::Decode(format!(
                 "compaction visibility references missing data file {}",
                 resolved.data_file_id.0
             )));
         };
+        let file = &mut compaction.new_files[*index];
         file.validity.begin_order = resolved.begin_order;
         file.max_partial_order = resolved.max_partial_order;
     }
     Ok(())
 }
 
+#[cfg(test)]
 fn resolve_compaction_file_visibility_orders(
     kv: &impl crate::OrderedCatalogKv,
     catalog: CatalogId,
     visibility: CompactionFileVisibility,
+) -> CatalogResult<ResolvedCompactionFileVisibility> {
+    resolve_compaction_file_visibility_orders_with_cache(
+        kv,
+        catalog,
+        visibility,
+        &mut BTreeMap::new(),
+    )
+}
+
+fn resolve_compaction_file_visibility_orders_with_cache(
+    kv: &impl crate::OrderedCatalogKv,
+    catalog: CatalogId,
+    visibility: CompactionFileVisibility,
+    snapshot_orders: &mut BTreeMap<DuckLakeSnapshotId, crate::CatalogOrderId>,
 ) -> CatalogResult<ResolvedCompactionFileVisibility> {
     Ok(ResolvedCompactionFileVisibility {
         data_file_id: visibility.data_file_id,
@@ -637,6 +663,7 @@ fn resolve_compaction_file_visibility_orders(
             visibility.begin_snapshot,
             visibility.data_file_id,
             "begin",
+            snapshot_orders,
         )?,
         max_partial_order: visibility
             .max_partial_snapshot
@@ -647,6 +674,7 @@ fn resolve_compaction_file_visibility_orders(
                     snapshot_id,
                     visibility.data_file_id,
                     "max partial",
+                    snapshot_orders,
                 )
             })
             .transpose()?,
@@ -659,11 +687,17 @@ fn compaction_visibility_order(
     snapshot_id: DuckLakeSnapshotId,
     data_file_id: DataFileId,
     label: &str,
+    snapshot_orders: &mut BTreeMap<DuckLakeSnapshotId, crate::CatalogOrderId>,
 ) -> CatalogResult<crate::CatalogOrderId> {
+    if let Some(order) = snapshot_orders.get(&snapshot_id) {
+        return Ok(*order);
+    }
     if let Some(snapshot) = crate::snapshot_by_public_sequence(kv, catalog, snapshot_id)? {
+        snapshot_orders.insert(snapshot_id, snapshot.order);
         return Ok(snapshot.order);
     }
     if let Some(snapshot) = snapshot_by_ducklake_sequence(kv, catalog, snapshot_id)? {
+        snapshot_orders.insert(snapshot_id, snapshot.order);
         return Ok(snapshot.order);
     }
     Err(crate::CatalogError::Decode(format!(

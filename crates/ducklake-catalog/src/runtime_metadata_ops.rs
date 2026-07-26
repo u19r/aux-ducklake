@@ -15,8 +15,8 @@ use crate::{
     runtime_payload::{optional_payload_string_value, payload_string_value, payload_u64_value},
     runtime_protocol::RuntimeCatalogBackend,
     runtime_snapshots::snapshot_schema_versions_by_order,
+    schema_version_state::load_schema_version_begin_snapshot,
     set_metadata_setting,
-    table_store::list_table_rows,
 };
 
 #[cfg(not(test))]
@@ -208,18 +208,6 @@ fn initialization_metadata_settings(payload: &[u8]) -> CatalogResult<Vec<Metadat
     ])
 }
 
-pub(crate) fn commit_metadata_batch(
-    backend: RuntimeCatalogBackend,
-    catalog: CatalogId,
-) -> CatalogResult<Vec<u8>> {
-    runtime_foundationdb_touch_catalog(catalog)?;
-    Ok(format!(
-        "runtime_ffi=ok\noperation=CommitMetadataBatch\nbackend={}\nmetadata_batch_committed=true\n",
-        backend.as_str()
-    )
-    .into_bytes())
-}
-
 pub(crate) fn set_config_option(
     backend: RuntimeCatalogBackend,
     catalog: CatalogId,
@@ -276,8 +264,11 @@ fn begin_snapshot_for_schema_version(
     table_id: TableId,
     schema_version: u64,
 ) -> CatalogResult<crate::DuckLakeSnapshotId> {
+    if let Some(begin_snapshot) = load_schema_version_begin_snapshot(kv, catalog, schema_version)? {
+        return Ok(begin_snapshot);
+    }
     let snapshots = list_all_snapshots(kv, catalog)?;
-    let table_rows = list_table_rows(kv, catalog)?;
+    let table_rows = crate::table_store::list_table_rows_for_table(kv, catalog, table_id)?;
     let schema_versions = snapshot_schema_versions_by_order(kv, catalog)?;
     for snapshot in &snapshots {
         if schema_versions.get(&snapshot.order).copied() != Some(schema_version) {
@@ -327,14 +318,14 @@ mod payload_parser;
 use current_stats::*;
 pub(crate) use data_files::*;
 pub(crate) use delete_files::*;
+#[cfg(test)]
+use file_stats::partition_value_request;
 pub(crate) use file_stats::{
     commit_column_mappings, list_column_mapping_rows, list_current_metadata_file_column_stats_rows,
-    list_current_metadata_file_column_stats_rows_for_data_file_ids,
-    list_current_metadata_file_partition_value_rows, list_file_column_stats_rows,
+    list_current_metadata_file_column_stats_rows_for_data_file_ids, list_file_column_stats_rows,
     list_file_partition_value_rows_for_data_file_ids, list_global_stats_for_snapshot,
     list_global_stats_inputs_for_snapshot, list_snapshot_stats_and_changes_inputs,
-    render_bounded_append_mirror_sql, render_current_metadata_file_column_stats_mirror_sql,
-    render_current_metadata_file_partition_value_mirror_sql,
+    render_bounded_append_mirror_sql, render_bounded_partition_info_mirror_sql,
 };
 use global_stats_merge::*;
 #[cfg(any(test, feature = "foundationdb"))]

@@ -62,21 +62,9 @@ pub(crate) fn inline_row_changes_payload(
             crate::CatalogError::Decode(format!("inline row payload is not utf8: {error}"))
         })?;
         let fields = inline_row_fields(&line)?;
-        let row_id = fields[1].parse::<u64>().map_err(|error| {
+        fields[1].parse::<u64>().map_err(|error| {
             crate::CatalogError::Decode(format!("inline row id {} is invalid: {error}", fields[1]))
         })?;
-        if kind == InlineRowChangeKind::Inserted
-            && inline_row_materialized_by_visible_file(
-                kv,
-                catalog,
-                table.table_id,
-                row_id,
-                change.change.order,
-                end_order,
-            )?
-        {
-            continue;
-        }
         rendered_changes.push(format!(
             "row_change\t{}\t{}\t{}\t{}\n",
             begin_snapshot,
@@ -94,18 +82,6 @@ pub(crate) fn inline_row_changes_payload(
         out.push_str(&rendered);
     }
     Ok(out.into_bytes())
-}
-
-pub(super) fn inline_row_materialized_by_visible_file(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    table_id: crate::TableId,
-    row_id: u64,
-    inline_begin_order: CatalogOrderId,
-    snapshot_order: CatalogOrderId,
-) -> CatalogResult<bool> {
-    InlineMaterializedFiles::load(kv, catalog, table_id, snapshot_order)
-        .map(|files| files.materializes(row_id, inline_begin_order))
 }
 
 #[derive(Clone)]

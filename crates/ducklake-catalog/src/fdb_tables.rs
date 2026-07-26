@@ -22,7 +22,7 @@ use crate::{
     schema_version_state::{
         stage_fdb_next_catalog_snapshot_version, stage_fdb_next_schema_version,
     },
-    store::{latest_snapshot, stage_fdb_latest_snapshot_value},
+    store::{latest_snapshot, stage_fdb_snapshot_indexes},
 };
 
 impl FdbOrderedCatalogKv {
@@ -112,8 +112,8 @@ impl FdbOrderedCatalogKv {
             &snapshot.sequence.to_be_bytes(),
             MutationType::SetVersionstampedKey,
         );
-        stage_fdb_latest_snapshot_value(self, &trx, catalog, &snapshot)?;
-        stage_fdb_next_schema_version(self, &trx, catalog)?;
+        stage_fdb_snapshot_indexes(self, &trx, catalog, &snapshot)?;
+        stage_fdb_next_schema_version(self, &trx, catalog, &snapshot)?;
         for table in &created {
             trx.atomic_op(
                 &self.versionstamped_key(
@@ -213,7 +213,7 @@ impl FdbOrderedCatalogKv {
             &snapshot.sequence.to_be_bytes(),
             MutationType::SetVersionstampedKey,
         );
-        stage_fdb_latest_snapshot_value(self, &trx, catalog, &snapshot)?;
+        stage_fdb_snapshot_indexes(self, &trx, catalog, &snapshot)?;
         if !created.is_empty()
             || prepared.iter().any(|replacement| {
                 !replacement
@@ -221,7 +221,7 @@ impl FdbOrderedCatalogKv {
                     .same_user_visible_schema_as(&replacement.next)
             })
         {
-            stage_fdb_next_schema_version(self, &trx, catalog)?;
+            stage_fdb_next_schema_version(self, &trx, catalog, &snapshot)?;
         } else {
             stage_fdb_next_catalog_snapshot_version(self, &trx, catalog)?;
         }
@@ -378,7 +378,7 @@ pub(crate) fn stage_remove_current_table_row(
     trx.clear(&kv.namespaced_key(&current_table_row_key(catalog, table_id)));
 }
 
-fn stage_current_table_name_replacement(
+pub(crate) fn stage_current_table_name_replacement(
     kv: &FdbOrderedCatalogKv,
     trx: &foundationdb::Transaction,
     catalog: CatalogId,
@@ -422,7 +422,7 @@ pub(crate) fn table_metadata_recovery_attempt_id(
     ))
 }
 
-fn prepare_replacements(
+pub(crate) fn prepare_replacements(
     placeholder: crate::CatalogOrderId,
     replacements: Vec<TableVersionReplacement>,
 ) -> Vec<TableVersionReplacement> {
@@ -438,7 +438,7 @@ fn prepare_replacements(
         .collect()
 }
 
-fn prepare_created_tables(
+pub(crate) fn prepare_created_tables(
     placeholder: crate::CatalogOrderId,
     tables: Vec<TableRow>,
 ) -> Vec<TableRow> {
@@ -451,7 +451,7 @@ fn prepare_created_tables(
         .collect()
 }
 
-fn estimate_table_change_bytes(
+pub(crate) fn estimate_table_change_bytes(
     catalog: CatalogId,
     snapshot: &SnapshotRow,
     created: &[TableRow],

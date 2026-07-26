@@ -4,6 +4,15 @@ realistic_table_name() {
     printf 'bench_%03d' "$1"
 }
 
+default_varied_tables_per_transaction() {
+    local table_count="$1"
+    if ((table_count < 10)); then
+        printf '%s\n' "$table_count"
+    else
+        printf '10\n'
+    fi
+}
+
 realistic_row_sql() {
     local table_index="$1" start_id="$2" end_id="$3"
     local table_name
@@ -215,9 +224,9 @@ varied_join_query_sql() {
         table_c="$(realistic_table_name "$(((group * 4 + 2) % count))")"
         table_d="$(realistic_table_name "$(((group * 4 + 3) % count))")"
         if [[ -n "$snapshot_var" ]]; then
-            printf "%sSELECT count(*) join_count, coalesce(sum(a.amount + b.amount + c.amount + d.amount), 0) join_amount\nFROM (SELECT * FROM dl.main.%s AT (VERSION => getvariable('%s')::BIGINT)) a\nJOIN (SELECT * FROM dl.main.%s AT (VERSION => getvariable('%s')::BIGINT)) b USING (bucket)\nJOIN (SELECT * FROM dl.main.%s AT (VERSION => getvariable('%s')::BIGINT)) c ON c.id = a.id\nJOIN (SELECT * FROM dl.main.%s AT (VERSION => getvariable('%s')::BIGINT)) d ON d.table_index <> a.table_index AND d.id = b.id\nWHERE a.id %% 97 = %s AND b.id %% 89 = %s" "$sep" "$table_a" "$snapshot_var" "$table_b" "$snapshot_var" "$table_c" "$snapshot_var" "$table_d" "$snapshot_var" "$((group % 97))" "$((group % 89))"
+            printf "%sSELECT count(*) join_count, coalesce(sum(a.amount + b.amount + c.amount + d.amount), 0) join_amount\nFROM (SELECT * FROM dl.main.%s AT (VERSION => getvariable('%s')::BIGINT)) a\nJOIN (SELECT * FROM dl.main.%s AT (VERSION => getvariable('%s')::BIGINT)) b ON b.id = a.id AND b.bucket = a.bucket\nJOIN (SELECT * FROM dl.main.%s AT (VERSION => getvariable('%s')::BIGINT)) c ON c.id = a.id\nJOIN (SELECT * FROM dl.main.%s AT (VERSION => getvariable('%s')::BIGINT)) d ON d.table_index <> a.table_index AND d.id = b.id\nWHERE a.id %% 97 = %s AND b.id %% 89 = %s" "$sep" "$table_a" "$snapshot_var" "$table_b" "$snapshot_var" "$table_c" "$snapshot_var" "$table_d" "$snapshot_var" "$((group % 97))" "$((group % 89))"
         else
-            printf "%sSELECT count(*) join_count, coalesce(sum(a.amount + b.amount + c.amount + d.amount), 0) join_amount\nFROM dl.main.%s a\nJOIN dl.main.%s b USING (bucket)\nJOIN dl.main.%s c ON c.id = a.id\nJOIN dl.main.%s d ON d.table_index <> a.table_index AND d.id = b.id\nWHERE a.id %% 97 = %s AND b.id %% 89 = %s" "$sep" "$table_a" "$table_b" "$table_c" "$table_d" "$((group % 97))" "$((group % 89))"
+            printf "%sSELECT count(*) join_count, coalesce(sum(a.amount + b.amount + c.amount + d.amount), 0) join_amount\nFROM dl.main.%s a\nJOIN dl.main.%s b ON b.id = a.id AND b.bucket = a.bucket\nJOIN dl.main.%s c ON c.id = a.id\nJOIN dl.main.%s d ON d.table_index <> a.table_index AND d.id = b.id\nWHERE a.id %% 97 = %s AND b.id %% 89 = %s" "$sep" "$table_a" "$table_b" "$table_c" "$table_d" "$((group % 97))" "$((group % 89))"
         fi
         sep=$'\nUNION ALL\n'
     done
@@ -259,28 +268,72 @@ SQL
 }
 
 varied_churn_sql() {
-    local count="$1" rows="$2" rounds="$3" round table table_name start_id delete_id update_id span
-    cat <<SQL
+    local count="$1" rows="$2" rounds="$3" mode="${4:-all}" tables_per_transaction="${5:-10}"
+    local round table table_name start_id delete_id update_id span
+    local has_mutations=0
+    if [[ "$mode" == "all" || "$mode" == "mutate" || "$mode" == "insert" || "$mode" == "update" || "$mode" == "delete" ]]; then
+        has_mutations=1
+    fi
+    if [[ "$mode" == "all" || "$mode" == "time_travel" || "$mode" == "join_time_travel" ]]; then
+        cat <<SQL
 SET VARIABLE varied_before_churn = (SELECT id FROM ducklake_current_snapshot('dl'));
 SQL
+    fi
     for ((round = 0; round < rounds; round++)); do
         for ((table = 0; table < count; table++)); do
+            if ((has_mutations == 1 && table % tables_per_transaction == 0)); then
+                printf 'BEGIN TRANSACTION;\n'
+            fi
             table_name="$(realistic_table_name "$table")"
             span=$((5 + ((round + table) % 16)))
             start_id=$((rows + 1000 + round * 100000 + table * 100))
             delete_id=$((5 + ((round + table) % 31)))
             update_id=$((40 + ((round * 7 + table) % 53)))
-            realistic_row_sql "$table" "$start_id" "$((start_id + span))"
-            cat <<SQL
+            if [[ "$mode" == "all" || "$mode" == "mutate" || "$mode" == "insert" ]]; then
+                realistic_row_sql "$table" "$start_id" "$((start_id + span))"
+            fi
+            if [[ "$mode" == "all" || "$mode" == "mutate" || "$mode" == "update" ]]; then
+                cat <<SQL
 UPDATE dl.main.$table_name SET amount = amount + $((round + 1)), bucket = CASE WHEN bucket = 'a' THEN 'b' ELSE bucket END WHERE id = $update_id;
+SQL
+            fi
+            if [[ "$mode" == "all" || "$mode" == "mutate" || "$mode" == "delete" ]]; then
+                cat <<SQL
 DELETE FROM dl.main.$table_name WHERE id IN ($delete_id, $((delete_id + 1)));
 SQL
+            fi
+            if ((has_mutations == 1 && ((table + 1) % tables_per_transaction == 0 || table + 1 == count))); then
+                printf 'COMMIT;\n'
+            fi
         done
-        varied_join_query_sql "$count"
+        if [[ "$mode" == "all" ]]; then
+            varied_join_query_sql "$count"
+            cat <<SQL
+SELECT 'varied_memory_usage_bytes_round_$round=' || coalesce(sum(memory_usage_bytes), 0)
+FROM duckdb_memory();
+SELECT 'varied_object_cache_bytes_round_$round=' || coalesce(sum(memory_usage_bytes), 0)
+FROM duckdb_memory()
+WHERE tag = 'OBJECT_CACHE';
+SELECT 'varied_external_file_cache_blocks_round_$round=' || count(*)
+FROM duckdb_external_file_cache();
+SQL
+        fi
     done
-    realistic_latest_query_sql "$count"
-    realistic_time_travel_query_sql "$count" "varied_before_churn"
-    varied_join_query_sql "$count" "varied_before_churn"
+    if [[ "$mode" == "all" ]]; then
+        realistic_latest_query_sql "$count"
+        realistic_time_travel_query_sql "$count" "varied_before_churn"
+        varied_join_query_sql "$count" "varied_before_churn"
+    elif [[ "$mode" == "latest" ]]; then
+        realistic_latest_query_sql "$count"
+    elif [[ "$mode" == "time_travel" ]]; then
+        realistic_time_travel_query_sql "$count" "varied_before_churn"
+    elif [[ "$mode" == "join" ]]; then
+        varied_join_query_sql "$count"
+    elif [[ "$mode" == "join_time_travel" ]]; then
+        varied_join_query_sql "$count" "varied_before_churn"
+    else
+        printf "SELECT 'varied_churn_component=%s';\n" "$mode"
+    fi
 }
 
 realistic_inline_sql() {
@@ -392,12 +445,18 @@ SQL
 }
 
 realistic_compaction_sql() {
-    local count="$1" table table_name
+    local count="$1"
+    local batch_size="${2:-$(default_varied_tables_per_transaction "$count")}"
+    local table table_name
     for ((table = 0; table < count; table++)); do
+        if ((table % batch_size == 0)); then
+            printf 'BEGIN TRANSACTION;\n'
+        fi
         table_name="$(realistic_table_name "$table")"
-        cat <<SQL
-CALL ducklake_merge_adjacent_files('dl', '$table_name');
-SQL
+        printf "CALL ducklake_merge_adjacent_files('dl', '%s');\n" "$table_name"
+        if (((table + 1) % batch_size == 0 || table + 1 == count)); then
+            printf 'COMMIT;\n'
+        fi
     done
     realistic_latest_query_sql "$count"
 }

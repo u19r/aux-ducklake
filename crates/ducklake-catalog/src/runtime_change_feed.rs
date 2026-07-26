@@ -2,11 +2,11 @@ use crate::{
     CatalogId, CatalogOrderId, CatalogOrderKind, CatalogResult, DataFileChangeKind, DataFileId,
     DataFileRow, DeleteFileRow, DeleteScanFile, DuckLakeSnapshotId, OrderedCatalogKv,
     RangeDirection, TableId,
-    inline_data::inline_table_flushes_ending_at,
     keys::{data_file_begin_prefix, data_file_begin_scan_end, data_file_key},
-    list_data_file_changes, list_data_files, list_snapshots, list_table_deletion_scan_files,
+    list_data_file_changes, list_snapshots, list_table_deletion_scan_files,
     runtime_snapshot_range::{ChangeFeedEndSnapshot, ChangeFeedStartSnapshot},
     runtime_snapshots::{public_snapshot_order_span, public_snapshot_sequences_by_order},
+    snapshot_operations::{SnapshotOperationKind, snapshot_operation_table_ids_at},
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -120,10 +120,15 @@ pub fn insertion_files(
             rows.insert(row.data_file_id, row);
         }
     }
-    for row in list_data_files(kv, catalog)?
-        .into_iter()
-        .filter(|row| row.table_id == table_id && row.max_partial_order.is_some())
-    {
+    for item in kv.scan_prefix(
+        &data_file_begin_prefix(catalog, table_id),
+        RangeDirection::Forward,
+        usize::MAX,
+    )? {
+        let row = data_file_from_begin_index_item(kv, catalog, table_id, &item.key, &item.value)?;
+        if row.max_partial_order.is_none() {
+            continue;
+        }
         if insertion_file_overlaps_window(&row, start_order, end_order) {
             rows.insert(row.data_file_id, row);
         }
@@ -192,7 +197,10 @@ fn is_flushed_inline_file(
     table_id: TableId,
     order: CatalogOrderId,
 ) -> CatalogResult<bool> {
-    Ok(inline_table_flushes_ending_at(kv, catalog, order)?.contains(&table_id))
+    Ok(
+        snapshot_operation_table_ids_at(kv, catalog, order, SnapshotOperationKind::InlineFlush)?
+            .contains(&table_id),
+    )
 }
 
 fn decode_data_file_id(bytes: &[u8]) -> CatalogResult<DataFileId> {

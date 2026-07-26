@@ -1,36 +1,60 @@
 #[cfg(test)]
 mod tests {
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+    };
+
     use crate::{
         CatalogId, CatalogOrderId, ColumnDrop, ColumnId, DataFileId, DataFileRow, DeleteFileId,
         DeleteFileRow, DuckLakeSnapshotId, FakeOrderedCatalogKv, InlineFileDeletionRow,
         InlineRowChangeKind, InlineTableFlush, InlinedTableRow, KvBatch, MacroId,
-        MacroImplementationRow, MacroRow, RawSnapshotSequence, SchemaId, SchemaRow, SnapshotRow,
-        SnapshotTimestampBound, TableColumnRow, TableId, TablePartitionChange,
-        TablePartitionFieldRow, TablePartitionRow, TableRow, ValidityWindow,
-        commit_append_data_files, commit_append_data_files_with_inline_flushes,
-        commit_append_table_columns, commit_change_table_partition, commit_create_macro_rows,
-        commit_create_schema_rows, commit_create_table_row, commit_drop_table_columns,
-        commit_inline_file_deletions, commit_register_delete_files,
+        MacroImplementationRow, MacroRow, OrderedCatalogKv, RangeDirection, RangeItem,
+        RawSnapshotSequence, SchemaId, SchemaRow, SnapshotRow, SnapshotTimestampBound,
+        TableColumnRow, TableId, TablePartitionChange, TablePartitionFieldRow, TablePartitionRow,
+        TableRow, ValidityWindow, commit_append_data_files,
+        commit_append_data_files_with_inline_flushes, commit_append_table_columns,
+        commit_change_table_partition, commit_create_macro_rows, commit_create_schema_rows,
+        commit_create_table_row, commit_drop_table_columns, commit_inline_file_deletions,
+        commit_register_delete_files,
         conflict::write_data_file_change,
         data_file_store::stage_append_data_file,
         expire_snapshots, initialize_catalog_if_absent,
         inline_change_feed::stage_inline_row_change,
         keys::{
-            order_delete_file_change_key, schema_object_key, table_delete_file_change_key,
-            table_object_key,
+            KeyFamily, conflict_max_catalog_id_key, conflict_max_file_id_key, family_prefix,
+            inline_table_change_prefix, order_delete_file_change_key,
+            order_delete_file_change_prefix, schema_object_key, snapshot_data_file_change_prefix,
+            snapshot_timestamp_prefix, table_delete_file_change_key, table_object_key,
         },
         latest_snapshot, public_snapshot_sequence_for_order,
         register_inline_table_payload_with_table,
         runtime_catalog_snapshot::{conflict_snapshot_payload, public_snapshot_payload},
-        snapshot_operations::{SnapshotOperationKind, stage_snapshot_operation},
+        schema_version_state::stage_next_schema_version,
+        snapshot_operations::{
+            SnapshotOperationKind, snapshot_operation_prefix, stage_snapshot_operation,
+        },
         store::stage_snapshot,
     };
 
     use super::super::{
-        ListSnapshotsPayload, SnapshotReadContext, list_snapshots_payload,
-        snapshot_by_ducklake_sequence, snapshot_by_public_sequence, snapshot_changes_after_payload,
-        snapshot_changes_made, snapshot_schema_version, snapshot_schema_versions_by_order,
+        ListSnapshotsPayload, SnapshotMetadataChangeIndex, SnapshotReadContext,
+        catalog_schema_change_orders, list_snapshots_payload, snapshot_by_ducklake_sequence,
+        snapshot_by_public_sequence, snapshot_changes_after_payload, snapshot_changes_made,
+        snapshot_schema_version, snapshot_schema_versions_by_order,
     };
+
+    #[test]
+    fn given_snapshot_context_when_cloned_then_loaded_facts_are_shared() {
+        let catalog = CatalogId(1);
+        let mut kv = FakeOrderedCatalogKv::new();
+        initialize_catalog_if_absent(&mut kv, catalog).unwrap();
+        let context = SnapshotReadContext::for_current_catalog(&kv, catalog).unwrap();
+
+        let cloned = context.clone();
+
+        assert!(context.shares_loaded_facts_with(&cloned));
+    }
 
     #[test]
     fn given_snapshot_context_when_selecting_by_timestamp_then_bounds_use_loaded_snapshots() {
@@ -176,6 +200,55 @@ mod tests {
     }
 
     #[test]
+    fn given_many_equivalent_table_versions_when_indexing_schema_changes_then_work_stays_bounded() {
+        let version_count = 5_000;
+        let tables = (0..version_count)
+            .map(|version| {
+                let begin = CatalogOrderId::uuid_v7(version);
+                let mut table = table_with_columns(TableId(1), "events", begin);
+                table.validity = ValidityWindow::new(
+                    begin,
+                    (version + 1 < version_count).then(|| CatalogOrderId::uuid_v7(version + 1)),
+                );
+                table
+            })
+            .collect::<Vec<_>>();
+        let initial_order = tables[0].validity.begin_order;
+
+        let changes = catalog_schema_change_orders(&[], &tables, &[], &[]);
+
+        assert_eq!(changes, [initial_order].into_iter().collect());
+    }
+
+    #[test]
+    fn given_many_equivalent_table_versions_when_rendering_changes_then_work_stays_bounded() {
+        let catalog = CatalogId(1);
+        let kv = FakeOrderedCatalogKv::new();
+        let version_count = 5_000;
+        let tables = (0..version_count)
+            .map(|version| {
+                let begin = CatalogOrderId::uuid_v7(version);
+                let mut table = table_with_columns(TableId(1), "events", begin);
+                table.validity = ValidityWindow::new(
+                    begin,
+                    (version + 1 < version_count).then(|| CatalogOrderId::uuid_v7(version + 1)),
+                );
+                table
+            })
+            .collect::<Vec<_>>();
+        let metadata = SnapshotMetadataChangeIndex::new(&[], &tables, &[], &[]);
+
+        for version in 1..version_count {
+            assert!(
+                metadata
+                    .changes_at(&kv, catalog, CatalogOrderId::uuid_v7(version))
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
     fn given_added_and_removed_files_without_delete_evidence_when_getting_snapshot_changes_then_reports_merge_adjacent()
      {
         let catalog = CatalogId(1);
@@ -286,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn given_rewrite_removes_file_with_prior_delete_evidence_when_getting_snapshot_changes_then_reports_rewrite_delete()
+    fn given_rewrite_has_only_historical_delete_evidence_when_getting_snapshot_changes_then_requires_explicit_rewrite_marker()
      {
         let catalog = CatalogId(1);
         let table_id = TableId(10);
@@ -341,7 +414,7 @@ mod tests {
 
         let changes = snapshot_changes_made(&kv, catalog, rewrite_order).unwrap();
 
-        assert_eq!(changes, "rewrite_delete:10");
+        assert_eq!(changes, "merge_adjacent:10");
     }
 
     #[test]
@@ -435,10 +508,16 @@ mod tests {
         )
         .unwrap();
         let flush_snapshot = latest_snapshot(&kv, catalog).unwrap().unwrap();
+        let kv = EndOrderScanRecordingKv::new(kv, catalog);
 
         assert_eq!(
             snapshot_changes_made(&kv, catalog, flush_snapshot.order).unwrap(),
             "flushed_inlined:10"
+        );
+        assert_eq!(
+            kv.end_order_scan_count(),
+            0,
+            "flush classification must use the order-first snapshot operation index"
         );
     }
 
@@ -1082,6 +1161,121 @@ mod tests {
     }
 
     #[test]
+    fn given_latest_public_snapshot_when_resolving_then_snapshot_history_is_not_scanned() {
+        let catalog = CatalogId(1);
+        let mut inner = FakeOrderedCatalogKv::new();
+        initialize_catalog_if_absent(&mut inner, catalog).unwrap();
+        commit_create_table_row(
+            &mut inner,
+            catalog,
+            table_with_columns(TableId(10), "orders", CatalogOrderId::uuid_v7(0)),
+        )
+        .unwrap();
+        let latest = latest_snapshot(&inner, catalog).unwrap().unwrap();
+        let kv = SnapshotTimestampScanRecordingKv::new(inner, catalog);
+
+        let public =
+            snapshot_by_public_sequence(&kv, catalog, DuckLakeSnapshotId(latest.sequence.0))
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(public, latest);
+        assert_eq!(kv.snapshot_timestamp_scan_count(), 0);
+    }
+
+    #[test]
+    fn given_latest_ducklake_snapshot_when_resolving_then_snapshot_history_is_not_scanned() {
+        let catalog = CatalogId(1);
+        let mut inner = FakeOrderedCatalogKv::new();
+        initialize_catalog_if_absent(&mut inner, catalog).unwrap();
+        commit_create_table_row(
+            &mut inner,
+            catalog,
+            table_with_columns(TableId(10), "orders", CatalogOrderId::uuid_v7(0)),
+        )
+        .unwrap();
+        let latest = latest_snapshot(&inner, catalog).unwrap().unwrap();
+        let kv = SnapshotTimestampScanRecordingKv::new(inner, catalog);
+
+        let resolved =
+            snapshot_by_ducklake_sequence(&kv, catalog, DuckLakeSnapshotId(latest.sequence.0))
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(resolved, latest);
+        assert_eq!(kv.snapshot_timestamp_scan_count(), 0);
+    }
+
+    #[test]
+    fn given_older_ducklake_snapshot_when_resolving_then_latest_raw_snapshot_in_group_is_used() {
+        let catalog = CatalogId(1);
+        let mut inner = FakeOrderedCatalogKv::new();
+        initialize_catalog_if_absent(&mut inner, catalog).unwrap();
+        stage_table_snapshot(&mut inner, catalog, 10, TableId(1), "orders", 1);
+        stage_data_snapshot(&mut inner, catalog, 20, 1, DataFileId(20), TableId(1));
+        stage_table_snapshot(&mut inner, catalog, 30, TableId(2), "returns", 2);
+        let kv = SnapshotTimestampScanRecordingKv::new(inner, catalog);
+
+        let resolved = snapshot_by_ducklake_sequence(&kv, catalog, DuckLakeSnapshotId(1))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(resolved.order, CatalogOrderId::uuid_v7(20));
+        assert_eq!(
+            kv.snapshot_timestamp_scan_count(),
+            1,
+            "historical DuckLake snapshots fall back to the canonical snapshot context in tests"
+        );
+    }
+
+    #[test]
+    fn given_older_coalesced_public_snapshot_when_resolving_then_canonical_mapping_is_used() {
+        let catalog = CatalogId(1);
+        let table_id = TableId(10);
+        let mut inner = FakeOrderedCatalogKv::new();
+        initialize_catalog_if_absent(&mut inner, catalog).unwrap();
+        commit_create_table_row(
+            &mut inner,
+            catalog,
+            table_with_columns(table_id, "orders", CatalogOrderId::uuid_v7(0)),
+        )
+        .unwrap();
+        commit_change_table_partition(
+            &mut inner,
+            catalog,
+            &TablePartitionChange::new(table_id, Some(identity_partition(ColumnId(1)))),
+            Some(RawSnapshotSequence(1)),
+        )
+        .unwrap();
+        let coalesced_order = latest_snapshot(&inner, catalog).unwrap().unwrap().order;
+        commit_create_schema_rows(
+            &mut inner,
+            catalog,
+            vec![SchemaRow::new(
+                SchemaId(20),
+                "archive-uuid",
+                "archive",
+                "archive/",
+                CatalogOrderId::uuid_v7(0),
+            )],
+        )
+        .unwrap();
+        let kv = SnapshotTimestampScanRecordingKv::new(inner, catalog);
+
+        let public = snapshot_by_public_sequence(&kv, catalog, DuckLakeSnapshotId(1))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(public.order, coalesced_order);
+        assert_eq!(public.sequence, RawSnapshotSequence(1));
+        assert_eq!(
+            kv.snapshot_timestamp_scan_count(),
+            1,
+            "historical public snapshots must use the canonical coalescing context"
+        );
+    }
+
+    #[test]
     fn given_inline_file_delete_after_append_when_mapping_public_snapshots_then_delete_stays_separate()
      {
         let catalog = CatalogId(1);
@@ -1216,6 +1410,49 @@ mod tests {
     }
 
     #[test]
+    fn given_snapshot_history_when_rendering_all_snapshots_then_change_indexes_and_watermarks_are_loaded_once()
+     {
+        let catalog = CatalogId(1);
+        let mut inner = FakeOrderedCatalogKv::new();
+        initialize_catalog_if_absent(&mut inner, catalog).unwrap();
+        stage_table_snapshot(&mut inner, catalog, 10, TableId(1), "orders", 1);
+        stage_data_snapshot(&mut inner, catalog, 20, 2, DataFileId(20), TableId(1));
+        stage_data_snapshot(&mut inner, catalog, 30, 3, DataFileId(21), TableId(1));
+        let mut watermarks = KvBatch::new();
+        watermarks.put(
+            conflict_max_catalog_id_key(catalog),
+            1_u64.to_be_bytes().to_vec(),
+        );
+        watermarks.put(
+            conflict_max_file_id_key(catalog),
+            21_u64.to_be_bytes().to_vec(),
+        );
+        inner.commit(watermarks).unwrap();
+        let kv = SnapshotRenderReadRecordingKv::new(inner, catalog);
+
+        let payload = String::from_utf8(
+            list_snapshots_payload(
+                &kv,
+                catalog,
+                ListSnapshotsPayload {
+                    older_than_micros: None,
+                    requested_ducklake_ids: None,
+                    protect_latest: false,
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(payload.contains("snapshot_count=4"), "{payload}");
+        assert_eq!(kv.data_change_scans.get(), 1);
+        assert_eq!(kv.delete_change_scans.get(), 1);
+        assert_eq!(kv.inline_change_scans.get(), 1);
+        assert_eq!(kv.operation_scans.get(), 1);
+        assert_eq!(kv.watermark_batch_gets.get(), 1);
+    }
+
+    #[test]
     fn given_concurrent_data_commits_reuse_proposed_snapshot_then_public_snapshots_stay_separate() {
         let catalog = CatalogId(1);
         let mut kv = FakeOrderedCatalogKv::new();
@@ -1263,6 +1500,197 @@ mod tests {
         assert_eq!(file_snapshot, Some(DuckLakeSnapshotId(2)));
     }
 
+    struct SnapshotTimestampScanRecordingKv {
+        inner: FakeOrderedCatalogKv,
+        snapshot_timestamp_prefix: Vec<u8>,
+        snapshot_timestamp_scans: Rc<RefCell<usize>>,
+    }
+
+    struct EndOrderScanRecordingKv {
+        inner: FakeOrderedCatalogKv,
+        end_order_prefix: Vec<u8>,
+        end_order_scans: Rc<RefCell<usize>>,
+    }
+
+    struct SnapshotRenderReadRecordingKv {
+        inner: FakeOrderedCatalogKv,
+        data_change_prefix: Vec<u8>,
+        delete_change_prefix: Vec<u8>,
+        inline_change_prefix: Vec<u8>,
+        operation_prefix: Vec<u8>,
+        watermark_keys: [Vec<u8>; 2],
+        data_change_scans: Cell<usize>,
+        delete_change_scans: Cell<usize>,
+        inline_change_scans: Cell<usize>,
+        operation_scans: Cell<usize>,
+        watermark_batch_gets: Cell<usize>,
+    }
+
+    impl SnapshotRenderReadRecordingKv {
+        fn new(inner: FakeOrderedCatalogKv, catalog: CatalogId) -> Self {
+            Self {
+                inner,
+                data_change_prefix: snapshot_data_file_change_prefix(catalog),
+                delete_change_prefix: order_delete_file_change_prefix(catalog),
+                inline_change_prefix: inline_table_change_prefix(catalog),
+                operation_prefix: snapshot_operation_prefix(catalog),
+                watermark_keys: [
+                    conflict_max_catalog_id_key(catalog),
+                    conflict_max_file_id_key(catalog),
+                ],
+                data_change_scans: Cell::new(0),
+                delete_change_scans: Cell::new(0),
+                inline_change_scans: Cell::new(0),
+                operation_scans: Cell::new(0),
+                watermark_batch_gets: Cell::new(0),
+            }
+        }
+
+        fn record_scan(&self, key: &[u8]) {
+            for (prefix, count) in [
+                (&self.data_change_prefix, &self.data_change_scans),
+                (&self.delete_change_prefix, &self.delete_change_scans),
+                (&self.inline_change_prefix, &self.inline_change_scans),
+                (&self.operation_prefix, &self.operation_scans),
+            ] {
+                if key.starts_with(prefix) {
+                    count.set(count.get().saturating_add(1));
+                }
+            }
+        }
+    }
+
+    impl OrderedCatalogKv for SnapshotRenderReadRecordingKv {
+        fn get(&self, key: &[u8]) -> crate::CatalogResult<Option<Vec<u8>>> {
+            OrderedCatalogKv::get(&self.inner, key)
+        }
+
+        fn batch_get(&self, keys: &[Vec<u8>]) -> crate::CatalogResult<Vec<Option<Vec<u8>>>> {
+            if keys == self.watermark_keys {
+                self.watermark_batch_gets
+                    .set(self.watermark_batch_gets.get().saturating_add(1));
+            }
+            OrderedCatalogKv::batch_get(&self.inner, keys)
+        }
+
+        fn scan_prefix(
+            &self,
+            prefix: &[u8],
+            direction: RangeDirection,
+            limit: usize,
+        ) -> crate::CatalogResult<Vec<RangeItem>> {
+            self.record_scan(prefix);
+            OrderedCatalogKv::scan_prefix(&self.inner, prefix, direction, limit)
+        }
+
+        fn scan_range(
+            &self,
+            start: &[u8],
+            end: &[u8],
+            direction: RangeDirection,
+            limit: usize,
+        ) -> crate::CatalogResult<Vec<RangeItem>> {
+            self.record_scan(start);
+            OrderedCatalogKv::scan_range(&self.inner, start, end, direction, limit)
+        }
+
+        fn read_conflict_fence(&self, key: &[u8]) -> crate::CatalogResult<Option<Vec<u8>>> {
+            OrderedCatalogKv::read_conflict_fence(&self.inner, key)
+        }
+    }
+
+    impl EndOrderScanRecordingKv {
+        fn new(inner: FakeOrderedCatalogKv, catalog: CatalogId) -> Self {
+            Self {
+                inner,
+                end_order_prefix: family_prefix(catalog, KeyFamily::EndOrder),
+                end_order_scans: Rc::new(RefCell::new(0)),
+            }
+        }
+
+        fn end_order_scan_count(&self) -> usize {
+            *self.end_order_scans.borrow()
+        }
+    }
+
+    impl OrderedCatalogKv for EndOrderScanRecordingKv {
+        fn get(&self, key: &[u8]) -> crate::CatalogResult<Option<Vec<u8>>> {
+            OrderedCatalogKv::get(&self.inner, key)
+        }
+
+        fn scan_prefix(
+            &self,
+            prefix: &[u8],
+            direction: RangeDirection,
+            limit: usize,
+        ) -> crate::CatalogResult<Vec<RangeItem>> {
+            if prefix == self.end_order_prefix.as_slice() {
+                *self.end_order_scans.borrow_mut() += 1;
+            }
+            OrderedCatalogKv::scan_prefix(&self.inner, prefix, direction, limit)
+        }
+
+        fn scan_range(
+            &self,
+            start: &[u8],
+            end: &[u8],
+            direction: RangeDirection,
+            limit: usize,
+        ) -> crate::CatalogResult<Vec<RangeItem>> {
+            OrderedCatalogKv::scan_range(&self.inner, start, end, direction, limit)
+        }
+
+        fn read_conflict_fence(&self, key: &[u8]) -> crate::CatalogResult<Option<Vec<u8>>> {
+            OrderedCatalogKv::read_conflict_fence(&self.inner, key)
+        }
+    }
+
+    impl SnapshotTimestampScanRecordingKv {
+        fn new(inner: FakeOrderedCatalogKv, catalog: CatalogId) -> Self {
+            Self {
+                inner,
+                snapshot_timestamp_prefix: snapshot_timestamp_prefix(catalog),
+                snapshot_timestamp_scans: Rc::new(RefCell::new(0)),
+            }
+        }
+
+        fn snapshot_timestamp_scan_count(&self) -> usize {
+            *self.snapshot_timestamp_scans.borrow()
+        }
+    }
+
+    impl OrderedCatalogKv for SnapshotTimestampScanRecordingKv {
+        fn get(&self, key: &[u8]) -> crate::CatalogResult<Option<Vec<u8>>> {
+            OrderedCatalogKv::get(&self.inner, key)
+        }
+
+        fn scan_prefix(
+            &self,
+            prefix: &[u8],
+            direction: RangeDirection,
+            limit: usize,
+        ) -> crate::CatalogResult<Vec<RangeItem>> {
+            if prefix == self.snapshot_timestamp_prefix.as_slice() {
+                *self.snapshot_timestamp_scans.borrow_mut() += 1;
+            }
+            OrderedCatalogKv::scan_prefix(&self.inner, prefix, direction, limit)
+        }
+
+        fn scan_range(
+            &self,
+            start: &[u8],
+            end: &[u8],
+            direction: RangeDirection,
+            limit: usize,
+        ) -> crate::CatalogResult<Vec<RangeItem>> {
+            OrderedCatalogKv::scan_range(&self.inner, start, end, direction, limit)
+        }
+
+        fn read_conflict_fence(&self, key: &[u8]) -> crate::CatalogResult<Option<Vec<u8>>> {
+            OrderedCatalogKv::read_conflict_fence(&self.inner, key)
+        }
+    }
+
     fn table_with_columns(table_id: TableId, name: &str, begin_order: CatalogOrderId) -> TableRow {
         TableRow::with_catalog_metadata(
             table_id,
@@ -1300,11 +1728,9 @@ mod tests {
         let mut table = table_with_columns(table_id, name, order);
         table.validity = ValidityWindow::new(order, None);
         let mut batch = KvBatch::new();
-        stage_snapshot(
-            &mut batch,
-            catalog,
-            &SnapshotRow::new(order, crate::RawSnapshotSequence(sequence)),
-        );
+        let snapshot = SnapshotRow::new(order, crate::RawSnapshotSequence(sequence));
+        stage_snapshot(&mut batch, catalog, &snapshot);
+        stage_next_schema_version(kv, &mut batch, catalog, &snapshot).unwrap();
         batch.put(table_object_key(catalog, table_id, order), table.encode());
         kv.commit(batch).unwrap();
     }
@@ -1326,11 +1752,9 @@ mod tests {
             order,
         );
         let mut batch = KvBatch::new();
-        stage_snapshot(
-            &mut batch,
-            catalog,
-            &SnapshotRow::new(order, crate::RawSnapshotSequence(sequence)),
-        );
+        let snapshot = SnapshotRow::new(order, crate::RawSnapshotSequence(sequence));
+        stage_snapshot(&mut batch, catalog, &snapshot);
+        stage_next_schema_version(kv, &mut batch, catalog, &snapshot).unwrap();
         batch.put(
             schema_object_key(catalog, schema_id, order),
             schema.encode(),
@@ -1353,11 +1777,9 @@ mod tests {
         table.path = format!("{}/{}", schema_id.0, name);
         table.validity = ValidityWindow::new(order, None);
         let mut batch = KvBatch::new();
-        stage_snapshot(
-            &mut batch,
-            catalog,
-            &SnapshotRow::new(order, crate::RawSnapshotSequence(sequence)),
-        );
+        let snapshot = SnapshotRow::new(order, crate::RawSnapshotSequence(sequence));
+        stage_snapshot(&mut batch, catalog, &snapshot);
+        stage_next_schema_version(kv, &mut batch, catalog, &snapshot).unwrap();
         batch.put(table_object_key(catalog, table_id, order), table.encode());
         kv.commit(batch).unwrap();
     }

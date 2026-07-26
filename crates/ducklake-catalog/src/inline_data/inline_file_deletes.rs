@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::runtime_metrics::RuntimeMetricStage;
 #[cfg(feature = "runtime-metrics")]
 use crate::runtime_metrics::record_runtime_method_elapsed;
 use crate::{
@@ -18,33 +19,6 @@ use crate::{
 };
 
 const MAX_FILE_SCOPED_INLINE_DELETION_PREFIX_SCANS: usize = 8;
-
-#[cfg(feature = "runtime-metrics")]
-#[derive(Clone, Copy)]
-struct RuntimeMetricStage(std::time::Instant);
-
-#[cfg(not(feature = "runtime-metrics"))]
-#[derive(Clone, Copy)]
-struct RuntimeMetricStage;
-
-impl RuntimeMetricStage {
-    #[inline]
-    fn start() -> Self {
-        #[cfg(feature = "runtime-metrics")]
-        {
-            Self(std::time::Instant::now())
-        }
-        #[cfg(not(feature = "runtime-metrics"))]
-        {
-            Self
-        }
-    }
-
-    #[cfg(feature = "runtime-metrics")]
-    fn elapsed_micros(self) -> u64 {
-        u64::try_from(self.0.elapsed().as_micros()).unwrap_or(u64::MAX)
-    }
-}
 
 #[cfg(feature = "runtime-metrics")]
 fn record_inline_file_deletes_stage(operation: &'static str, started: RuntimeMetricStage) {
@@ -267,6 +241,17 @@ pub(crate) fn list_inline_file_deletion_rows_for_data_files_at(
 ) -> CatalogResult<Vec<InlineFileDeletionRow>> {
     if data_file_ids.is_empty() {
         return Ok(Vec::new());
+    }
+    if crate::store::runtime_read_context_enabled() {
+        return Ok(
+            crate::runtime_read_context::InlineDeletionReadContext::for_table(
+                kv, catalog, table_id,
+            )?
+            .rows_at(snapshot_order)
+            .into_iter()
+            .filter(|row| data_file_ids.contains(&row.data_file_id))
+            .collect(),
+        );
     }
     if data_file_ids.len() > MAX_FILE_SCOPED_INLINE_DELETION_PREFIX_SCANS {
         return Ok(list_inline_file_deletion_rows_for_table_at(

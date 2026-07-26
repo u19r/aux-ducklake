@@ -1,21 +1,25 @@
 use super::*;
-use std::{cell::Cell, collections::BTreeSet};
+use std::{
+    cell::Cell,
+    collections::BTreeSet,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use crate::{
     CatalogError, CatalogId, CatalogOrderId, CatalogResult, ColumnId, CommitAttemptRow,
     DataMutationCommit, DeleteFileId, FakeOrderedCatalogKv, FileColumnStatsRow,
-    FoundationDbErrorClass, InlineFileDeletionRow, InlineTableFlush, KvBatch, PartitionKeyIndex,
-    RangeDirection, RangeItem, RawSnapshotSequence, SchemaId, SnapshotRow, TableId,
-    commit_append_data_files, commit_create_table, commit_inline_file_deletions,
+    FoundationDbErrorClass, InlineFileDeletionRow, InlineTableFlush, KvBatch, RangeDirection,
+    RangeItem, RawSnapshotSequence, SchemaId, SnapshotRow, TableId, TableRow,
+    commit_append_data_files, commit_inline_file_deletions,
     conflict::commit_attempt_key,
     data_mutation_intents::DeleteFileMaterialization,
     fdb_versionstamp::incomplete_order,
     keys::{
-        KeyFamily, current_data_file_key, current_table_row_prefix, data_file_key, family_prefix,
-        inline_file_deletion_file_prefix, inline_file_deletion_table_prefix,
-        latest_snapshot_row_key,
+        KeyFamily, data_file_key, family_prefix, inline_file_deletion_file_prefix,
+        inline_file_deletion_table_prefix,
     },
     kv::OrderedCatalogKv,
+    latest_snapshot, list_current_data_files,
     store::stage_snapshot,
 };
 
@@ -50,6 +54,82 @@ fn maybe_committed_recovery_without_attempt_id_or_row_returns_none() {
     assert_eq!(
         recover_committed_mutation(&kv, catalog, Some(CommitAttemptId(99))).unwrap(),
         None
+    );
+}
+
+#[test]
+fn given_retry_allocates_new_ids_when_recovery_identity_matches_then_first_mutation_is_reused() {
+    if std::env::var("AUX_DUCKLAKE_FDB_LIVE").as_deref() != Ok("1") {
+        eprintln!("skipping live FoundationDB test; set AUX_DUCKLAKE_FDB_LIVE=1 to enable");
+        return;
+    }
+    let catalog = CatalogId(8_801);
+    let table = TableId(1);
+    let recovery_attempt_id = CommitAttemptId(0x00112233445566778899aabbccddeeff);
+    let prefix = format!(
+        "aux-ducklake-test/reallocated-retry/{}/{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let kv = FdbOrderedCatalogKv::open_default_with_prefix(prefix.into_bytes()).unwrap();
+    kv.initialize_catalog_if_absent_versionstamped(catalog)
+        .unwrap();
+    kv.create_table_versionstamped(
+        catalog,
+        TableRow::with_catalog_metadata(
+            table,
+            SchemaId(0),
+            "events-uuid",
+            "events",
+            "main/events/",
+            Vec::new(),
+            CatalogOrderId::uuid_v7(0),
+        ),
+        None,
+    )
+    .unwrap();
+    let table_order = latest_snapshot(&kv, catalog).unwrap().unwrap().order;
+    let mutation = |file_id, attempt_id| {
+        kv.commit_data_mutation_versionstamped_with_inline_file_deletions_and_stats(
+            catalog,
+            FdbMutationAttempt {
+                proposed_snapshot: Some(CommitAttemptId(attempt_id)),
+                recovery: Some(recovery_attempt_id),
+            },
+            crate::SnapshotCommitMetadata::default(),
+            FdbDataMutation {
+                data_files: vec![
+                    DataFileRow::new(
+                        DataFileId(file_id),
+                        table,
+                        "main/events/retry.parquet",
+                        4,
+                        512,
+                        table_order,
+                    )
+                    .with_row_id_start(0),
+                ],
+                ..FdbDataMutation::default()
+            },
+            FdbMutationReadContext::default(),
+        )
+    };
+
+    let first = mutation(10, 2).unwrap();
+    let recovered = mutation(11, 3).unwrap();
+    let committed_file_id = first.data_files[0].data_file_id;
+
+    assert_eq!(recovered, DataMutationCommit::default());
+    assert_eq!(
+        list_current_data_files(&kv, catalog, table)
+            .unwrap()
+            .iter()
+            .map(|file| file.data_file_id)
+            .collect::<Vec<_>>(),
+        vec![committed_file_id]
     );
 }
 
@@ -116,40 +196,6 @@ fn mutation_snapshot_sequence_without_commit_snapshot_id_uses_next_catalog_seque
         mutation_snapshot_sequence(&kv, catalog, None).unwrap(),
         crate::RawSnapshotSequence(8)
     );
-}
-
-#[test]
-fn given_current_table_index_when_rejecting_missing_tables_then_current_table_scan_is_not_used() {
-    let catalog = CatalogId(88);
-    let mut inner = FakeOrderedCatalogKv::new();
-    crate::initialize_catalog_if_absent(&mut inner, catalog).unwrap();
-    commit_create_table(&mut inner, catalog, TableId(1), "target").unwrap();
-    commit_create_table(&mut inner, catalog, TableId(2), "other").unwrap();
-    let kv = CurrentTableScanRejectingKv::new(inner, catalog);
-
-    reject_missing_current_tables(
-        &kv,
-        catalog,
-        &[
-            DataFileRow::new(
-                DataFileId(10),
-                TableId(1),
-                "main/target/file.parquet",
-                1,
-                128,
-                CatalogOrderId::uuid_v7(0),
-            ),
-            DataFileRow::new(
-                DataFileId(11),
-                TableId(2),
-                "main/other/file.parquet",
-                1,
-                128,
-                CatalogOrderId::uuid_v7(0),
-            ),
-        ],
-    )
-    .unwrap();
 }
 
 #[test]
@@ -309,6 +355,7 @@ fn mutation_recovery_attempt_id_distinguishes_concurrent_commits_for_same_snapsh
         },
         &[],
         &[],
+        &FdbInlineMutation::default(),
     );
     let second = mutation_recovery_attempt_id(
         snapshot,
@@ -326,6 +373,7 @@ fn mutation_recovery_attempt_id_distinguishes_concurrent_commits_for_same_snapsh
         },
         &[],
         &[],
+        &FdbInlineMutation::default(),
     );
 
     assert_ne!(first, second);
@@ -348,6 +396,7 @@ fn mutation_recovery_attempt_id_distinguishes_inline_flushes_for_same_snapshot()
         },
         &[],
         &[],
+        &FdbInlineMutation::default(),
     );
     let second = mutation_recovery_attempt_id(
         snapshot,
@@ -362,9 +411,34 @@ fn mutation_recovery_attempt_id_distinguishes_inline_flushes_for_same_snapshot()
         },
         &[],
         &[],
+        &FdbInlineMutation::default(),
     );
 
     assert_ne!(first, second);
+}
+
+#[test]
+fn mutation_recovery_attempt_id_distinguishes_inline_rows_for_same_snapshot() {
+    let snapshot = Some(CommitAttemptId(7));
+    let recovery_id = |payload: &[u8]| {
+        mutation_recovery_attempt_id(
+            snapshot,
+            &crate::SnapshotCommitMetadata::default(),
+            &FdbDataMutation::default(),
+            &[],
+            &[],
+            &FdbInlineMutation {
+                payloads: vec![crate::fdb_inline_tables::InlineTablePayload {
+                    table_id: TableId(1),
+                    schema_id: crate::SchemaId(1),
+                    payload: payload.to_vec(),
+                }],
+                ..FdbInlineMutation::default()
+            },
+        )
+    };
+
+    assert_ne!(recovery_id(b"row\t0\ts:61"), recovery_id(b"row\t0\ts:62"));
 }
 
 #[test]
@@ -406,6 +480,7 @@ fn mutation_recovery_attempt_id_distinguishes_stats_and_inline_deletes_for_same_
         },
         &[],
         &[],
+        &FdbInlineMutation::default(),
     );
     let second = mutation_recovery_attempt_id(
         snapshot,
@@ -433,6 +508,7 @@ fn mutation_recovery_attempt_id_distinguishes_stats_and_inline_deletes_for_same_
         },
         &[],
         &[],
+        &FdbInlineMutation::default(),
     );
 
     assert_ne!(first, second);
@@ -672,45 +748,6 @@ fn given_materialized_inline_context_when_loaded_then_inline_discovery_reuses_da
     assert_eq!(replaced.len(), 1);
     assert_eq!(kv.data_file_gets(), 0);
     assert_eq!(kv.data_file_batch_gets(), 0);
-}
-
-#[test]
-fn given_multiple_dropped_files_when_validating_currentness_then_current_index_reads_are_batched() {
-    let catalog = CatalogId(88);
-    let table = TableId(1);
-    let mut inner = FakeOrderedCatalogKv::new();
-    let initial = crate::initialize_catalog_if_absent(&mut inner, catalog).unwrap();
-    let rows = commit_append_data_files(
-        &mut inner,
-        catalog,
-        vec![
-            DataFileRow::new(
-                DataFileId(3),
-                table,
-                "main/t/first.parquet",
-                3,
-                552,
-                initial.order,
-            )
-            .with_row_id_start(0),
-            DataFileRow::new(
-                DataFileId(4),
-                table,
-                "main/t/second.parquet",
-                3,
-                553,
-                initial.order,
-            )
-            .with_row_id_start(3),
-        ],
-    )
-    .unwrap();
-    let kv = CurrentDataFileReadCountingKv::new(inner, catalog, table);
-
-    reject_dropping_non_current_data_files(&kv, catalog, &rows).unwrap();
-
-    assert_eq!(kv.current_data_file_gets(), 0);
-    assert_eq!(kv.current_data_file_batch_gets(), 1);
 }
 
 #[test]
@@ -989,208 +1026,12 @@ fn final_error_keeps_non_exhausted_and_non_retryable_errors_unchanged() {
     );
 }
 
-#[test]
-fn many_file_and_partition_metadata_rows_are_rejected_before_commit() {
-    let catalog = CatalogId(88);
-    let table = TableId(44);
-    let snapshot = SnapshotRow::new(incomplete_order(), crate::RawSnapshotSequence(1));
-    let data_files = (0..7_000)
-        .map(|index| {
-            DataFileRow::new(
-                DataFileId(index),
-                table,
-                format!("s3://warehouse/table/file-{index:05}.parquet"),
-                10,
-                1_024,
-                incomplete_order(),
-            )
-        })
-        .collect::<Vec<_>>();
-    let partition_values = data_files
-        .iter()
-        .map(|row| {
-            FilePartitionValueRow::new(
-                row.data_file_id,
-                table,
-                PartitionKeyIndex(0),
-                format!("region-{file_id:05}", file_id = row.data_file_id.0),
-            )
-        })
-        .collect::<Vec<_>>();
-
-    let estimated_bytes = estimate_mutation_metadata_bytes(
-        catalog,
-        &snapshot,
-        Some(CommitAttemptId(99)),
-        &data_files,
-        &[],
-        &partition_values,
-        &[],
-    );
-
-    assert!(estimated_bytes > FdbOrderedCatalogKv::MAX_COMMIT_BYTES);
-    assert!(reject_estimated_mutation(estimated_bytes).is_err());
-}
-
-#[test]
-fn mutation_metadata_estimate_accepts_borrowed_delete_materialization_rows() {
-    let catalog = CatalogId(88);
-    let table = TableId(44);
-    let snapshot = SnapshotRow::new(incomplete_order(), crate::RawSnapshotSequence(1));
-    let data_files = vec![DataFileRow::new(
-        DataFileId(10),
-        table,
-        "s3://warehouse/table/file-00010.parquet",
-        10,
-        1_024,
-        incomplete_order(),
-    )];
-    let delete_files = [DeleteFileRow::new(
-        DeleteFileId(20),
-        DataFileId(10),
-        "s3://warehouse/table/delete-00020.parquet",
-        1,
-        512,
-        incomplete_order(),
-    )];
-    let materializations = delete_files
-        .iter()
-        .cloned()
-        .map(DeleteFileMaterialization::historical_delete_file)
-        .collect::<Vec<_>>();
-
-    let slice_estimate = estimate_mutation_metadata_bytes(
-        catalog,
-        &snapshot,
-        Some(CommitAttemptId(99)),
-        &data_files,
-        delete_files.iter(),
-        &[],
-        &[],
-    );
-    let materialization_estimate = estimate_mutation_metadata_bytes(
-        catalog,
-        &snapshot,
-        Some(CommitAttemptId(99)),
-        &data_files,
-        materializations.iter().map(DeleteFileMaterialization::row),
-        &[],
-        &[],
-    );
-
-    assert_eq!(slice_estimate, materialization_estimate);
-}
-
-#[test]
-fn partition_estimate_data_file_lookup_uses_map_without_changing_first_match_behavior() {
-    let table = TableId(44);
-    let data_files = vec![
-        DataFileRow::new(
-            DataFileId(10),
-            table,
-            "s3://warehouse/table/first.parquet",
-            10,
-            1_024,
-            incomplete_order(),
-        ),
-        DataFileRow::new(
-            DataFileId(10),
-            table,
-            "s3://warehouse/table/duplicate.parquet",
-            10,
-            1_024,
-            incomplete_order(),
-        ),
-        DataFileRow::new(
-            DataFileId(11),
-            table,
-            "s3://warehouse/table/other.parquet",
-            10,
-            1_024,
-            incomplete_order(),
-        ),
-    ];
-
-    let lookup = PartitionEstimateDataFileLookup::new(&data_files, 32);
-
-    assert!(lookup.uses_map());
-    assert_eq!(
-        lookup.get(DataFileId(10)).map(|row| row.path.as_str()),
-        Some("s3://warehouse/table/first.parquet")
-    );
-}
-
-struct CurrentTableScanRejectingKv {
-    inner: FakeOrderedCatalogKv,
-    current_table_prefix: Vec<u8>,
-    latest_snapshot_key: Vec<u8>,
-}
-
-impl CurrentTableScanRejectingKv {
-    fn new(inner: FakeOrderedCatalogKv, catalog: CatalogId) -> Self {
-        Self {
-            inner,
-            current_table_prefix: current_table_row_prefix(catalog),
-            latest_snapshot_key: latest_snapshot_row_key(catalog),
-        }
-    }
-}
-
-impl OrderedCatalogKv for CurrentTableScanRejectingKv {
-    fn get(&self, key: &[u8]) -> crate::CatalogResult<Option<Vec<u8>>> {
-        assert_ne!(
-            key, self.latest_snapshot_key,
-            "indexed data mutation table validation should not read the latest snapshot row"
-        );
-        OrderedCatalogKv::get(&self.inner, key)
-    }
-
-    fn batch_get(&self, keys: &[Vec<u8>]) -> crate::CatalogResult<Vec<Option<Vec<u8>>>> {
-        OrderedCatalogKv::batch_get(&self.inner, keys)
-    }
-
-    fn scan_prefix(
-        &self,
-        prefix: &[u8],
-        direction: RangeDirection,
-        limit: usize,
-    ) -> crate::CatalogResult<Vec<RangeItem>> {
-        assert_ne!(
-            prefix, self.current_table_prefix,
-            "data mutation table validation should not scan all current tables"
-        );
-        OrderedCatalogKv::scan_prefix(&self.inner, prefix, direction, limit)
-    }
-
-    fn scan_range(
-        &self,
-        start: &[u8],
-        end: &[u8],
-        direction: RangeDirection,
-        limit: usize,
-    ) -> crate::CatalogResult<Vec<RangeItem>> {
-        OrderedCatalogKv::scan_range(&self.inner, start, end, direction, limit)
-    }
-
-    fn read_conflict_fence(&self, key: &[u8]) -> crate::CatalogResult<Option<Vec<u8>>> {
-        OrderedCatalogKv::read_conflict_fence(&self.inner, key)
-    }
-}
-
 struct InlineDeletionScanCountingKv {
     inner: FakeOrderedCatalogKv,
     inline_deletion_table_prefix: Vec<u8>,
     inline_deletion_file_prefixes: BTreeSet<Vec<u8>>,
     inline_deletion_table_scans: Cell<usize>,
     inline_deletion_file_scans: Cell<usize>,
-}
-
-struct CurrentDataFileReadCountingKv {
-    inner: FakeOrderedCatalogKv,
-    first_current_data_file_key: Vec<u8>,
-    second_current_data_file_key: Vec<u8>,
-    current_data_file_gets: Cell<usize>,
-    current_data_file_batch_gets: Cell<usize>,
 }
 
 struct DataFileReadCountingKv {
@@ -1232,74 +1073,6 @@ impl OrderedCatalogKv for DataFileReadCountingKv {
         if keys.iter().any(|key| key == &self.data_file_key) {
             self.data_file_batch_gets
                 .set(self.data_file_batch_gets.get().saturating_add(1));
-        }
-        OrderedCatalogKv::batch_get(&self.inner, keys)
-    }
-
-    fn scan_prefix(
-        &self,
-        prefix: &[u8],
-        direction: RangeDirection,
-        limit: usize,
-    ) -> crate::CatalogResult<Vec<RangeItem>> {
-        OrderedCatalogKv::scan_prefix(&self.inner, prefix, direction, limit)
-    }
-
-    fn scan_range(
-        &self,
-        start: &[u8],
-        end: &[u8],
-        direction: RangeDirection,
-        limit: usize,
-    ) -> crate::CatalogResult<Vec<RangeItem>> {
-        OrderedCatalogKv::scan_range(&self.inner, start, end, direction, limit)
-    }
-
-    fn read_conflict_fence(&self, key: &[u8]) -> crate::CatalogResult<Option<Vec<u8>>> {
-        OrderedCatalogKv::read_conflict_fence(&self.inner, key)
-    }
-}
-
-impl CurrentDataFileReadCountingKv {
-    fn new(inner: FakeOrderedCatalogKv, catalog: CatalogId, table: TableId) -> Self {
-        Self {
-            inner,
-            first_current_data_file_key: current_data_file_key(catalog, table, DataFileId(3)),
-            second_current_data_file_key: current_data_file_key(catalog, table, DataFileId(4)),
-            current_data_file_gets: Cell::new(0),
-            current_data_file_batch_gets: Cell::new(0),
-        }
-    }
-
-    fn current_data_file_gets(&self) -> usize {
-        self.current_data_file_gets.get()
-    }
-
-    fn current_data_file_batch_gets(&self) -> usize {
-        self.current_data_file_batch_gets.get()
-    }
-
-    fn is_tracked_current_data_file_key(&self, key: &[u8]) -> bool {
-        key == self.first_current_data_file_key || key == self.second_current_data_file_key
-    }
-}
-
-impl OrderedCatalogKv for CurrentDataFileReadCountingKv {
-    fn get(&self, key: &[u8]) -> crate::CatalogResult<Option<Vec<u8>>> {
-        if self.is_tracked_current_data_file_key(key) {
-            self.current_data_file_gets
-                .set(self.current_data_file_gets.get().saturating_add(1));
-        }
-        OrderedCatalogKv::get(&self.inner, key)
-    }
-
-    fn batch_get(&self, keys: &[Vec<u8>]) -> crate::CatalogResult<Vec<Option<Vec<u8>>>> {
-        if keys
-            .iter()
-            .any(|key| self.is_tracked_current_data_file_key(key))
-        {
-            self.current_data_file_batch_gets
-                .set(self.current_data_file_batch_gets.get().saturating_add(1));
         }
         OrderedCatalogKv::batch_get(&self.inner, keys)
     }

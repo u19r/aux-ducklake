@@ -54,6 +54,72 @@ pub struct CatalogRecoveryScenario {
     pub retry_path: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogScaleMaintenanceScenario {
+    pub catalog_id: u64,
+    pub first_table_id: u64,
+    pub first_data_file_id: u64,
+    pub attempt_id: u128,
+    pub table_count: usize,
+    pub partitions_per_table: usize,
+    pub path_prefix: String,
+    pub partition_value_prefix: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogScaleFile {
+    pub table_id: u64,
+    pub data_file_id: u64,
+    pub path: String,
+    pub partition_value: String,
+    pub expires: bool,
+}
+
+impl CatalogScaleMaintenanceScenario {
+    pub fn for_client(profile: &str, client_id: i32) -> Self {
+        let client = client_id.max(0) as u64;
+        let first_table_id = 50_001 + client.saturating_mul(100);
+        let first_data_file_id = 5_000_001 + client.saturating_mul(1_000);
+        Self {
+            catalog_id: 1,
+            first_table_id,
+            first_data_file_id,
+            attempt_id: u128::from(first_data_file_id),
+            table_count: 4,
+            partitions_per_table: 4,
+            path_prefix: format!("sim-{profile}-client-{client}-scale"),
+            partition_value_prefix: format!("tenant-{client}"),
+        }
+    }
+
+    pub fn files(&self) -> Vec<CatalogScaleFile> {
+        (0..self.table_count)
+            .flat_map(|table_offset| {
+                (0..self.partitions_per_table).map(move |partition_offset| {
+                    let ordinal = table_offset * self.partitions_per_table + partition_offset;
+                    CatalogScaleFile {
+                        table_id: self.first_table_id + table_offset as u64,
+                        data_file_id: self.first_data_file_id + ordinal as u64,
+                        path: format!(
+                            "{}-table-{table_offset}-partition-{partition_offset}.parquet",
+                            self.path_prefix
+                        ),
+                        partition_value: format!(
+                            "{}-table-{table_offset}-partition-{partition_offset}",
+                            self.partition_value_prefix
+                        ),
+                        expires: partition_offset == 0,
+                    }
+                })
+            })
+            .collect()
+    }
+
+    pub fn expected_remaining_files_per_table(&self) -> usize {
+        self.partitions_per_table.saturating_sub(1)
+    }
+}
+
 impl CatalogRecoveryScenario {
     pub fn for_client(profile: &str, client_id: i32) -> Self {
         let client = client_id.max(0) as u64;
@@ -163,68 +229,5 @@ pub fn require_no_retry_publication<T>(files: &[T]) -> Result<(), String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn scenario_is_deterministic_per_profile_and_client() {
-        let first = CatalogSmokeScenario::for_client("smoke", 3);
-        let second = CatalogSmokeScenario::for_client("smoke", 3);
-
-        assert_eq!(first, second);
-        assert_eq!(first.catalog_id, 1);
-        assert_eq!(first.table_id, 4);
-        assert!(first.first_path.contains("client-3"));
-    }
-
-    #[test]
-    fn retry_publication_must_be_empty() {
-        assert!(require_no_retry_publication::<u8>(&[]).is_ok());
-        assert!(require_no_retry_publication(&[1]).is_err());
-    }
-
-    #[test]
-    fn expire_scenario_uses_distinct_table_and_attempt_space() {
-        let smoke = CatalogSmokeScenario::for_client("smoke", 0);
-        let expire = CatalogExpireScenario::for_client("smoke", 0);
-
-        assert_ne!(smoke.table_id, expire.table_id);
-        assert_ne!(smoke.first_attempt_id, expire.attempt_id);
-        assert!(expire.path.contains("expire"));
-    }
-
-    #[test]
-    fn cleanup_scenario_uses_distinct_table_and_attempt_space() {
-        let expire = CatalogExpireScenario::for_client("smoke", 0);
-        let cleanup = CatalogCleanupScenario::for_client("smoke", 0);
-
-        assert_ne!(expire.table_id, cleanup.table_id);
-        assert_ne!(expire.attempt_id, cleanup.attempt_id);
-        assert!(cleanup.path.contains("cleanup"));
-    }
-
-    #[test]
-    fn read_age_scenario_forces_multiple_scan_transactions() {
-        let scenario = CatalogReadAgeScenario::for_client("smoke", 0);
-
-        assert!(scenario.file_count > scenario.scan_chunk_size);
-        assert_eq!(scenario.minimum_scan_transactions(), 4);
-    }
-
-    #[test]
-    fn bounded_scan_requires_minimum_transaction_count() {
-        assert!(require_bounded_scan_transactions(4, 4).is_ok());
-        assert!(require_bounded_scan_transactions(3, 4).is_err());
-    }
-
-    #[test]
-    fn recovery_scenario_uses_distinct_table_and_attempt_space() {
-        let read_age = CatalogReadAgeScenario::for_client("smoke", 0);
-        let recovery = CatalogRecoveryScenario::for_client("smoke", 0);
-
-        assert_ne!(read_age.table_id, recovery.table_id);
-        assert_ne!(read_age.attempt_id, recovery.attempt_id);
-        assert!(recovery.first_path.contains("unknown-outcome-first"));
-        assert!(recovery.retry_path.contains("unknown-outcome-retry"));
-    }
-}
+#[path = "lib_tests.rs"]
+mod tests;

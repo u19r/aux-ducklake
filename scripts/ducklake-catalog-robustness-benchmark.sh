@@ -144,4 +144,6 @@ for scenario in "${inline_scenarios[@]}"; do
     write_artifact
 done
 
+jq -e '.summary.completed_scenario_count == .summary.scenario_count' "$output" >/dev/null ||
+    fail "one or more robustness scenarios failed; see $output"
 echo "ducklake_catalog_robustness_benchmark_artifact=$output"

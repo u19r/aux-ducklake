@@ -14,7 +14,7 @@ use crate::{
     data_mutation_intents::DeleteFileMaterialization,
     file_partitions::{remove_cached_file_partition_values, stage_file_partition_value},
     file_stats::{
-        remove_cached_file_column_stats_for_data_file, stage_file_column_stats,
+        remove_cached_file_column_stats_rows, stage_file_column_stats,
         stage_table_file_stats_versions_for_rows,
     },
     inline_change_feed::{InlineRowChangeKind, list_inline_row_changes},
@@ -253,12 +253,7 @@ pub fn commit_data_mutation_with_details(
     for row in &partition_values {
         remove_cached_file_partition_values(kv, catalog, row.data_file_id);
     }
-    let mut stats_file_ids = BTreeSet::new();
-    for row in &file_column_stats {
-        if stats_file_ids.insert(row.data_file_id) {
-            remove_cached_file_column_stats_for_data_file(kv, catalog, row.data_file_id);
-        }
-    }
+    remove_cached_file_column_stats_rows(kv, catalog, &file_column_stats);
     invalidate_runtime_read_context(catalog);
     Ok(DataMutationCommit {
         data_files,

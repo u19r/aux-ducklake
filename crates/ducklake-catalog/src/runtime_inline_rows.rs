@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 use crate::CatalogCacheNamespace;
 #[cfg(not(test))]
 use crate::bounded_cache::{BoundedCache, static_bounded_cache};
+use crate::runtime_metrics::RuntimeMetricStage;
 use crate::{
     CatalogId, CatalogResult, OrderedCatalogKv, SchemaId, SnapshotRow, TableRow,
     inline_data::{InlineTablePayloadRow, list_unflushed_inline_table_payloads_at},
@@ -13,7 +14,7 @@ use crate::{
 };
 
 #[cfg(feature = "foundationdb")]
-const MAX_INLINE_GLOBAL_STATS_WORKERS: usize = 8;
+const MAX_INLINE_GLOBAL_STATS_WORKERS: usize = 100;
 
 #[derive(Clone)]
 pub(crate) struct ReadInlineRowsPayload {
@@ -130,27 +131,21 @@ fn read_inline_rows_global_stats_batch_chunk(
         return Ok(Vec::new());
     }
     if payloads.len() == 1 {
-        return read_inline_rows_payload_with_stats_request_and_mode(
+        return read_foundationdb_inline_rows_global_stats_exact_payload(
             kv,
             catalog,
             payloads[0].clone(),
-            InlineStatsRequest::Global,
-            InlineStatsMode::ExactVisible,
         );
     }
 
+    let read_context_id = crate::store::active_runtime_read_context_id();
     std::thread::scope(|scope| {
         let mut handles = Vec::with_capacity(payloads.len());
         for payload in payloads.iter().cloned() {
             let kv = kv.clone();
             handles.push(scope.spawn(move || {
-                read_inline_rows_payload_with_stats_request_and_mode(
-                    &kv,
-                    catalog,
-                    payload,
-                    InlineStatsRequest::Global,
-                    InlineStatsMode::ExactVisible,
-                )
+                let _read_request = crate::store::begin_runtime_read_request(read_context_id);
+                read_foundationdb_inline_rows_global_stats_exact_payload(&kv, catalog, payload)
             }));
         }
 
@@ -165,33 +160,6 @@ fn read_inline_rows_global_stats_batch_chunk(
         }
         Ok(out)
     })
-}
-
-#[cfg(feature = "runtime-metrics")]
-#[derive(Clone, Copy)]
-struct RuntimeMetricStage(std::time::Instant);
-
-#[cfg(not(feature = "runtime-metrics"))]
-#[derive(Clone, Copy)]
-struct RuntimeMetricStage;
-
-impl RuntimeMetricStage {
-    #[inline]
-    fn start() -> Self {
-        #[cfg(feature = "runtime-metrics")]
-        {
-            Self(std::time::Instant::now())
-        }
-        #[cfg(not(feature = "runtime-metrics"))]
-        {
-            Self
-        }
-    }
-
-    #[cfg(feature = "runtime-metrics")]
-    fn elapsed_micros(self) -> u64 {
-        u64::try_from(self.0.elapsed().as_micros()).unwrap_or(u64::MAX)
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -336,6 +304,10 @@ pub(crate) fn invalidate_inline_read_context(catalog: CatalogId) {
 pub(crate) fn invalidate_inline_read_context(_catalog: CatalogId) {}
 
 mod change_feed;
+#[cfg(feature = "foundationdb")]
+mod current_stats;
+#[cfg(all(test, feature = "foundationdb"))]
+mod current_stats_tests;
 mod flush_deletions;
 mod flush_partition;
 mod flush_sort;
@@ -346,6 +318,8 @@ mod stats_values;
 mod table_resolution;
 
 pub(crate) use change_feed::*;
+#[cfg(feature = "foundationdb")]
+pub(crate) use current_stats::*;
 pub(crate) use flush_deletions::*;
 use flush_partition::*;
 use flush_sort::*;

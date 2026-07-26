@@ -157,6 +157,7 @@ pub struct CatalogCacheNamespace {
     kind: u8,
     primary: u64,
     secondary: u64,
+    read_context: u64,
 }
 
 impl CatalogCacheNamespace {
@@ -166,6 +167,7 @@ impl CatalogCacheNamespace {
             kind: 0,
             primary: address as u64,
             secondary: 0,
+            read_context: 0,
         }
     }
 
@@ -175,7 +177,20 @@ impl CatalogCacheNamespace {
             kind: 1,
             primary: database_address as u64,
             secondary: key_prefix_hash,
+            read_context: 0,
         }
+    }
+
+    #[must_use]
+    pub(crate) fn with_read_context(mut self, read_context: Option<u64>) -> Self {
+        self.read_context = read_context.unwrap_or_default();
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn without_read_context(mut self) -> Self {
+        self.read_context = 0;
+        self
     }
 }
 
@@ -219,7 +234,7 @@ pub trait MutableCatalogKv: OrderedCatalogKv {
                 .previous
                 .same_user_visible_schema_as(&replacement.next)
         }) {
-            stage_next_schema_version(self, &mut batch, catalog)?;
+            stage_next_schema_version(self, &mut batch, catalog, &snapshot)?;
         } else {
             stage_next_catalog_snapshot_version(self, &mut batch, catalog)?;
         }

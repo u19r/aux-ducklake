@@ -1,0 +1,489 @@
+{
+  "artifact": "ducklake-operational-commit-benchmark",
+  "profile": "operational",
+  "generated_at_micros": 1785163417572592,
+  "elapsed_ms": 118152.447,
+  "trial": null,
+  "order_position": null,
+  "fixture": {
+    "backend": "postgres",
+    "duckdb_build_profile": "release",
+    "commit_iterations": 10,
+    "user_rows_per_commit": 101,
+    "membership_rows_per_commit": 50,
+    "payload_bytes": 800,
+    "data_inlining_row_limit": 100,
+    "validation": "each",
+    "operations": [
+      "create_tables",
+      "insert_file_backed_rows",
+      "update_file_backed_rows",
+      "delete_file_backed_rows",
+      "insert_inline_rows",
+      "delete_inline_rows",
+      "replace_inline_checkpoint"
+    ]
+  },
+  "result": "1001,506910,50,46725,10,1,1",
+  "create_transaction_wall_ms": {
+    "samples": 4,
+    "p50": 426.097,
+    "p90": 442.703,
+    "p99": 442.703,
+    "max": 442.703,
+    "values_ms": [
+      415.964,
+      426.097,
+      434.818,
+      442.703
+    ]
+  },
+  "transaction_wall_ms": {
+    "samples": 40,
+    "p50": 1829.309,
+    "p90": 1859.964,
+    "p99": 1878.088,
+    "max": 1878.088,
+    "values_ms": [
+      505.669,
+      510.519,
+      514.162,
+      531.819,
+      1810.097,
+      1812.149,
+      1815.712,
+      1818.182,
+      1821.224,
+      1821.497,
+      1821.578,
+      1821.866,
+      1822.507,
+      1824.196,
+      1824.803,
+      1826.249,
+      1826.503,
+      1828.325,
+      1829.282,
+      1829.309,
+      1831.146,
+      1832.76,
+      1834.932,
+      1835.616,
+      1841.815,
+      1842.867,
+      1843.039,
+      1843.966,
+      1844.774,
+      1844.943,
+      1845.402,
+      1846.516,
+      1846.77,
+      1847.94,
+      1851.694,
+      1859.964,
+      1860.093,
+      1861.719,
+      1877.361,
+      1878.088
+    ]
+  },
+  "session_command_wall_ms": 29570.497,
+  "accounting": {
+    "scenario_wall_ms": 118152.447,
+    "inside_rust_storage_ms": 0.0,
+    "inside_rust_storage_call_ms": 0.0,
+    "rust_runtime_reported_storage_ms": 0.0,
+    "inside_rust_nested_measurements_ms": 0.0,
+    "inside_rust_fdb_kv_ms": 0.0,
+    "measured_storage_wall_ms": 0.0,
+    "measured_storage_call_ms": 0.0,
+    "duckdb_extension_outside_storage_ms": 118152.447,
+    "unaccounted_wall_ms": 118152.447,
+    "runtime_metric_calls": 0,
+    "fdb_rows_read": 0,
+    "fdb_bytes_read": 0,
+    "scope": "all_operational_trials",
+    "macro_operation_costs": [],
+    "micro_operation_costs": []
+  },
+  "trials": [
+    {
+      "trial": 1,
+      "order_position": 2,
+      "session_command_wall_ms": 29600.27,
+      "create_transaction_wall_ms": 434.818,
+      "transaction_wall_ms": {
+        "samples": 10,
+        "p50": 1832.76,
+        "p90": 1859.964,
+        "p99": 1860.093,
+        "max": 1860.093,
+        "values_ms": [
+          505.669,
+          1812.149,
+          1824.803,
+          1828.325,
+          1832.76,
+          1835.616,
+          1842.867,
+          1846.77,
+          1859.964,
+          1860.093
+        ],
+        "iterations": [
+          {
+            "iteration": 1,
+            "value_ms": 505.669
+          },
+          {
+            "iteration": 2,
+            "value_ms": 1846.77
+          },
+          {
+            "iteration": 3,
+            "value_ms": 1824.803
+          },
+          {
+            "iteration": 4,
+            "value_ms": 1828.325
+          },
+          {
+            "iteration": 5,
+            "value_ms": 1835.616
+          },
+          {
+            "iteration": 6,
+            "value_ms": 1812.149
+          },
+          {
+            "iteration": 7,
+            "value_ms": 1832.76
+          },
+          {
+            "iteration": 8,
+            "value_ms": 1859.964
+          },
+          {
+            "iteration": 9,
+            "value_ms": 1842.867
+          },
+          {
+            "iteration": 10,
+            "value_ms": 1860.093
+          }
+        ]
+      },
+      "accounting": {
+        "duckdb_extension_outside_storage_ms": 29600.27,
+        "fdb_bytes_read": 0,
+        "fdb_rows_read": 0,
+        "inside_rust_fdb_kv_ms": 0.0,
+        "inside_rust_nested_measurements_ms": 0.0,
+        "inside_rust_storage_call_ms": 0.0,
+        "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
+        "measured_storage_call_ms": 0.0,
+        "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
+        "runtime_metric_calls": 0,
+        "rust_runtime_reported_storage_ms": 0.0,
+        "scenario_wall_ms": 29600.27,
+        "scope": "operational_trial_1",
+        "unaccounted_wall_ms": 29600.27
+      }
+    },
+    {
+      "trial": 2,
+      "order_position": 1,
+      "session_command_wall_ms": 29443.427,
+      "create_transaction_wall_ms": 415.964,
+      "transaction_wall_ms": {
+        "samples": 10,
+        "p50": 1829.309,
+        "p90": 1844.774,
+        "p99": 1851.694,
+        "max": 1851.694,
+        "values_ms": [
+          514.162,
+          1815.712,
+          1818.182,
+          1821.497,
+          1829.309,
+          1834.932,
+          1843.039,
+          1843.966,
+          1844.774,
+          1851.694
+        ],
+        "iterations": [
+          {
+            "iteration": 1,
+            "value_ms": 514.162
+          },
+          {
+            "iteration": 2,
+            "value_ms": 1843.039
+          },
+          {
+            "iteration": 3,
+            "value_ms": 1834.932
+          },
+          {
+            "iteration": 4,
+            "value_ms": 1821.497
+          },
+          {
+            "iteration": 5,
+            "value_ms": 1829.309
+          },
+          {
+            "iteration": 6,
+            "value_ms": 1818.182
+          },
+          {
+            "iteration": 7,
+            "value_ms": 1815.712
+          },
+          {
+            "iteration": 8,
+            "value_ms": 1843.966
+          },
+          {
+            "iteration": 9,
+            "value_ms": 1844.774
+          },
+          {
+            "iteration": 10,
+            "value_ms": 1851.694
+          }
+        ]
+      },
+      "accounting": {
+        "duckdb_extension_outside_storage_ms": 29443.427,
+        "fdb_bytes_read": 0,
+        "fdb_rows_read": 0,
+        "inside_rust_fdb_kv_ms": 0.0,
+        "inside_rust_nested_measurements_ms": 0.0,
+        "inside_rust_storage_call_ms": 0.0,
+        "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
+        "measured_storage_call_ms": 0.0,
+        "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
+        "runtime_metric_calls": 0,
+        "rust_runtime_reported_storage_ms": 0.0,
+        "scenario_wall_ms": 29443.427,
+        "scope": "operational_trial_2",
+        "unaccounted_wall_ms": 29443.427
+      }
+    },
+    {
+      "trial": 3,
+      "order_position": 2,
+      "session_command_wall_ms": 29538.253,
+      "create_transaction_wall_ms": 426.097,
+      "transaction_wall_ms": {
+        "samples": 10,
+        "p50": 1824.196,
+        "p90": 1861.719,
+        "p99": 1878.088,
+        "max": 1878.088,
+        "values_ms": [
+          531.819,
+          1821.224,
+          1821.866,
+          1822.507,
+          1824.196,
+          1826.503,
+          1829.282,
+          1846.516,
+          1861.719,
+          1878.088
+        ],
+        "iterations": [
+          {
+            "iteration": 1,
+            "value_ms": 531.819
+          },
+          {
+            "iteration": 2,
+            "value_ms": 1878.088
+          },
+          {
+            "iteration": 3,
+            "value_ms": 1829.282
+          },
+          {
+            "iteration": 4,
+            "value_ms": 1821.224
+          },
+          {
+            "iteration": 5,
+            "value_ms": 1821.866
+          },
+          {
+            "iteration": 6,
+            "value_ms": 1826.503
+          },
+          {
+            "iteration": 7,
+            "value_ms": 1846.516
+          },
+          {
+            "iteration": 8,
+            "value_ms": 1822.507
+          },
+          {
+            "iteration": 9,
+            "value_ms": 1861.719
+          },
+          {
+            "iteration": 10,
+            "value_ms": 1824.196
+          }
+        ]
+      },
+      "accounting": {
+        "duckdb_extension_outside_storage_ms": 29538.253,
+        "fdb_bytes_read": 0,
+        "fdb_rows_read": 0,
+        "inside_rust_fdb_kv_ms": 0.0,
+        "inside_rust_nested_measurements_ms": 0.0,
+        "inside_rust_storage_call_ms": 0.0,
+        "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
+        "measured_storage_call_ms": 0.0,
+        "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
+        "runtime_metric_calls": 0,
+        "rust_runtime_reported_storage_ms": 0.0,
+        "scenario_wall_ms": 29538.253,
+        "scope": "operational_trial_3",
+        "unaccounted_wall_ms": 29538.253
+      }
+    },
+    {
+      "trial": 4,
+      "order_position": 1,
+      "session_command_wall_ms": 29570.497,
+      "create_transaction_wall_ms": 442.703,
+      "transaction_wall_ms": {
+        "samples": 10,
+        "p50": 1831.146,
+        "p90": 1847.94,
+        "p99": 1877.361,
+        "max": 1877.361,
+        "values_ms": [
+          510.519,
+          1810.097,
+          1821.578,
+          1826.249,
+          1831.146,
+          1841.815,
+          1844.943,
+          1845.402,
+          1847.94,
+          1877.361
+        ],
+        "iterations": [
+          {
+            "iteration": 1,
+            "value_ms": 510.519
+          },
+          {
+            "iteration": 2,
+            "value_ms": 1841.815
+          },
+          {
+            "iteration": 3,
+            "value_ms": 1845.402
+          },
+          {
+            "iteration": 4,
+            "value_ms": 1831.146
+          },
+          {
+            "iteration": 5,
+            "value_ms": 1826.249
+          },
+          {
+            "iteration": 6,
+            "value_ms": 1821.578
+          },
+          {
+            "iteration": 7,
+            "value_ms": 1844.943
+          },
+          {
+            "iteration": 8,
+            "value_ms": 1810.097
+          },
+          {
+            "iteration": 9,
+            "value_ms": 1847.94
+          },
+          {
+            "iteration": 10,
+            "value_ms": 1877.361
+          }
+        ]
+      },
+      "accounting": {
+        "duckdb_extension_outside_storage_ms": 29570.497,
+        "fdb_bytes_read": 0,
+        "fdb_rows_read": 0,
+        "inside_rust_fdb_kv_ms": 0.0,
+        "inside_rust_nested_measurements_ms": 0.0,
+        "inside_rust_storage_call_ms": 0.0,
+        "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
+        "measured_storage_call_ms": 0.0,
+        "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
+        "runtime_metric_calls": 0,
+        "rust_runtime_reported_storage_ms": 0.0,
+        "scenario_wall_ms": 29570.497,
+        "scope": "operational_trial_4",
+        "unaccounted_wall_ms": 29570.497
+      }
+    }
+  ],
+  "comparison_method": {
+    "isolated_catalog_per_trial": true,
+    "alternating_backend_order": true
+  },
+  "chronological_growth": {
+    "method": "last decile mean divided by first decile mean within each isolated trial",
+    "trials": [
+      {
+        "trial": 1,
+        "window_samples": 1,
+        "first_decile_mean_ms": 505.669,
+        "last_decile_mean_ms": 1860.093,
+        "last_first_ratio": 3.678479400556491
+      },
+      {
+        "trial": 2,
+        "window_samples": 1,
+        "first_decile_mean_ms": 514.162,
+        "last_decile_mean_ms": 1851.694,
+        "last_first_ratio": 3.601382443665615
+      },
+      {
+        "trial": 3,
+        "window_samples": 1,
+        "first_decile_mean_ms": 531.819,
+        "last_decile_mean_ms": 1824.196,
+        "last_first_ratio": 3.4301068596646602
+      },
+      {
+        "trial": 4,
+        "window_samples": 1,
+        "first_decile_mean_ms": 510.519,
+        "last_decile_mean_ms": 1877.361,
+        "last_first_ratio": 3.6773577477038075
+      }
+    ],
+    "max_last_first_ratio": 3.678479400556491
+  }
+}

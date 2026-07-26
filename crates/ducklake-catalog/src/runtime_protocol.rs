@@ -2,10 +2,10 @@ use crate::{CatalogError, CatalogId, CatalogResult};
 use sha2::{Digest, Sha256};
 
 pub const RUNTIME_PROTOCOL_VERSION: u16 = 2;
-pub const MAX_RUNTIME_REQUEST_BYTES: usize = 1024 * 1024;
+pub const MAX_RUNTIME_REQUEST_BYTES: usize = 6 * 1024 * 1024;
 pub const MAX_RUNTIME_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_RUNTIME_PAGE_PAYLOAD_BYTES: usize = 512 * 1024;
-pub const MAX_RUNTIME_PAYLOAD_BYTES: usize = 900 * 1024;
+pub const MAX_RUNTIME_PAYLOAD_BYTES: usize = MAX_RUNTIME_REQUEST_BYTES - 16 * 1024;
 pub const MAX_RUNTIME_OPERATION_BYTES: usize = 64;
 pub const MAX_RUNTIME_REQUEST_ID_BYTES: usize = 64;
 
@@ -40,6 +40,7 @@ pub struct RuntimeRequest {
     pub catalog_id: CatalogId,
     pub operation: String,
     pub payload: Vec<u8>,
+    pub read_context_id: Option<u64>,
     pub page_offset: usize,
     pub page_etag: Option<String>,
 }
@@ -57,6 +58,7 @@ impl RuntimeRequest {
             catalog_id: CatalogId(1),
             operation: operation.into(),
             payload,
+            read_context_id: None,
             page_offset: 0,
             page_etag: None,
         };
@@ -77,6 +79,12 @@ impl RuntimeRequest {
         Ok(self)
     }
 
+    pub fn with_read_context_id(mut self, read_context_id: u64) -> CatalogResult<Self> {
+        self.read_context_id = Some(read_context_id);
+        self.validate()?;
+        Ok(self)
+    }
+
     pub fn encode(&self) -> CatalogResult<Vec<u8>> {
         self.validate()?;
         let mut header = format!(
@@ -92,6 +100,9 @@ impl RuntimeRequest {
                 "page_offset={}\npage_etag={}\n",
                 self.page_offset, etag
             ));
+        }
+        if let Some(read_context_id) = self.read_context_id {
+            header.push_str(&format!("read_context_id={read_context_id}\n"));
         }
         header.push('\n');
         let mut out = Vec::with_capacity(header.len().saturating_add(self.payload.len()));
@@ -112,6 +123,7 @@ impl RuntimeRequest {
         let mut payload_len = None;
         let mut page_offset = None;
         let mut page_etag = None;
+        let mut read_context_id = None;
         for (index, line) in header.lines().enumerate() {
             if index == 0 {
                 version = Some(parse_magic(line)?);
@@ -126,6 +138,7 @@ impl RuntimeRequest {
                 "payload_len" => payload_len = Some(parse_usize(value, "payload_len")?),
                 "page_offset" => page_offset = Some(parse_usize(value, "page_offset")?),
                 "page_etag" => page_etag = Some(value.to_owned()),
+                "read_context_id" => read_context_id = Some(parse_u64(value, "read_context_id")?),
                 _ => {
                     return Err(CatalogError::Decode(format!(
                         "unknown runtime request header {key}"
@@ -142,6 +155,7 @@ impl RuntimeRequest {
             payload.to_vec(),
         )?
         .with_catalog_id(catalog_id.unwrap_or(CatalogId(1)))?;
+        request.read_context_id = read_context_id;
         match (page_offset, page_etag) {
             (None, None) => Ok(request),
             (Some(offset), Some(etag)) => {
@@ -174,9 +188,7 @@ impl RuntimeRequest {
         )?;
         match (&self.page_etag, self.page_offset) {
             (None, 0) => Ok(()),
-            (Some(etag), offset) if offset > 0 => {
-                validate_hex_token(etag, "runtime page_etag")
-            }
+            (Some(etag), offset) if offset > 0 => validate_hex_token(etag, "runtime page_etag"),
             _ => Err(CatalogError::Decode(
                 "runtime page continuation requires a positive offset and page_etag".to_owned(),
             )),
@@ -227,9 +239,7 @@ impl RuntimeResponse {
             self.payload.len()
         );
         if let (Some(offset), Some(etag)) = (self.next_page_offset, &self.page_etag) {
-            header.push_str(&format!(
-                "next_page_offset={offset}\npage_etag={etag}\n"
-            ));
+            header.push_str(&format!("next_page_offset={offset}\npage_etag={etag}\n"));
         }
         header.push('\n');
         let mut out = Vec::with_capacity(header.len().saturating_add(self.payload.len()));

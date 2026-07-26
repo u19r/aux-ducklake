@@ -17,8 +17,7 @@ use crate::{
     },
     keys::{snapshot_key, snapshot_timestamp_key, view_object_key, view_object_prefix},
     schema_version_state::stage_fdb_next_schema_version,
-    store::{latest_snapshot, stage_fdb_latest_snapshot_value},
-    table_store::list_tables_at,
+    store::{latest_snapshot, stage_fdb_snapshot_indexes},
     view_store::{list_views_at, load_view_at},
 };
 
@@ -38,7 +37,7 @@ impl FdbOrderedCatalogKv {
 
         let trx = self.create_transaction()?;
         stage_snapshot(self, &trx, catalog, &snapshot)?;
-        stage_fdb_next_schema_version(self, &trx, catalog)?;
+        stage_fdb_next_schema_version(self, &trx, catalog, &snapshot)?;
         trx.atomic_op(
             &self.versionstamped_key(
                 &view_object_key(catalog, view.view_id, placeholder),
@@ -143,170 +142,6 @@ impl FdbOrderedCatalogKv {
         Ok(dropped)
     }
 
-    pub(crate) fn change_views_versionstamped_at(
-        &self,
-        catalog: CatalogId,
-        mut created: Vec<ViewRow>,
-        renames: Vec<ViewRename>,
-        dropped_ids: &[TableId],
-        comment_changes: Vec<ViewCommentChange>,
-        commit_raw_snapshot: RawSnapshotSequence,
-    ) -> CatalogResult<()> {
-        if created.is_empty()
-            && renames.is_empty()
-            && dropped_ids.is_empty()
-            && comment_changes.is_empty()
-        {
-            return Ok(());
-        }
-        reject_duplicate_view_ids(dropped_ids)?;
-        reject_duplicate_renames(&renames)?;
-        reject_duplicate_created_views(&created)?;
-        let latest =
-            latest_snapshot(self, catalog)?.ok_or(CatalogError::NotFound("catalog snapshot"))?;
-        let current_views = list_views_at(self, catalog, latest.order)?;
-        let current_tables = list_tables_at(self, catalog, latest.order)?;
-        let current_view_ids = current_views
-            .iter()
-            .map(|view| view.view_id)
-            .collect::<BTreeSet<_>>();
-        let dropped_id_set = dropped_ids.iter().copied().collect::<BTreeSet<_>>();
-
-        let mut current_renames = Vec::new();
-        for rename in renames {
-            if let Some(view) = created
-                .iter_mut()
-                .find(|view| view.view_id == rename.view_id)
-            {
-                view.name = rename.new_name;
-            } else {
-                current_renames.push(rename);
-            }
-        }
-        let mut current_comment_changes = Vec::new();
-        for change in comment_changes {
-            if let Some(view) = created
-                .iter_mut()
-                .find(|view| view.view_id == change.view_id)
-            {
-                view.comment = change.comment;
-            } else if !dropped_id_set.contains(&change.view_id) {
-                current_comment_changes.push(change);
-            }
-        }
-        created.retain(|view| {
-            !dropped_id_set.contains(&view.view_id) || current_view_ids.contains(&view.view_id)
-        });
-        reject_duplicate_created_views(&created)?;
-        reject_created_view_conflicts(&current_views, &current_tables, &created, &dropped_id_set)?;
-
-        let placeholder = incomplete_order();
-        let snapshot = SnapshotRow::new(placeholder, commit_raw_snapshot);
-        let created_view_ids = created
-            .iter()
-            .map(|view| view.view_id)
-            .collect::<BTreeSet<_>>();
-        let mut replacements: BTreeMap<TableId, (ViewRow, Option<ViewRow>)> = BTreeMap::new();
-        for view_id in dropped_ids {
-            if created_view_ids.contains(view_id) && !current_view_ids.contains(view_id) {
-                continue;
-            }
-            let previous = current_views
-                .iter()
-                .find(|view| view.view_id == *view_id)
-                .cloned()
-                .ok_or(CatalogError::NotFound("view"))?;
-            replacements.insert(*view_id, (previous, None));
-        }
-        let mut renamed = Vec::new();
-        for rename in current_renames {
-            let previous = current_views
-                .iter()
-                .find(|view| view.view_id == rename.view_id)
-                .cloned()
-                .ok_or(CatalogError::NotFound("view"))?;
-            if dropped_id_set.contains(&previous.view_id) {
-                return Err(CatalogError::InvalidMutation(format!(
-                    "view {} is both dropped and renamed",
-                    previous.view_id.0
-                )));
-            }
-            reject_view_name_conflict(
-                &current_views,
-                &renamed,
-                &created,
-                &dropped_id_set,
-                &previous,
-                &rename.new_name,
-            )?;
-            let mut next = previous.clone();
-            next.name = rename.new_name;
-            renamed.push(RenamedView {
-                previous: previous.clone(),
-                renamed: next.clone(),
-            });
-            replacements.insert(previous.view_id, (previous, Some(next)));
-        }
-        for change in current_comment_changes {
-            let Some(previous) = current_views
-                .iter()
-                .find(|view| view.view_id == change.view_id)
-                .cloned()
-            else {
-                return Err(CatalogError::NotFound("view"));
-            };
-            let (_, next) = replacements
-                .entry(change.view_id)
-                .or_insert_with(|| (previous.clone(), Some(previous)));
-            let Some(next) = next else {
-                return Err(CatalogError::NotFound("view"));
-            };
-            next.comment = change.comment;
-        }
-
-        let trx = self.create_transaction()?;
-        stage_snapshot(self, &trx, catalog, &snapshot)?;
-        stage_fdb_next_schema_version(self, &trx, catalog)?;
-        for (view_id, (mut previous, next)) in replacements {
-            previous.validity.end_order = Some(placeholder);
-            trx.atomic_op(
-                &self.namespaced_key(&view_object_key(
-                    catalog,
-                    view_id,
-                    previous.validity.begin_order,
-                )),
-                &versionstamped_value(&previous.encode(), ViewRow::END_ORDER_BYTES_OFFSET)?,
-                MutationType::SetVersionstampedValue,
-            );
-            if let Some(mut next) = next {
-                next.validity = ValidityWindow::new(placeholder, None);
-                trx.atomic_op(
-                    &self.versionstamped_key(
-                        &view_object_key(catalog, view_id, placeholder),
-                        view_object_key_order_offset(catalog, view_id),
-                    )?,
-                    &versionstamped_value(&next.encode(), ViewRow::BEGIN_ORDER_BYTES_OFFSET)?,
-                    MutationType::SetVersionstampedKey,
-                );
-                stage_fdb_max_catalog_id_watermark(self, &trx, catalog, view_id.0);
-            }
-        }
-        for view in &mut created {
-            view.validity = ValidityWindow::new(placeholder, None);
-            trx.atomic_op(
-                &self.versionstamped_key(
-                    &view_object_key(catalog, view.view_id, placeholder),
-                    view_object_key_order_offset(catalog, view.view_id),
-                )?,
-                &versionstamped_value(&view.encode(), ViewRow::BEGIN_ORDER_BYTES_OFFSET)?,
-                MutationType::SetVersionstampedKey,
-            );
-            stage_fdb_max_catalog_id_watermark(self, &trx, catalog, view.view_id.0);
-        }
-        block_on(trx.commit()).map_err(map_fdb_commit_error)?;
-        Ok(())
-    }
-
     fn commit_view_replacements(
         &self,
         catalog: CatalogId,
@@ -317,7 +152,7 @@ impl FdbOrderedCatalogKv {
         let snapshot = SnapshotRow::new(placeholder, previous_sequence.next());
         let trx = self.create_transaction()?;
         stage_snapshot(self, &trx, catalog, &snapshot)?;
-        stage_fdb_next_schema_version(self, &trx, catalog)?;
+        stage_fdb_next_schema_version(self, &trx, catalog, &snapshot)?;
         for (view_id, mut previous, next) in replacements {
             previous.validity.end_order = Some(placeholder);
             trx.atomic_op(
@@ -347,7 +182,217 @@ impl FdbOrderedCatalogKv {
     }
 }
 
-fn stage_snapshot(
+#[derive(Default)]
+pub(crate) struct PreparedViewChanges {
+    created: Vec<ViewRow>,
+    replacements: BTreeMap<TableId, (ViewRow, Option<ViewRow>)>,
+}
+
+pub(crate) fn prepare_view_changes(
+    placeholder: crate::CatalogOrderId,
+    mut created: Vec<ViewRow>,
+    renames: Vec<ViewRename>,
+    dropped_ids: &[TableId],
+    comment_changes: Vec<ViewCommentChange>,
+    current_views: &[ViewRow],
+    current_tables: &[crate::TableRow],
+) -> CatalogResult<PreparedViewChanges> {
+    reject_duplicate_view_ids(dropped_ids)?;
+    reject_duplicate_renames(&renames)?;
+    reject_duplicate_created_views(&created)?;
+    let current_view_ids = current_views
+        .iter()
+        .map(|view| view.view_id)
+        .collect::<BTreeSet<_>>();
+    let dropped_id_set = dropped_ids.iter().copied().collect::<BTreeSet<_>>();
+    let mut current_renames = Vec::new();
+    for rename in renames {
+        if let Some(view) = created
+            .iter_mut()
+            .find(|view| view.view_id == rename.view_id)
+        {
+            view.name = rename.new_name;
+        } else {
+            current_renames.push(rename);
+        }
+    }
+    let mut current_comment_changes = Vec::new();
+    for change in comment_changes {
+        if let Some(view) = created
+            .iter_mut()
+            .find(|view| view.view_id == change.view_id)
+        {
+            view.comment = change.comment;
+        } else if !dropped_id_set.contains(&change.view_id) {
+            current_comment_changes.push(change);
+        }
+    }
+    created.retain(|view| {
+        !dropped_id_set.contains(&view.view_id) || current_view_ids.contains(&view.view_id)
+    });
+    reject_duplicate_created_views(&created)?;
+    reject_created_view_conflicts(current_views, current_tables, &created, &dropped_id_set)?;
+    let created_view_ids = created
+        .iter()
+        .map(|view| view.view_id)
+        .collect::<BTreeSet<_>>();
+    let mut replacements = BTreeMap::new();
+    for view_id in dropped_ids {
+        if created_view_ids.contains(view_id) && !current_view_ids.contains(view_id) {
+            continue;
+        }
+        let previous = current_views
+            .iter()
+            .find(|view| view.view_id == *view_id)
+            .cloned()
+            .ok_or(CatalogError::NotFound("view"))?;
+        replacements.insert(*view_id, (previous, None));
+    }
+    let mut renamed = Vec::new();
+    for rename in current_renames {
+        let previous = current_views
+            .iter()
+            .find(|view| view.view_id == rename.view_id)
+            .cloned()
+            .ok_or(CatalogError::NotFound("view"))?;
+        if dropped_id_set.contains(&previous.view_id) {
+            return Err(CatalogError::InvalidMutation(format!(
+                "view {} is both dropped and renamed",
+                previous.view_id.0
+            )));
+        }
+        reject_view_name_conflict(
+            current_views,
+            &renamed,
+            &created,
+            &dropped_id_set,
+            &previous,
+            &rename.new_name,
+        )?;
+        let mut next = previous.clone();
+        next.name = rename.new_name;
+        renamed.push(RenamedView {
+            previous: previous.clone(),
+            renamed: next.clone(),
+        });
+        replacements.insert(previous.view_id, (previous, Some(next)));
+    }
+    for change in current_comment_changes {
+        let Some(previous) = current_views
+            .iter()
+            .find(|view| view.view_id == change.view_id)
+            .cloned()
+        else {
+            return Err(CatalogError::NotFound("view"));
+        };
+        let (_, next) = replacements
+            .entry(change.view_id)
+            .or_insert_with(|| (previous.clone(), Some(previous)));
+        let Some(next) = next else {
+            return Err(CatalogError::NotFound("view"));
+        };
+        next.comment = change.comment;
+    }
+    for view in &mut created {
+        view.validity = ValidityWindow::new(placeholder, None);
+    }
+    for (previous, next) in replacements.values_mut() {
+        previous.validity.end_order = Some(placeholder);
+        if let Some(next) = next {
+            next.validity = ValidityWindow::new(placeholder, None);
+        }
+    }
+    Ok(PreparedViewChanges {
+        created,
+        replacements,
+    })
+}
+
+pub(crate) fn stage_view_changes(
+    kv: &FdbOrderedCatalogKv,
+    trx: &foundationdb::Transaction,
+    catalog: CatalogId,
+    prepared: &PreparedViewChanges,
+) -> CatalogResult<()> {
+    for (view_id, (previous, next)) in &prepared.replacements {
+        trx.atomic_op(
+            &kv.namespaced_key(&view_object_key(
+                catalog,
+                *view_id,
+                previous.validity.begin_order,
+            )),
+            &versionstamped_value(&previous.encode(), ViewRow::END_ORDER_BYTES_OFFSET)?,
+            MutationType::SetVersionstampedValue,
+        );
+        if let Some(next) = next {
+            trx.atomic_op(
+                &kv.versionstamped_key(
+                    &view_object_key(catalog, *view_id, next.validity.begin_order),
+                    view_object_key_order_offset(catalog, *view_id),
+                )?,
+                &versionstamped_value(&next.encode(), ViewRow::BEGIN_ORDER_BYTES_OFFSET)?,
+                MutationType::SetVersionstampedKey,
+            );
+            stage_fdb_max_catalog_id_watermark(kv, trx, catalog, view_id.0);
+        }
+    }
+    for view in &prepared.created {
+        trx.atomic_op(
+            &kv.versionstamped_key(
+                &view_object_key(catalog, view.view_id, view.validity.begin_order),
+                view_object_key_order_offset(catalog, view.view_id),
+            )?,
+            &versionstamped_value(&view.encode(), ViewRow::BEGIN_ORDER_BYTES_OFFSET)?,
+            MutationType::SetVersionstampedKey,
+        );
+        stage_fdb_max_catalog_id_watermark(kv, trx, catalog, view.view_id.0);
+    }
+    Ok(())
+}
+
+pub(crate) fn estimate_view_change_bytes(
+    catalog: CatalogId,
+    snapshot: &SnapshotRow,
+    prepared: &PreparedViewChanges,
+) -> usize {
+    let snapshot_bytes = snapshot_key(catalog, snapshot.order)
+        .len()
+        .saturating_add(snapshot.encode().len())
+        .saturating_add(
+            snapshot_timestamp_key(catalog, snapshot.created_at_micros, snapshot.order).len(),
+        )
+        .saturating_add(8);
+    let replacement_bytes = prepared
+        .replacements
+        .iter()
+        .map(|(view_id, (previous, next))| {
+            let previous_bytes = view_object_key(catalog, *view_id, previous.validity.begin_order)
+                .len()
+                .saturating_add(previous.encode().len());
+            next.as_ref().map_or(previous_bytes, |next| {
+                previous_bytes
+                    .saturating_add(
+                        view_object_key(catalog, *view_id, next.validity.begin_order).len(),
+                    )
+                    .saturating_add(next.encode().len())
+            })
+        })
+        .sum::<usize>();
+    let created_bytes = prepared
+        .created
+        .iter()
+        .map(|view| {
+            view_object_key(catalog, view.view_id, view.validity.begin_order)
+                .len()
+                .saturating_add(view.encode().len())
+        })
+        .sum::<usize>();
+    snapshot_bytes
+        .saturating_add(replacement_bytes)
+        .saturating_add(created_bytes)
+}
+
+pub(crate) fn stage_snapshot(
     kv: &FdbOrderedCatalogKv,
     trx: &foundationdb::Transaction,
     catalog: CatalogId,
@@ -369,7 +414,7 @@ fn stage_snapshot(
         &snapshot.sequence.to_be_bytes(),
         MutationType::SetVersionstampedKey,
     );
-    stage_fdb_latest_snapshot_value(kv, trx, catalog, snapshot)?;
+    stage_fdb_snapshot_indexes(kv, trx, catalog, snapshot)?;
     Ok(())
 }
 
@@ -378,11 +423,9 @@ fn view_object_key_order_offset(catalog: CatalogId, view_id: TableId) -> usize {
 }
 
 fn reject_duplicate_renames(renames: &[ViewRename]) -> CatalogResult<()> {
-    for (index, rename) in renames.iter().enumerate() {
-        if renames[..index]
-            .iter()
-            .any(|prior| prior.view_id == rename.view_id)
-        {
+    let mut unique = BTreeSet::new();
+    for rename in renames {
+        if !unique.insert(rename.view_id) {
             return Err(CatalogError::InvalidMutation(format!(
                 "view {} is listed more than once for rename",
                 rename.view_id.0
@@ -393,8 +436,9 @@ fn reject_duplicate_renames(renames: &[ViewRename]) -> CatalogResult<()> {
 }
 
 fn reject_duplicate_view_ids(view_ids: &[TableId]) -> CatalogResult<()> {
-    for (index, view_id) in view_ids.iter().enumerate() {
-        if view_ids[..index].iter().any(|prior| prior == view_id) {
+    let mut unique = BTreeSet::new();
+    for view_id in view_ids {
+        if !unique.insert(*view_id) {
             return Err(CatalogError::InvalidMutation(format!(
                 "view {} is listed more than once for drop",
                 view_id.0
@@ -405,19 +449,16 @@ fn reject_duplicate_view_ids(view_ids: &[TableId]) -> CatalogResult<()> {
 }
 
 fn reject_duplicate_created_views(views: &[ViewRow]) -> CatalogResult<()> {
-    for (index, view) in views.iter().enumerate() {
-        if views[..index]
-            .iter()
-            .any(|prior| prior.view_id == view.view_id)
-        {
+    let mut ids = BTreeSet::new();
+    let mut names = BTreeSet::new();
+    for view in views {
+        if !ids.insert(view.view_id) {
             return Err(CatalogError::InvalidMutation(format!(
                 "view {} is listed more than once for create",
                 view.view_id.0
             )));
         }
-        if views[..index].iter().any(|prior| {
-            prior.schema_id == view.schema_id && prior.name.eq_ignore_ascii_case(&view.name)
-        }) {
+        if !names.insert((view.schema_id, view.name.to_ascii_lowercase())) {
             return Err(CatalogError::InvalidMutation(format!(
                 "view name {} is listed more than once for create in schema {}",
                 view.name, view.schema_id.0

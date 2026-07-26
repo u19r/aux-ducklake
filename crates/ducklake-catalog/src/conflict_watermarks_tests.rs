@@ -1,10 +1,11 @@
 #[cfg(test)]
 mod tests {
     use crate::{
-        CatalogId, FakeOrderedCatalogKv, KvBatch,
+        CatalogId, FakeOrderedCatalogKv, KvBatch, TableId,
         conflict_watermarks::{
             load_conflict_watermarks, load_max_catalog_id_watermark, load_max_file_id_watermark,
-            stage_max_catalog_id_watermark, stage_max_file_id_watermark,
+            load_table_next_row_ids, stage_max_catalog_id_watermark, stage_max_file_id_watermark,
+            stage_table_next_row_id,
         },
         runtime_catalog_snapshot::conflict_snapshot_watermarks,
     };
@@ -71,5 +72,22 @@ mod tests {
 
         assert_eq!(watermarks.max_catalog_id, Some(41));
         assert_eq!(watermarks.max_file_id, Some(123));
+    }
+
+    #[test]
+    fn given_table_row_id_watermarks_when_batch_loaded_then_missing_tables_default_to_zero() {
+        let catalog = CatalogId(1);
+        let mut kv = FakeOrderedCatalogKv::new();
+        let mut batch = KvBatch::new();
+        stage_table_next_row_id(&kv, &mut batch, catalog, TableId(2), 21).unwrap();
+        stage_table_next_row_id(&kv, &mut batch, catalog, TableId(3), 34).unwrap();
+        kv.commit(batch).unwrap();
+
+        let watermarks =
+            load_table_next_row_ids(&kv, catalog, &[TableId(1), TableId(2), TableId(3)]).unwrap();
+
+        assert_eq!(watermarks.get(&TableId(1)), Some(&0));
+        assert_eq!(watermarks.get(&TableId(2)), Some(&21));
+        assert_eq!(watermarks.get(&TableId(3)), Some(&34));
     }
 }

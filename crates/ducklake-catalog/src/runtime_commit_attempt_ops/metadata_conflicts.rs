@@ -218,46 +218,29 @@ pub(super) fn commit_metadata_intents_with_current_kv(
     reject_view_comment_conflicts(kv, catalog, intent.read_snapshot, &view_comment_changes)?;
     record_commit_attempt_stage("MetadataConflictChecks", started);
     let started = RuntimeMetricStage::start();
-    kv.commit_schema_changes_at(
+    let replaced_tables = kv.commit_metadata_changes(
         catalog,
-        sequence,
-        Some(&intent.commit_metadata),
-        created_schemas,
-        dropped_schema_ids,
+        MetadataCommitChanges {
+            sequence,
+            commit_metadata: Some(intent.commit_metadata.clone()),
+            public_schema_changed,
+            created_schemas,
+            dropped_schema_ids,
+            created_tables: table_changes.created,
+            table_replacements: table_changes.replacements,
+            dropped_table_ids,
+            replacement_tables,
+            created_views,
+            view_renames: view_rename_rows,
+            dropped_view_ids,
+            view_comment_changes,
+        },
     )?;
-    record_commit_attempt_stage("MetadataCommitSchemas", started);
-    let started = RuntimeMetricStage::start();
-    kv.commit_table_changes_at(
-        catalog,
-        sequence,
-        Some(&intent.commit_metadata),
-        table_changes.created,
-        table_changes.replacements,
-    )?;
-    record_commit_attempt_stage("MetadataCommitTables", started);
-    let started = RuntimeMetricStage::start();
-    let replaced_tables = kv.commit_replace_tables_at(
-        catalog,
-        sequence,
-        &dropped_table_ids,
-        replacement_tables,
-        Some(&intent.commit_metadata),
-    )?;
-    record_commit_attempt_stage("MetadataCommitReplacedTables", started);
+    record_commit_attempt_stage("MetadataCommit", started);
     let mut result = result;
     result
         .created_tables
         .extend(replaced_tables.into_iter().map(CreatedTable::unremapped));
-    let started = RuntimeMetricStage::start();
-    kv.commit_view_changes_at(
-        catalog,
-        sequence,
-        created_views,
-        view_rename_rows,
-        dropped_view_ids,
-        view_comment_changes,
-    )?;
-    record_commit_attempt_stage("MetadataCommitViews", started);
     Ok(result)
 }
 
@@ -273,30 +256,24 @@ pub(super) fn reject_schema_create_conflicts(
     }
     let current = list_schemas_at(kv, catalog, latest_order)?;
     let replacement_schemas: BTreeSet<SchemaId> = dropped_schema_ids.iter().copied().collect();
+    let mut schema_ids = current
+        .iter()
+        .filter(|schema| !replacement_schemas.contains(&schema.schema_id))
+        .map(|schema| schema.schema_id)
+        .collect::<BTreeSet<_>>();
+    let mut schema_names = current
+        .iter()
+        .filter(|schema| !replacement_schemas.contains(&schema.schema_id))
+        .map(|schema| schema.name.to_ascii_lowercase())
+        .collect::<BTreeSet<_>>();
     for schema in created_schemas {
-        if current.iter().any(|existing| {
-            existing.schema_id == schema.schema_id
-                && !replacement_schemas.contains(&existing.schema_id)
-        }) || created_schemas
-            .iter()
-            .filter(|candidate| candidate.schema_id == schema.schema_id)
-            .count()
-            > 1
-        {
+        if !schema_ids.insert(schema.schema_id) {
             return Err(CatalogError::InvalidMutation(format!(
                 "conflict creating schema {}: schema id {} already exists",
                 schema.name, schema.schema_id.0
             )));
         }
-        if current.iter().any(|existing| {
-            existing.name.eq_ignore_ascii_case(&schema.name)
-                && !replacement_schemas.contains(&existing.schema_id)
-        }) || created_schemas
-            .iter()
-            .filter(|candidate| candidate.name.eq_ignore_ascii_case(&schema.name))
-            .count()
-            > 1
-        {
+        if !schema_names.insert(schema.name.to_ascii_lowercase()) {
             return Err(CatalogError::InvalidMutation(format!(
                 "conflict creating schema {}: schema name already exists",
                 schema.name

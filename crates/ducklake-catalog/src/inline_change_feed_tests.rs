@@ -1,8 +1,9 @@
 use std::cell::RefCell;
 
 use crate::{
-    CatalogId, CatalogOrderId, DataFileId, DataFileRow, FakeOrderedCatalogKv, KvBatch,
-    OrderedCatalogKv, RangeDirection, RangeItem, SchemaId, TableId,
+    CatalogId, CatalogOrderId, DataFileChangeKind, DataFileId, DataFileRow, FakeOrderedCatalogKv,
+    KvBatch, OrderedCatalogKv, RangeDirection, RangeItem, SchemaId, TableId,
+    conflict::write_data_file_change,
     data_file_store::stage_append_data_file_without_change,
     inline_change_feed::{
         InlineRowChangeKind, insertion_data_files_through,
@@ -94,6 +95,32 @@ fn given_partial_files_when_listing_insertions_then_scan_is_table_bounded() {
         &partial_file(2, other_table, 10, 5),
     )
     .unwrap();
+    stage_append_data_file_without_change(&kv, &mut batch, catalog, &data_file(3, wanted_table, 8))
+        .unwrap();
+    write_data_file_change(
+        &mut batch,
+        catalog,
+        wanted_table,
+        CatalogOrderId::uuid_v7(6),
+        DataFileChangeKind::Added,
+        DataFileId(1),
+    );
+    write_data_file_change(
+        &mut batch,
+        catalog,
+        other_table,
+        CatalogOrderId::uuid_v7(6),
+        DataFileChangeKind::Added,
+        DataFileId(2),
+    );
+    write_data_file_change(
+        &mut batch,
+        catalog,
+        wanted_table,
+        CatalogOrderId::uuid_v7(8),
+        DataFileChangeKind::Added,
+        DataFileId(3),
+    );
     kv.commit(batch).unwrap();
 
     let recording = ScanRecordingKv::new(kv);
@@ -232,4 +259,15 @@ fn partial_file(
     );
     row.max_partial_order = Some(CatalogOrderId::uuid_v7(max_partial_order));
     row
+}
+
+fn data_file(id: u64, table_id: TableId, begin_order: u128) -> DataFileRow {
+    DataFileRow::new(
+        DataFileId(id),
+        table_id,
+        format!("table-{}/file-{id}.parquet", table_id.0),
+        10,
+        128,
+        CatalogOrderId::uuid_v7(begin_order),
+    )
 }

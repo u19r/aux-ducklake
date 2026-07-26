@@ -2,14 +2,16 @@
 mod tests {
     use crate::{
         CatalogId, CatalogOrderId, DataFileId, DataFileRow, FakeOrderedCatalogKv, InlinedTableRow,
-        KvBatch, MutableCatalogKv, TableId, TableRow, TableVersionReplacement, append_data_file,
-        commit_create_table_row,
+        KvBatch, MutableCatalogKv, RawSnapshotSequence, SnapshotRow, TableId, TableRow,
+        TableVersionReplacement, append_data_file, commit_create_table_row,
         keys::{catalog_snapshot_version_key, current_schema_version_key},
         latest_snapshot,
         schema_version_state::{
-            load_catalog_snapshot_version, load_current_schema_version, stage_next_schema_version,
+            load_catalog_snapshot_version, load_current_schema_version,
+            load_schema_version_begin_snapshot, load_schema_versions_at, stage_next_schema_version,
         },
     };
+    use std::collections::BTreeSet;
 
     #[test]
     fn given_schema_version_key_missing_when_staging_next_version_then_version_becomes_one() {
@@ -17,13 +19,18 @@ mod tests {
         let catalog = CatalogId(1);
         let mut batch = KvBatch::new();
 
-        stage_next_schema_version(&kv, &mut batch, catalog).unwrap();
+        let snapshot = SnapshotRow::new(CatalogOrderId::uuid_v7(1), RawSnapshotSequence(7));
+        stage_next_schema_version(&kv, &mut batch, catalog, &snapshot).unwrap();
         kv.commit(batch).unwrap();
 
         assert_eq!(load_current_schema_version(&kv, catalog).unwrap(), Some(1));
         assert_eq!(
             load_catalog_snapshot_version(&kv, catalog).unwrap(),
             Some(1)
+        );
+        assert_eq!(
+            load_schema_version_begin_snapshot(&kv, catalog, 1).unwrap(),
+            Some(crate::DuckLakeSnapshotId(7))
         );
     }
 
@@ -32,11 +39,13 @@ mod tests {
         let mut kv = FakeOrderedCatalogKv::new();
         let catalog = CatalogId(1);
         let mut first = KvBatch::new();
-        stage_next_schema_version(&kv, &mut first, catalog).unwrap();
+        let first_snapshot = SnapshotRow::new(CatalogOrderId::uuid_v7(1), RawSnapshotSequence(7));
+        stage_next_schema_version(&kv, &mut first, catalog, &first_snapshot).unwrap();
         kv.commit(first).unwrap();
 
         let mut second = KvBatch::new();
-        stage_next_schema_version(&kv, &mut second, catalog).unwrap();
+        let second_snapshot = SnapshotRow::new(CatalogOrderId::uuid_v7(2), RawSnapshotSequence(9));
+        stage_next_schema_version(&kv, &mut second, catalog, &second_snapshot).unwrap();
         kv.commit(second).unwrap();
 
         assert_eq!(load_current_schema_version(&kv, catalog).unwrap(), Some(2));
@@ -44,6 +53,35 @@ mod tests {
             load_catalog_snapshot_version(&kv, catalog).unwrap(),
             Some(2)
         );
+    }
+
+    #[test]
+    fn given_multiple_schema_changes_when_loading_requested_orders_then_each_order_uses_preceding_version()
+     {
+        let mut kv = FakeOrderedCatalogKv::new();
+        let catalog = CatalogId(1);
+        for value in [1, 3, 7] {
+            let mut batch = KvBatch::new();
+            let snapshot = SnapshotRow::new(
+                CatalogOrderId::uuid_v7(value),
+                RawSnapshotSequence(value as u64),
+            );
+            stage_next_schema_version(&kv, &mut batch, catalog, &snapshot).unwrap();
+            kv.commit(batch).unwrap();
+        }
+        let requested = [0, 1, 2, 3, 6, 7, 9]
+            .into_iter()
+            .map(CatalogOrderId::uuid_v7)
+            .collect::<BTreeSet<_>>();
+
+        let versions = load_schema_versions_at(&kv, catalog, &requested).unwrap();
+
+        for (order, expected_version) in [(0, 0), (1, 1), (2, 1), (3, 2), (6, 2), (7, 3), (9, 3)] {
+            assert_eq!(
+                versions.get(&CatalogOrderId::uuid_v7(order)),
+                Some(&expected_version)
+            );
+        }
     }
 
     #[test]

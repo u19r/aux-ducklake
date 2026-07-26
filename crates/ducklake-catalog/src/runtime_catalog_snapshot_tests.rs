@@ -4,7 +4,8 @@ mod tests {
 
     use super::super::{
         CatalogSnapshotIdKind, catalog_snapshot_payload, catalog_snapshot_payload_with_kind,
-        public_snapshot_payload, snapshot_payload, update_raw_data_change_watermark,
+        columns_parent_before_children, public_snapshot_payload, snapshot_payload,
+        update_raw_data_change_watermark,
     };
     #[cfg(feature = "foundationdb")]
     use crate::FdbOrderedCatalogKv;
@@ -18,8 +19,9 @@ mod tests {
         commit_data_mutation_with_file_partitions, commit_drop_table_columns, commit_drop_tables,
         expire_snapshots, initialize_catalog_if_absent,
         keys::{
-            current_table_row_prefix, macro_object_scan_prefix, schema_object_scan_prefix,
-            snapshot_timestamp_prefix, table_object_scan_prefix, view_object_scan_prefix,
+            KeyFamily, current_table_row_prefix, family_prefix, macro_object_scan_prefix,
+            schema_object_scan_prefix, snapshot_timestamp_prefix, table_object_scan_prefix,
+            view_object_scan_prefix,
         },
         kv::MutableCatalogKv,
         latest_snapshot, public_snapshot_sequence_for_order, register_inline_table_payload,
@@ -28,6 +30,32 @@ mod tests {
         runtime_snapshot_range::{SnapshotDataChangeOrder, SnapshotWatermarkCutoffOrder},
         snapshot_by_ducklake_sequence,
     };
+
+    #[test]
+    fn given_many_nested_columns_when_ordering_then_work_stays_bounded() {
+        let columns = (1..=5_000)
+            .rev()
+            .map(|column_id| {
+                TableColumnRow::new(
+                    ColumnId(column_id),
+                    format!("column_{column_id}"),
+                    "struct",
+                    false,
+                    (column_id > 1).then(|| ColumnId(column_id - 1)),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let ordered = columns_parent_before_children(&columns);
+
+        assert_eq!(
+            ordered
+                .iter()
+                .map(|column| column.column_id.0)
+                .collect::<Vec<_>>(),
+            (1..=5_000).collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn given_helper_schema_commit_coalesces_with_table_then_public_snapshot_loads_table() {
@@ -311,6 +339,46 @@ mod tests {
     }
 
     #[test]
+    fn given_latest_public_snapshot_when_resolving_then_coalescing_history_is_not_scanned() {
+        let catalog = CatalogId(1);
+        let mut inner = FakeOrderedCatalogKv::new();
+        initialize_catalog_if_absent(&mut inner, catalog).unwrap();
+        commit_create_table_row(&mut inner, catalog, original_table(TableId(10))).unwrap();
+        commit_append_table_columns(
+            &mut inner,
+            catalog,
+            TableId(10),
+            vec![TableColumnRow::new(
+                ColumnId(99),
+                "amount",
+                "INTEGER",
+                true,
+                None,
+            )],
+        )
+        .unwrap();
+        let latest = latest_snapshot(&inner, catalog).unwrap().unwrap();
+        let kv = CatalogFactsScanRecordingKv::new(inner, catalog);
+        let mut request = CatalogSnapshotRequestContext::for_current_catalog(&kv, catalog).unwrap();
+
+        let resolved = request
+            .resolve_snapshot(
+                &kv,
+                catalog,
+                DuckLakeSnapshotId(latest.sequence.0),
+                CatalogSnapshotIdKind::PublicSnapshot,
+            )
+            .unwrap();
+
+        assert_eq!(resolved, latest);
+        assert_eq!(kv.scan_count("schema"), 0);
+        assert_eq!(kv.scan_count("table"), 0);
+        assert_eq!(kv.scan_count("current_table"), 0);
+        assert_eq!(kv.scan_count("view"), 0);
+        assert_eq!(kv.scan_count("macro"), 0);
+    }
+
+    #[test]
     fn given_request_renders_latest_then_historical_snapshot_then_facts_upgrade_to_complete_history()
      {
         let catalog = CatalogId(1);
@@ -507,6 +575,51 @@ mod tests {
             payload.contains("ducklake_next_catalog_id=2\n"),
             "{payload}"
         );
+    }
+
+    #[test]
+    fn given_historical_snapshot_has_stored_watermarks_when_rendered_then_catalog_histories_are_not_scanned()
+     {
+        let catalog = CatalogId(1);
+        let mut inner = FakeOrderedCatalogKv::new();
+        initialize_catalog_if_absent(&mut inner, catalog).unwrap();
+        commit_create_table_row(&mut inner, catalog, original_table(TableId(10))).unwrap();
+        let historical = latest_snapshot(&inner, catalog).unwrap();
+        commit_append_data_files(
+            &mut inner,
+            catalog,
+            vec![DataFileRow::new(
+                DataFileId(100),
+                TableId(10),
+                "main/orders/file.parquet",
+                1,
+                128,
+                CatalogOrderId::uuid_v7(0),
+            )],
+        )
+        .unwrap();
+        let kv = CatalogFactsScanRecordingKv::new(inner, catalog);
+
+        let payload =
+            String::from_utf8(snapshot_payload(&kv, catalog, historical).unwrap()).unwrap();
+
+        assert!(
+            payload.contains("ducklake_next_catalog_id=11\n"),
+            "{payload}"
+        );
+        assert!(payload.contains("ducklake_next_file_id=101\n"), "{payload}");
+        for family in [
+            "schema",
+            "table",
+            "view",
+            "macro",
+            "data_file",
+            "delete_file",
+            "inline_table",
+            "inline_deletion",
+        ] {
+            assert_eq!(kv.scan_count(family), 0, "{family} history was scanned");
+        }
     }
 
     #[test]
@@ -814,6 +927,16 @@ mod tests {
                     ("current_table", current_table_row_prefix(catalog)),
                     ("view", view_object_scan_prefix(catalog)),
                     ("macro", macro_object_scan_prefix(catalog)),
+                    ("data_file", family_prefix(catalog, KeyFamily::DataFile)),
+                    ("delete_file", family_prefix(catalog, KeyFamily::DeleteFile)),
+                    (
+                        "inline_table",
+                        family_prefix(catalog, KeyFamily::InlineTable),
+                    ),
+                    (
+                        "inline_deletion",
+                        family_prefix(catalog, KeyFamily::InlineDeletion),
+                    ),
                 ]),
                 scans: Rc::new(RefCell::new(BTreeMap::new())),
             }

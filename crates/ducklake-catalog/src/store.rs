@@ -1,12 +1,13 @@
 #[cfg(not(test))]
 use crate::bounded_cache::{BoundedCache, static_bounded_cache};
+use crate::runtime_metrics::RuntimeMetricStage;
 use crate::{
     CatalogId, CatalogResult, KvBatch, MutableCatalogKv, OrderedCatalogKv, RangeDirection,
     RawSnapshotSequence, SnapshotRow,
     ids::{CatalogOrderId, CatalogOrderKind},
     keys::{
-        decode_snapshot_timestamp_key, latest_snapshot_row_key, snapshot_key, snapshot_prefix,
-        snapshot_timestamp_key, snapshot_timestamp_prefix,
+        decode_snapshot_timestamp_key, latest_snapshot_row_key, raw_snapshot_row_key, snapshot_key,
+        snapshot_prefix, snapshot_timestamp_key, snapshot_timestamp_prefix,
     },
 };
 #[cfg(feature = "runtime-metrics")]
@@ -18,35 +19,9 @@ use crate::{
 use std::panic::Location;
 #[cfg(not(test))]
 use std::sync::OnceLock;
+use std::{cell::RefCell, collections::BTreeMap};
 
 pub const SUPPORTED_DUCKLAKE_COMMIT: &str = "7e3c8e97cc5acddbcd2a1ebfb8530e6c52efdacf";
-
-#[cfg(feature = "runtime-metrics")]
-#[derive(Clone, Copy)]
-struct RuntimeMetricStage(std::time::Instant);
-
-#[cfg(not(feature = "runtime-metrics"))]
-#[derive(Clone, Copy)]
-struct RuntimeMetricStage;
-
-impl RuntimeMetricStage {
-    #[inline]
-    fn start() -> Self {
-        #[cfg(feature = "runtime-metrics")]
-        {
-            Self(std::time::Instant::now())
-        }
-        #[cfg(not(feature = "runtime-metrics"))]
-        {
-            Self
-        }
-    }
-
-    #[cfg(feature = "runtime-metrics")]
-    fn elapsed_micros(self) -> u64 {
-        u64::try_from(self.0.elapsed().as_micros()).unwrap_or(u64::MAX)
-    }
-}
 
 #[cfg(feature = "runtime-metrics")]
 macro_rules! record_latest_snapshot_callsite {
@@ -86,24 +61,114 @@ static SNAPSHOT_LIST_CACHE: OnceLock<
     BoundedCache<(crate::CatalogCacheNamespace, CatalogId), Vec<SnapshotRow>>,
 > = OnceLock::new();
 
-#[cfg(not(test))]
 pub(crate) fn invalidate_runtime_read_context(catalog: CatalogId) {
-    if let Some(cache) = LATEST_SNAPSHOT_CACHE.get() {
-        cache.retain(|(_, cached_catalog), _| *cached_catalog != catalog);
+    REQUEST_LATEST_SNAPSHOT_CACHE.with(|cache| {
+        if let Some(cache) = cache.borrow_mut().as_mut() {
+            cache.retain(|(_, cached_catalog), _| *cached_catalog != catalog);
+        }
+    });
+    #[cfg(not(test))]
+    {
+        if let Some(cache) = LATEST_SNAPSHOT_CACHE.get() {
+            cache.retain(|(_, cached_catalog), _| *cached_catalog != catalog);
+        }
+        if let Some(cache) = SNAPSHOT_LIST_CACHE.get() {
+            cache.retain(|(_, cached_catalog), _| *cached_catalog != catalog);
+        }
+        crate::runtime_read_context::invalidate_catalog_read_context(catalog);
+        crate::runtime_read_context::invalidate_inline_deletion_read_context(catalog);
+        crate::runtime_file_listing::invalidate_file_listing_read_context(catalog);
+        crate::table_store::invalidate_runtime_table_read_context(catalog);
+        crate::inline_data::invalidate_inline_table_payload_read_context(catalog);
+        crate::runtime_inline_rows::invalidate_inline_read_context(catalog);
+        crate::delete_change_feed::invalidate_delete_change_feed_context(catalog);
+        crate::runtime_snapshots::invalidate_runtime_snapshot_context(catalog);
     }
-    if let Some(cache) = SNAPSHOT_LIST_CACHE.get() {
-        cache.retain(|(_, cached_catalog), _| *cached_catalog != catalog);
-    }
-    crate::runtime_read_context::invalidate_catalog_read_context(catalog);
-    crate::runtime_file_listing::invalidate_file_listing_read_context(catalog);
-    crate::table_store::invalidate_runtime_table_read_context(catalog);
-    crate::inline_data::invalidate_inline_table_payload_read_context(catalog);
-    crate::runtime_inline_rows::invalidate_inline_read_context(catalog);
-    crate::delete_change_feed::invalidate_delete_change_feed_context(catalog);
 }
 
-#[cfg(test)]
-pub(crate) fn invalidate_runtime_read_context(_catalog: CatalogId) {}
+type LatestSnapshotRequestCache =
+    BTreeMap<(crate::CatalogCacheNamespace, CatalogId), Option<SnapshotRow>>;
+
+thread_local! {
+    static REQUEST_LATEST_SNAPSHOT_CACHE: RefCell<Option<LatestSnapshotRequestCache>> =
+        const { RefCell::new(None) };
+    static PERSISTENT_LATEST_SNAPSHOT_CACHES:
+        RefCell<BTreeMap<u64, LatestSnapshotRequestCache>> = const { RefCell::new(BTreeMap::new()) };
+    static ACTIVE_RUNTIME_READ_CONTEXT: RefCell<Option<u64>> = const { RefCell::new(None) };
+}
+
+pub(crate) struct RuntimeReadRequestGuard {
+    previous: Option<LatestSnapshotRequestCache>,
+    previous_context: Option<u64>,
+    context_id: Option<u64>,
+    invalidate_catalog: Option<CatalogId>,
+    new_context: bool,
+}
+
+pub(crate) fn begin_runtime_read_request(context_id: Option<u64>) -> RuntimeReadRequestGuard {
+    let (request_cache, new_context) = context_id.map_or_else(
+        || (BTreeMap::new(), false),
+        |context_id| {
+            PERSISTENT_LATEST_SNAPSHOT_CACHES.with(|contexts| {
+                let mut contexts = contexts.borrow_mut();
+                match contexts.remove(&context_id) {
+                    Some(cached) => (cached, false),
+                    None => (BTreeMap::new(), true),
+                }
+            })
+        },
+    );
+    let previous = REQUEST_LATEST_SNAPSHOT_CACHE.with(|cache| cache.replace(Some(request_cache)));
+    let previous_context = ACTIVE_RUNTIME_READ_CONTEXT.with(|active| active.replace(context_id));
+    RuntimeReadRequestGuard {
+        previous,
+        previous_context,
+        context_id,
+        invalidate_catalog: None,
+        new_context,
+    }
+}
+
+pub(crate) fn active_runtime_read_context_id() -> Option<u64> {
+    ACTIVE_RUNTIME_READ_CONTEXT.with(|active| *active.borrow())
+}
+
+impl RuntimeReadRequestGuard {
+    pub(crate) fn is_new_context(&self) -> bool {
+        self.new_context
+    }
+
+    pub(crate) fn invalidate_catalog_on_drop(&mut self, catalog: CatalogId) {
+        self.invalidate_catalog = Some(catalog);
+    }
+}
+
+impl Drop for RuntimeReadRequestGuard {
+    fn drop(&mut self) {
+        if let Some(catalog) = self.invalidate_catalog {
+            invalidate_runtime_read_context(catalog);
+        }
+        if let Some(context_id) = self.context_id {
+            let current = REQUEST_LATEST_SNAPSHOT_CACHE
+                .with(|cache| cache.borrow_mut().take())
+                .unwrap_or_default();
+            PERSISTENT_LATEST_SNAPSHOT_CACHES.with(|contexts| {
+                let mut contexts = contexts.borrow_mut();
+                contexts.insert(context_id, current);
+                while contexts.len() > 16 {
+                    contexts.pop_first();
+                }
+            });
+        }
+        let previous = self.previous.take();
+        REQUEST_LATEST_SNAPSHOT_CACHE.with(|cache| {
+            cache.replace(previous);
+        });
+        ACTIVE_RUNTIME_READ_CONTEXT.with(|active| {
+            active.replace(self.previous_context.take());
+        });
+    }
+}
 
 pub fn initialize_empty_catalog(
     kv: &mut impl MutableCatalogKv,
@@ -135,8 +200,12 @@ pub fn latest_snapshot(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
 ) -> CatalogResult<Option<SnapshotRow>> {
-    #[cfg(not(test))]
     let cache_key = (kv.catalog_cache_namespace(), catalog);
+    if let Some(snapshot) = REQUEST_LATEST_SNAPSHOT_CACHE
+        .with(|cache| cache.borrow().as_ref()?.get(&cache_key).cloned())
+    {
+        return Ok(snapshot);
+    }
     #[cfg(not(test))]
     if runtime_read_context_enabled()
         && let Some(snapshot) = latest_snapshot_cache().get(cache_key)
@@ -146,6 +215,11 @@ pub fn latest_snapshot(
     let result = latest_snapshot_uncached(kv, catalog);
     record_latest_snapshot_callsite!(result.started);
     let result = result.row?;
+    REQUEST_LATEST_SNAPSHOT_CACHE.with(|cache| {
+        if let Some(cache) = cache.borrow_mut().as_mut() {
+            cache.insert(cache_key, result.clone());
+        }
+    });
     #[cfg(not(test))]
     if runtime_read_context_enabled() {
         latest_snapshot_cache().insert(cache_key, result.clone());
@@ -282,9 +356,9 @@ fn snapshot_list_cache()
     static_bounded_cache(&SNAPSHOT_LIST_CACHE, 16)
 }
 
-#[cfg(not(test))]
 pub(crate) fn runtime_read_context_enabled() -> bool {
-    std::env::var_os("AUX_DUCKLAKE_BENCHMARK_RUNTIME_READ_CONTEXT").is_some()
+    active_runtime_read_context_id().is_some()
+        || std::env::var_os("AUX_DUCKLAKE_BENCHMARK_RUNTIME_READ_CONTEXT").is_some()
 }
 
 #[cfg(feature = "runtime-metrics")]
@@ -393,10 +467,9 @@ pub fn snapshot_by_raw_sequence(
     catalog: CatalogId,
     raw_sequence: RawSnapshotSequence,
 ) -> CatalogResult<Option<SnapshotRow>> {
-    Ok(list_all_snapshots(kv, catalog)?
-        .into_iter()
-        .filter(|snapshot| snapshot.sequence == raw_sequence)
-        .max_by_key(|snapshot| snapshot.order))
+    kv.get(&raw_snapshot_row_key(catalog, raw_sequence))?
+        .map(|value| decode_latest_snapshot_value(&value))
+        .transpose()
 }
 
 pub fn expire_snapshots(
@@ -409,6 +482,13 @@ pub fn expire_snapshots(
     }
     let latest = latest_snapshot(kv, catalog)?.ok_or(crate::CatalogError::NotFound("snapshot"))?;
     let snapshots = list_snapshots(kv, catalog)?;
+    let mut snapshots_by_sequence = BTreeMap::<RawSnapshotSequence, Vec<SnapshotRow>>::new();
+    for snapshot in snapshots {
+        snapshots_by_sequence
+            .entry(snapshot.sequence)
+            .or_default()
+            .push(snapshot);
+    }
     let mut expired = Vec::new();
     let mut batch = KvBatch::new();
     for raw_sequence in raw_sequences {
@@ -418,10 +498,9 @@ pub fn expire_snapshots(
                 latest.sequence
             )));
         }
-        let sequence_snapshots = snapshots
-            .iter()
-            .filter(|snapshot| snapshot.sequence == *raw_sequence)
-            .collect::<Vec<_>>();
+        let Some(sequence_snapshots) = snapshots_by_sequence.get(raw_sequence) else {
+            continue;
+        };
         for snapshot in sequence_snapshots {
             stage_delete_snapshot(&mut batch, catalog, snapshot);
             expired.push(snapshot.clone());
@@ -453,6 +532,10 @@ pub(crate) fn stage_snapshot(batch: &mut KvBatch, catalog: CatalogId, snapshot: 
         latest_snapshot_row_key(catalog),
         latest_snapshot_value(snapshot),
     );
+    batch.put(
+        raw_snapshot_row_key(catalog, snapshot.sequence),
+        latest_snapshot_value(snapshot),
+    );
 }
 
 pub(crate) fn latest_snapshot_value(snapshot: &SnapshotRow) -> Vec<u8> {
@@ -472,20 +555,26 @@ pub(crate) const fn latest_snapshot_value_order_offset() -> usize {
 }
 
 #[cfg(feature = "foundationdb")]
-pub(crate) fn stage_fdb_latest_snapshot_value(
+pub(crate) fn stage_fdb_snapshot_indexes(
     kv: &crate::FdbOrderedCatalogKv,
     trx: &foundationdb::Transaction,
     catalog: CatalogId,
     snapshot: &SnapshotRow,
 ) -> CatalogResult<()> {
-    trx.atomic_op(
-        &kv.namespaced_key(&latest_snapshot_row_key(catalog)),
-        &crate::fdb_versionstamp::versionstamped_value(
-            &latest_snapshot_value(snapshot),
-            latest_snapshot_value_order_offset(),
-        )?,
-        foundationdb::options::MutationType::SetVersionstampedValue,
-    );
+    let value = crate::fdb_versionstamp::versionstamped_value(
+        &latest_snapshot_value(snapshot),
+        latest_snapshot_value_order_offset(),
+    )?;
+    for key in [
+        latest_snapshot_row_key(catalog),
+        raw_snapshot_row_key(catalog, snapshot.sequence),
+    ] {
+        trx.atomic_op(
+            &kv.namespaced_key(&key),
+            &value,
+            foundationdb::options::MutationType::SetVersionstampedValue,
+        );
+    }
     Ok(())
 }
 
@@ -517,7 +606,7 @@ fn stage_delete_snapshot(batch: &mut KvBatch, catalog: CatalogId, snapshot: &Sna
     ));
 }
 
-fn decode_snapshot_item(
+pub(crate) fn decode_snapshot_item(
     catalog: CatalogId,
     key: &[u8],
     value: &[u8],

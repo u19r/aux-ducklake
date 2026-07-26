@@ -1,5 +1,6 @@
+use crate::runtime_metrics::RuntimeMetricStage;
 use crate::{
-    CatalogError, CatalogResult, DuckLakeSnapshotId, SnapshotCommitMetadata,
+    CatalogError, CatalogResult, CommitAttemptId, DuckLakeSnapshotId, SnapshotCommitMetadata,
     runtime_object_ops::{CHANGE_VIEW_COMMENT, CREATE_VIEWS, DROP_VIEWS, RENAME_VIEWS},
     runtime_schema_change_payload::{
         ADD_COLUMNS, CHANGE_COLUMN_DEFAULTS, CHANGE_COLUMN_TYPES, CHANGE_COMMENTS,
@@ -12,37 +13,11 @@ use crate::{
 
 const COMMIT_ATTEMPT: &str = "CommitAttempt";
 
-#[cfg(feature = "runtime-metrics")]
-#[derive(Clone, Copy)]
-struct RuntimeMetricStage(std::time::Instant);
-
-#[cfg(not(feature = "runtime-metrics"))]
-#[derive(Clone, Copy)]
-struct RuntimeMetricStage;
-
-impl RuntimeMetricStage {
-    #[inline]
-    fn start() -> Self {
-        #[cfg(feature = "runtime-metrics")]
-        {
-            Self(std::time::Instant::now())
-        }
-        #[cfg(not(feature = "runtime-metrics"))]
-        {
-            Self
-        }
-    }
-
-    #[cfg(feature = "runtime-metrics")]
-    fn elapsed_micros(self) -> u64 {
-        u64::try_from(self.0.elapsed().as_micros()).unwrap_or(u64::MAX)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimeCommitAttemptIntent {
     pub(crate) read_snapshot: Option<DuckLakeSnapshotId>,
     pub(crate) proposed_commit_snapshot: ProposedCommitSnapshot,
+    pub(crate) recovery_attempt_id: Option<CommitAttemptId>,
     pub(crate) commit_metadata: SnapshotCommitMetadata,
     pub(crate) metadata_intents: Vec<RuntimeMetadataIntent>,
     pub(crate) compaction_intents: Vec<RuntimeCompactionIntent>,
@@ -196,7 +171,7 @@ mod orchestration;
 mod parsing;
 mod payload_remap;
 mod table_assembly;
-mod table_commit;
+pub(crate) mod table_commit;
 
 use metadata_conflicts::*;
 pub(crate) use orchestration::*;

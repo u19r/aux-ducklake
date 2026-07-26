@@ -43,19 +43,6 @@ pub(crate) fn list_current_metadata_data_file_rows(
     Ok(data_file_rows_payload(&rows, &snapshots).into_bytes())
 }
 
-pub(crate) fn render_current_metadata_data_file_mirror_sql(
-    _backend: RuntimeCatalogBackend,
-    catalog: CatalogId,
-) -> CatalogResult<Vec<u8>> {
-    let kv = open_foundationdb_catalog()?;
-    let (rows, snapshots) = (
-        list_data_files(&kv, catalog)?,
-        list_snapshots(&kv, catalog)?,
-    );
-    let rows = current_metadata_data_file_rows(rows);
-    Ok(data_file_mirror_sql(&rows, &snapshots).into_bytes())
-}
-
 pub(crate) fn list_current_metadata_data_file_rows_for_data_file_ids(
     _backend: RuntimeCatalogBackend,
     catalog: CatalogId,
@@ -64,10 +51,20 @@ pub(crate) fn list_current_metadata_data_file_rows_for_data_file_ids(
     let data_file_ids = data_file_ids_payload_values(payload)?;
     let (rows, snapshots) = {
         let kv = open_foundationdb_catalog()?;
-        (
-            list_current_data_files_for_data_file_ids(&kv, catalog, &data_file_ids)?,
-            list_snapshots(&kv, catalog)?,
-        )
+        let rows = list_current_data_files_for_data_file_ids(&kv, catalog, &data_file_ids)?;
+        let snapshot_orders = rows
+            .iter()
+            .flat_map(|row| {
+                [
+                    Some(row.validity.begin_order),
+                    row.validity.end_order,
+                    row.max_partial_order,
+                ]
+            })
+            .flatten()
+            .collect();
+        let snapshots = list_snapshots_for_orders(&kv, catalog, snapshot_orders)?;
+        (rows, snapshots)
     };
     Ok(data_file_rows_payload(&rows, &snapshots).into_bytes())
 }
@@ -147,15 +144,6 @@ pub(super) fn data_file_rows_payload(
             row.encryption_key
         ));
     }
-    out
-}
-
-pub(super) fn data_file_mirror_sql(
-    rows: &[DataFileRow],
-    snapshots: &[crate::SnapshotRow],
-) -> String {
-    let mut out = "DELETE FROM {METADATA_CATALOG}.ducklake_data_file;\n".to_owned();
-    append_data_file_mirror_inserts(&mut out, rows, snapshots);
     out
 }
 

@@ -3,238 +3,279 @@
   "batches": [
     {
       "accounting": {
-        "duckdb_extension_outside_storage_ms": 298956.892,
+        "duckdb_extension_outside_storage_ms": 201430.927,
         "fdb_bytes_read": 0,
         "fdb_rows_read": 0,
         "inside_rust_fdb_kv_ms": 0.0,
         "inside_rust_nested_measurements_ms": 0.0,
         "inside_rust_storage_call_ms": 0.0,
         "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
         "measured_storage_call_ms": 0.0,
         "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
         "runtime_metric_calls": 0,
         "rust_runtime_reported_storage_ms": 0.0,
-        "scenario_wall_ms": 298956.892,
+        "scenario_wall_ms": 201430.927,
         "scope": "preload",
-        "unaccounted_wall_ms": 298956.892
+        "unaccounted_wall_ms": 201430.927
       },
-      "duration_ms": 298956.892,
+      "duration_ms": 201430.927,
       "labels": {
         "realistic_preload": "100,13108,1310800,5369036800",
         "realistic_preload_batch_rows": "4096",
         "realistic_preload_parallelism": "4",
         "realistic_preload_worker": "3,4,4096"
       },
-      "name": "preload"
+      "name": "preload",
+      "peak_rss_kib": 642544
     },
     {
       "accounting": {
-        "duckdb_extension_outside_storage_ms": 218291.419,
+        "duckdb_extension_outside_storage_ms": 129894.705,
         "fdb_bytes_read": 0,
         "fdb_rows_read": 0,
         "inside_rust_fdb_kv_ms": 0.0,
         "inside_rust_nested_measurements_ms": 0.0,
         "inside_rust_storage_call_ms": 0.0,
         "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
         "measured_storage_call_ms": 0.0,
         "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
         "runtime_metric_calls": 0,
         "rust_runtime_reported_storage_ms": 0.0,
-        "scenario_wall_ms": 218291.419,
+        "scenario_wall_ms": 129894.705,
         "scope": "mixed",
-        "unaccounted_wall_ms": 218291.419
+        "unaccounted_wall_ms": 129894.705
       },
-      "duration_ms": 218291.419,
+      "duration_ms": 129894.705,
       "labels": {
         "realistic_latest": "1311100,8598193800",
         "realistic_time_travel": "1310800,8591638600"
       },
-      "name": "mixed"
+      "name": "mixed",
+      "peak_rss_kib": 404016
     },
     {
       "accounting": {
-        "duckdb_extension_outside_storage_ms": 217215.991,
+        "duckdb_extension_outside_storage_ms": 136216.038,
         "fdb_bytes_read": 0,
         "fdb_rows_read": 0,
         "inside_rust_fdb_kv_ms": 0.0,
         "inside_rust_nested_measurements_ms": 0.0,
         "inside_rust_storage_call_ms": 0.0,
         "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
         "measured_storage_call_ms": 0.0,
         "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
         "runtime_metric_calls": 0,
         "rust_runtime_reported_storage_ms": 0.0,
-        "scenario_wall_ms": 217215.991,
+        "scenario_wall_ms": 136216.038,
         "scope": "dedicated_deletes",
-        "unaccounted_wall_ms": 217215.991
+        "unaccounted_wall_ms": 136216.038
       },
-      "duration_ms": 217215.991,
+      "duration_ms": 136216.038,
       "labels": {
         "realistic_latest": "1310900,8598193100",
         "realistic_time_travel": "1311100,8598193800"
       },
-      "name": "dedicated_deletes"
+      "name": "dedicated_deletes",
+      "peak_rss_kib": 398416
     },
     {
       "accounting": {
-        "duckdb_extension_outside_storage_ms": 242437.724,
+        "duckdb_extension_outside_storage_ms": 164059.126,
         "fdb_bytes_read": 0,
         "fdb_rows_read": 0,
         "inside_rust_fdb_kv_ms": 0.0,
         "inside_rust_nested_measurements_ms": 0.0,
         "inside_rust_storage_call_ms": 0.0,
         "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
         "measured_storage_call_ms": 0.0,
         "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
         "runtime_metric_calls": 0,
         "rust_runtime_reported_storage_ms": 0.0,
-        "scenario_wall_ms": 242437.724,
+        "scenario_wall_ms": 164059.126,
         "scope": "dedicated_inlining",
-        "unaccounted_wall_ms": 242437.724
+        "unaccounted_wall_ms": 164059.126
       },
-      "duration_ms": 242437.724,
+      "duration_ms": 164059.126,
       "labels": {
         "realistic_inline_tables": "100"
       },
-      "name": "dedicated_inlining"
+      "name": "dedicated_inlining",
+      "peak_rss_kib": 218112
     },
     {
       "accounting": {
-        "duckdb_extension_outside_storage_ms": 107773.499,
+        "duckdb_extension_outside_storage_ms": 66885.877,
         "fdb_bytes_read": 0,
         "fdb_rows_read": 0,
         "inside_rust_fdb_kv_ms": 0.0,
         "inside_rust_nested_measurements_ms": 0.0,
         "inside_rust_storage_call_ms": 0.0,
         "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
         "measured_storage_call_ms": 0.0,
         "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
         "runtime_metric_calls": 0,
         "rust_runtime_reported_storage_ms": 0.0,
-        "scenario_wall_ms": 107773.499,
+        "scenario_wall_ms": 66885.877,
         "scope": "dedicated_compaction",
-        "unaccounted_wall_ms": 107773.499
+        "unaccounted_wall_ms": 66885.877
       },
-      "duration_ms": 107773.499,
+      "duration_ms": 66885.877,
       "labels": {
         "realistic_latest": "1310900,8598193100"
       },
-      "name": "dedicated_compaction"
+      "name": "dedicated_compaction",
+      "peak_rss_kib": 566848
     },
     {
       "accounting": {
-        "duckdb_extension_outside_storage_ms": 67449.746,
+        "duckdb_extension_outside_storage_ms": 40060.361,
         "fdb_bytes_read": 0,
         "fdb_rows_read": 0,
         "inside_rust_fdb_kv_ms": 0.0,
         "inside_rust_nested_measurements_ms": 0.0,
         "inside_rust_storage_call_ms": 0.0,
         "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
         "measured_storage_call_ms": 0.0,
         "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
         "runtime_metric_calls": 0,
         "rust_runtime_reported_storage_ms": 0.0,
-        "scenario_wall_ms": 67449.746,
+        "scenario_wall_ms": 40060.361,
         "scope": "join_queries",
-        "unaccounted_wall_ms": 67449.746
+        "unaccounted_wall_ms": 40060.361
       },
-      "duration_ms": 67449.746,
+      "duration_ms": 40060.361,
       "labels": {
-        "varied_join_latest": "100185,26288204400",
-        "varied_join_time_travel": "100185,26288204400"
+        "varied_join_latest": "45,8656600",
+        "varied_join_time_travel": "45,8656600"
       },
-      "name": "join_queries"
+      "name": "join_queries",
+      "peak_rss_kib": 370064
     },
     {
       "accounting": {
-        "duckdb_extension_outside_storage_ms": 970739.473,
+        "duckdb_extension_outside_storage_ms": 726119.72,
         "fdb_bytes_read": 0,
         "fdb_rows_read": 0,
         "inside_rust_fdb_kv_ms": 0.0,
         "inside_rust_nested_measurements_ms": 0.0,
         "inside_rust_storage_call_ms": 0.0,
         "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
         "measured_storage_call_ms": 0.0,
         "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
         "runtime_metric_calls": 0,
         "rust_runtime_reported_storage_ms": 0.0,
-        "scenario_wall_ms": 970739.473,
+        "scenario_wall_ms": 726119.72,
         "scope": "mutation_churn",
-        "unaccounted_wall_ms": 970739.473
+        "unaccounted_wall_ms": 726119.72
       },
-      "duration_ms": 970739.473,
+      "duration_ms": 726119.72,
       "labels": {
         "realistic_latest": "1315319,9433411805",
         "realistic_time_travel": "1310900,8598193100",
-        "varied_join_latest": "99927,26254043700",
-        "varied_join_time_travel": "100185,26288204400"
+        "varied_external_file_cache_blocks_round_0": "0",
+        "varied_external_file_cache_blocks_round_1": "0",
+        "varied_external_file_cache_blocks_round_2": "0",
+        "varied_external_file_cache_blocks_round_3": "0",
+        "varied_join_latest": "40,8653840",
+        "varied_join_time_travel": "45,8656600",
+        "varied_memory_usage_bytes_round_0": "3257794",
+        "varied_memory_usage_bytes_round_1": "4693162",
+        "varied_memory_usage_bytes_round_2": "6115924",
+        "varied_memory_usage_bytes_round_3": "7542358",
+        "varied_object_cache_bytes_round_0": "3257794",
+        "varied_object_cache_bytes_round_1": "4693162",
+        "varied_object_cache_bytes_round_2": "6115924",
+        "varied_object_cache_bytes_round_3": "7542358"
       },
-      "name": "mutation_churn"
+      "name": "mutation_churn",
+      "peak_rss_kib": 952528
     },
     {
       "accounting": {
-        "duckdb_extension_outside_storage_ms": 37922.098,
+        "duckdb_extension_outside_storage_ms": 23469.705,
         "fdb_bytes_read": 0,
         "fdb_rows_read": 0,
         "inside_rust_fdb_kv_ms": 0.0,
         "inside_rust_nested_measurements_ms": 0.0,
         "inside_rust_storage_call_ms": 0.0,
         "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
         "measured_storage_call_ms": 0.0,
         "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
         "runtime_metric_calls": 0,
         "rust_runtime_reported_storage_ms": 0.0,
-        "scenario_wall_ms": 37922.098,
+        "scenario_wall_ms": 23469.705,
         "scope": "latest_queries",
-        "unaccounted_wall_ms": 37922.098
+        "unaccounted_wall_ms": 23469.705
       },
-      "duration_ms": 37922.098,
+      "duration_ms": 23469.705,
       "labels": {
         "realistic_latest": "1315319,9433411805"
       },
-      "name": "latest_queries"
+      "name": "latest_queries",
+      "peak_rss_kib": 288960
     },
     {
       "accounting": {
-        "duckdb_extension_outside_storage_ms": 38208.113,
+        "duckdb_extension_outside_storage_ms": 23541.991,
         "fdb_bytes_read": 0,
         "fdb_rows_read": 0,
         "inside_rust_fdb_kv_ms": 0.0,
         "inside_rust_nested_measurements_ms": 0.0,
         "inside_rust_storage_call_ms": 0.0,
         "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
         "measured_storage_call_ms": 0.0,
         "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
         "runtime_metric_calls": 0,
         "rust_runtime_reported_storage_ms": 0.0,
-        "scenario_wall_ms": 38208.113,
+        "scenario_wall_ms": 23541.991,
         "scope": "time_travel_queries",
-        "unaccounted_wall_ms": 38208.113
+        "unaccounted_wall_ms": 23541.991
       },
-      "duration_ms": 38208.113,
+      "duration_ms": 23541.991,
       "labels": {
         "realistic_time_travel": "1315319,9433411805"
       },
-      "name": "time_travel_queries"
+      "name": "time_travel_queries",
+      "peak_rss_kib": 275552
     },
     {
       "accounting": {
-        "duckdb_extension_outside_storage_ms": 214745.286,
+        "duckdb_extension_outside_storage_ms": 22825.38,
         "fdb_bytes_read": 0,
         "fdb_rows_read": 0,
         "inside_rust_fdb_kv_ms": 0.0,
         "inside_rust_nested_measurements_ms": 0.0,
         "inside_rust_storage_call_ms": 0.0,
         "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
         "measured_storage_call_ms": 0.0,
         "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
         "runtime_metric_calls": 0,
         "rust_runtime_reported_storage_ms": 0.0,
-        "scenario_wall_ms": 214745.286,
+        "scenario_wall_ms": 22825.38,
         "scope": "parallel_latest_queries",
-        "unaccounted_wall_ms": 214745.286
+        "unaccounted_wall_ms": 22825.38
       },
-      "duration_ms": 214745.286,
+      "duration_ms": 22825.38,
       "labels": {
         "realistic_latest": "1315319,9433411805",
         "realistic_parallel_workers": "12"
@@ -242,9 +283,11 @@
       "name": "parallel_latest_queries"
     }
   ],
-  "elapsed_ms": 2419786.459,
+  "elapsed_ms": 1539848.01,
   "fixture": {
     "backend": "postgres",
+    "churn_mode": "all",
+    "churn_rounds": 4,
     "columns_per_table": 24,
     "component_batches": [
       "preload",
@@ -258,16 +301,23 @@
       "time_travel_queries",
       "parallel_latest_queries"
     ],
+    "concurrent_writers": 0,
     "duckdb_build_profile": "release",
+    "duckdb_memory_limit": "1024MiB",
+    "mutation_tables_per_transaction": 10,
+    "mutation_transaction_scope": "table_batch",
     "parallel_workers": 12,
+    "payload_bytes": 4096,
     "preload_batch_rows": 4096,
     "preload_parallelism": 4,
     "rows_per_table": 13108,
     "same_sql_for_backends": true,
+    "schema_shape": "legacy",
     "small_write_batch_rows": "5-20",
     "table_count": 100,
     "target_logical_data_bytes": 5368709120
   },
-  "generated_at_micros": 1784726630525232,
+  "generated_at_micros": 1785166633084935,
+  "peak_rss_kib": 952528,
   "profile": "varied"
 }

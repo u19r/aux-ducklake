@@ -20,7 +20,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(parsed.source_file_ids.len(), 1);
+        assert_eq!(parsed.source_files.len(), 1);
         assert_eq!(parsed.new_files.len(), 1);
         assert!(!parsed.new_files[0].row_id_start_known);
     }
@@ -76,6 +76,32 @@ mod tests {
             compactions[1].compaction.file_column_stats[0].table_id,
             TableId(20)
         );
+    }
+
+    #[test]
+    fn given_compaction_payload_spans_one_hundred_tables_when_grouped_then_every_row_has_one_owner()
+    {
+        let mut payload = String::new();
+        for table_id in 1..=100 {
+            payload.push_str(&format!(
+                "source_file\t{table_id}\t{}\nfile\t{}\t{table_id}\tmain/table-{table_id}/merged.parquet\t2\t512\t0\nfile_partition\t{}\t{table_id}\t0\ttenant-{table_id}\nfile_column_stats\t{}\t{table_id}\t1\t2\t0\t1\t2\t\n",
+                table_id + 1_000,
+                table_id + 2_000,
+                table_id + 2_000,
+                table_id + 2_000,
+            ));
+        }
+
+        let parsed = compaction_payload_values(MERGE_ADJACENT_FILES, payload.as_bytes()).unwrap();
+        let compactions = merge_adjacent_compactions_from_payload(parsed).unwrap();
+
+        assert_eq!(compactions.len(), 100);
+        assert!(compactions.iter().all(|intent| {
+            intent.compaction.source_file_ids.len() == 1
+                && intent.compaction.new_files.len() == 1
+                && intent.compaction.partition_values.len() == 1
+                && intent.compaction.file_column_stats.len() == 1
+        }));
     }
 
     #[test]

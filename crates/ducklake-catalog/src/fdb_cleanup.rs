@@ -19,7 +19,7 @@ use crate::{
     },
     kv::{OrderedCatalogKv, RangeItem},
     maintenance::{
-        delete_file_is_safe_for_physical_cleanup, list_old_data_files_for_cleanup,
+        delete_file_cleanup_is_allowed, list_old_data_files_for_cleanup,
         list_old_delete_files_for_cleanup, list_old_inline_table_payloads_for_cleanup,
         row_is_unreachable,
     },
@@ -65,23 +65,14 @@ impl FdbOrderedCatalogKv {
             .into_iter()
             .filter(|row| requested.contains(&row.delete_file.delete_file_id.0))
         {
-            let is_scheduled =
-                self.is_scheduled_delete_file_cleanup(catalog, row.delete_file.delete_file_id)?;
-            let is_physically_safe = delete_file_is_safe_for_physical_cleanup(
-                self,
-                catalog,
-                &row.delete_file,
-                &snapshots,
-            )?;
-            if is_physically_safe {
-                self.remove_delete_file_metadata(catalog, &row)?;
+            if !delete_file_cleanup_is_allowed(self, catalog, &row.delete_file, &snapshots)? {
+                continue;
             }
-            if is_scheduled {
+            self.remove_delete_file_metadata(catalog, &row)?;
+            if self.is_scheduled_delete_file_cleanup(catalog, row.delete_file.delete_file_id)? {
                 self.clear_scheduled_delete_file_cleanup(catalog, row.delete_file.delete_file_id)?;
             }
-            if is_physically_safe || is_scheduled {
-                removed.push(row);
-            }
+            removed.push(row);
         }
         Ok(removed)
     }
