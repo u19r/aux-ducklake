@@ -11,7 +11,6 @@ use crate::runtime_metadata_ops::*;
 #[derive(Clone, Copy)]
 pub(super) struct GlobalStatsFileRow {
     pub(super) data_file_id: DataFileId,
-    pub(super) table_id: TableId,
     pub(super) record_count: u64,
     pub(super) file_size_bytes: u64,
     pub(super) row_id_start: Option<u64>,
@@ -44,24 +43,14 @@ pub(super) struct GlobalTableStats {
 
 #[cfg(feature = "foundationdb")]
 impl GlobalTableStats {
-    pub(super) fn new(table: &crate::TableRow) -> Self {
-        let parent_column_ids = table
-            .columns
-            .iter()
-            .filter_map(|column| column.parent_id)
-            .collect::<BTreeSet<_>>();
+    pub(super) fn new(table: &crate::TableRow, allocated_next_row_id: u64) -> Self {
         Self {
             table_id: table.table_id,
-            leaf_column_ids: table
-                .columns
-                .iter()
-                .filter(|column| !parent_column_ids.contains(&column.column_id))
-                .map(|column| column.column_id)
-                .collect(),
+            leaf_column_ids: leaf_column_ids(table).into_iter().collect(),
             file_columns: BTreeMap::new(),
             live_files: BTreeSet::new(),
             record_count: 0,
-            next_row_id: 0,
+            next_row_id: allocated_next_row_id,
             table_size_bytes: 0,
             columns: BTreeMap::new(),
         }
@@ -253,6 +242,21 @@ impl GlobalTableStats {
         }
         Ok(())
     }
+}
+
+#[cfg(feature = "foundationdb")]
+pub(super) fn leaf_column_ids(table: &crate::TableRow) -> Vec<ColumnId> {
+    let parent_column_ids = table
+        .columns
+        .iter()
+        .filter_map(|column| column.parent_id)
+        .collect::<BTreeSet<_>>();
+    table
+        .columns
+        .iter()
+        .filter(|column| !parent_column_ids.contains(&column.column_id))
+        .map(|column| column.column_id)
+        .collect()
 }
 
 impl GlobalColumnStats {

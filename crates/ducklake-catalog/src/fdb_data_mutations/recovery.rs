@@ -10,6 +10,7 @@ pub(super) fn mutation_recovery_attempt_id(
     mutation: &FdbDataMutation,
     expired_delete_files: &[FdbExpiredDeleteFile],
     snapshot_operations: &[(SnapshotOperationKind, crate::TableId)],
+    inline_mutation: &FdbInlineMutation,
 ) -> Option<CommitAttemptId> {
     let snapshot_id = snapshot_id?;
     let mut hash = Fnv1a64::new();
@@ -58,6 +59,24 @@ pub(super) fn mutation_recovery_attempt_id(
         hash.write_tag(snapshot_operation_hash_tag(*kind));
         hash.write_u64(table_id.0);
     }
+    for table in &inline_mutation.tables {
+        hash.write_tag(11);
+        hash.write_bytes_with_len(&table.encode());
+    }
+    for payload in &inline_mutation.payloads {
+        hash.write_tag(12);
+        hash.write_u64(payload.table_id.0);
+        hash.write_u64(payload.schema_id.0);
+        hash.write_bytes_with_len(&payload.payload);
+    }
+    for delete in &inline_mutation.deletes {
+        hash.write_tag(13);
+        hash.write_u64(delete.table_id.0);
+        hash.write_u64(delete.schema_id.0);
+        for row_id in &delete.row_ids {
+            hash.write_u64(*row_id);
+        }
+    }
     Some(CommitAttemptId(
         (snapshot_id.0 << 64) ^ u128::from(hash.finish()),
     ))
@@ -65,6 +84,7 @@ pub(super) fn mutation_recovery_attempt_id(
 
 pub(super) fn snapshot_operation_hash_tag(kind: SnapshotOperationKind) -> u8 {
     match kind {
+        SnapshotOperationKind::InlineFlush => 2,
         SnapshotOperationKind::RewriteDelete => 1,
     }
 }

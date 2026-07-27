@@ -2,6 +2,7 @@ mod catalog_cleanup;
 mod catalog_expire;
 mod catalog_read_age;
 mod catalog_recovery;
+mod catalog_scale_maintenance;
 mod catalog_smoke;
 mod common;
 mod invalid;
@@ -14,6 +15,7 @@ use foundationdb_simulation::{
 use crate::{
     catalog_cleanup::CatalogCleanupWorkload, catalog_expire::CatalogExpireWorkload,
     catalog_read_age::CatalogReadAgeWorkload, catalog_recovery::CatalogRecoveryWorkload,
+    catalog_scale_maintenance::CatalogScaleMaintenanceWorkload,
     catalog_smoke::CatalogSmokeWorkload, invalid::InvalidWorkload,
 };
 
@@ -22,6 +24,7 @@ const WORKLOAD_CATALOG_EXPIRE: &str = "catalog_expire";
 const WORKLOAD_CATALOG_CLEANUP: &str = "catalog_cleanup";
 const WORKLOAD_CATALOG_READ_AGE: &str = "catalog_read_age";
 const WORKLOAD_CATALOG_RECOVERY: &str = "catalog_recovery";
+const WORKLOAD_CATALOG_SCALE_MAINTENANCE: &str = "catalog_scale_maintenance";
 
 struct DuckLakeFdbSimFactory;
 
@@ -33,6 +36,9 @@ impl RustWorkloadFactory for DuckLakeFdbSimFactory {
             WORKLOAD_CATALOG_CLEANUP => CatalogCleanupWorkload::new(name, context).wrap(),
             WORKLOAD_CATALOG_READ_AGE => CatalogReadAgeWorkload::new(name, context).wrap(),
             WORKLOAD_CATALOG_RECOVERY => CatalogRecoveryWorkload::new(name, context).wrap(),
+            WORKLOAD_CATALOG_SCALE_MAINTENANCE => {
+                CatalogScaleMaintenanceWorkload::new(name, context).wrap()
+            }
             _ => InvalidWorkload::new(name, context).wrap(),
         }
     }

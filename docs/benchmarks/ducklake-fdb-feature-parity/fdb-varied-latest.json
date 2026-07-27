@@ -3,25 +3,27 @@
   "batches": [
     {
       "accounting": {
-        "duckdb_extension_outside_storage_ms": 227086.468,
+        "duckdb_extension_outside_storage_ms": 117800.152,
         "fdb_bytes_read": 0,
         "fdb_rows_read": 0,
         "inside_rust_fdb_kv_ms": 0.0,
         "inside_rust_nested_measurements_ms": 0.0,
         "inside_rust_storage_call_ms": 0.0,
         "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
         "measured_storage_call_ms": 0.0,
         "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
         "runtime_metric_calls": 0,
         "rust_runtime_reported_storage_ms": 0.0,
-        "scenario_wall_ms": 227086.468,
+        "scenario_wall_ms": 117800.152,
         "scope": "preload",
-        "unaccounted_wall_ms": 227086.468
+        "unaccounted_wall_ms": 117800.152
       },
-      "duration_ms": 227086.468,
+      "duration_ms": 117800.152,
       "labels": {
         "backend": "foundationdb",
-        "catalog_snapshot_order": "000000000ee365f50000000000000000",
+        "catalog_snapshot_order": "0000005eb69ec8880000000000000000",
         "metadata_attached": "true",
         "operation": "AttachMetadata",
         "payload_bytes": "233",
@@ -30,29 +32,32 @@
         "realistic_preload_parallelism": "4",
         "realistic_preload_worker": "3,4,4096",
         "runtime_bridge": "cpp_ffi",
-        "runtime_catalog_id": "5919363677708604306",
+        "runtime_catalog_id": "4903085783754233295",
         "runtime_ffi": "ok"
       },
-      "name": "preload"
+      "name": "preload",
+      "peak_rss_kib": 1183712
     },
     {
       "accounting": {
-        "duckdb_extension_outside_storage_ms": 122696.232,
+        "duckdb_extension_outside_storage_ms": 79926.372,
         "fdb_bytes_read": 0,
         "fdb_rows_read": 0,
         "inside_rust_fdb_kv_ms": 0.0,
         "inside_rust_nested_measurements_ms": 0.0,
         "inside_rust_storage_call_ms": 0.0,
         "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
         "measured_storage_call_ms": 0.0,
         "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
         "runtime_metric_calls": 0,
         "rust_runtime_reported_storage_ms": 0.0,
-        "scenario_wall_ms": 122696.232,
+        "scenario_wall_ms": 79926.372,
         "scope": "mixed",
-        "unaccounted_wall_ms": 122696.232
+        "unaccounted_wall_ms": 79926.372
       },
-      "duration_ms": 122696.232,
+      "duration_ms": 79926.372,
       "labels": {
         "backend": "foundationdb",
         "metadata_attached": "true",
@@ -61,29 +66,32 @@
         "realistic_latest": "1311100,8598193800",
         "realistic_time_travel": "1310800,8591638600",
         "runtime_bridge": "cpp_ffi",
-        "runtime_catalog_id": "5919363677708604306",
+        "runtime_catalog_id": "4903085783754233295",
         "runtime_ffi": "ok"
       },
-      "name": "mixed"
+      "name": "mixed",
+      "peak_rss_kib": 508320
     },
     {
       "accounting": {
-        "duckdb_extension_outside_storage_ms": 104176.431,
+        "duckdb_extension_outside_storage_ms": 84682.941,
         "fdb_bytes_read": 0,
         "fdb_rows_read": 0,
         "inside_rust_fdb_kv_ms": 0.0,
         "inside_rust_nested_measurements_ms": 0.0,
         "inside_rust_storage_call_ms": 0.0,
         "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
         "measured_storage_call_ms": 0.0,
         "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
         "runtime_metric_calls": 0,
         "rust_runtime_reported_storage_ms": 0.0,
-        "scenario_wall_ms": 104176.431,
+        "scenario_wall_ms": 84682.941,
         "scope": "dedicated_deletes",
-        "unaccounted_wall_ms": 104176.431
+        "unaccounted_wall_ms": 84682.941
       },
-      "duration_ms": 104176.431,
+      "duration_ms": 84682.941,
       "labels": {
         "backend": "foundationdb",
         "metadata_attached": "true",
@@ -92,29 +100,32 @@
         "realistic_latest": "1310900,8598193100",
         "realistic_time_travel": "1311100,8598193800",
         "runtime_bridge": "cpp_ffi",
-        "runtime_catalog_id": "5919363677708604306",
+        "runtime_catalog_id": "4903085783754233295",
         "runtime_ffi": "ok"
       },
-      "name": "dedicated_deletes"
+      "name": "dedicated_deletes",
+      "peak_rss_kib": 470016
     },
     {
       "accounting": {
-        "duckdb_extension_outside_storage_ms": 196803.814,
+        "duckdb_extension_outside_storage_ms": 112449.389,
         "fdb_bytes_read": 0,
         "fdb_rows_read": 0,
         "inside_rust_fdb_kv_ms": 0.0,
         "inside_rust_nested_measurements_ms": 0.0,
         "inside_rust_storage_call_ms": 0.0,
         "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
         "measured_storage_call_ms": 0.0,
         "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
         "runtime_metric_calls": 0,
         "rust_runtime_reported_storage_ms": 0.0,
-        "scenario_wall_ms": 196803.814,
+        "scenario_wall_ms": 112449.389,
         "scope": "dedicated_inlining",
-        "unaccounted_wall_ms": 196803.814
+        "unaccounted_wall_ms": 112449.389
       },
-      "duration_ms": 196803.814,
+      "duration_ms": 112449.389,
       "labels": {
         "backend": "foundationdb",
         "metadata_attached": "true",
@@ -122,29 +133,32 @@
         "payload_bytes": "225",
         "realistic_inline_tables": "100",
         "runtime_bridge": "cpp_ffi",
-        "runtime_catalog_id": "5919363677708604306",
+        "runtime_catalog_id": "4903085783754233295",
         "runtime_ffi": "ok"
       },
-      "name": "dedicated_inlining"
+      "name": "dedicated_inlining",
+      "peak_rss_kib": 858752
     },
     {
       "accounting": {
-        "duckdb_extension_outside_storage_ms": 113014.962,
+        "duckdb_extension_outside_storage_ms": 81239.513,
         "fdb_bytes_read": 0,
         "fdb_rows_read": 0,
         "inside_rust_fdb_kv_ms": 0.0,
         "inside_rust_nested_measurements_ms": 0.0,
         "inside_rust_storage_call_ms": 0.0,
         "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
         "measured_storage_call_ms": 0.0,
         "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
         "runtime_metric_calls": 0,
         "rust_runtime_reported_storage_ms": 0.0,
-        "scenario_wall_ms": 113014.962,
+        "scenario_wall_ms": 81239.513,
         "scope": "dedicated_compaction",
-        "unaccounted_wall_ms": 113014.962
+        "unaccounted_wall_ms": 81239.513
       },
-      "duration_ms": 113014.962,
+      "duration_ms": 81239.513,
       "labels": {
         "backend": "foundationdb",
         "metadata_attached": "true",
@@ -152,60 +166,66 @@
         "payload_bytes": "225",
         "realistic_latest": "1310900,8598193100",
         "runtime_bridge": "cpp_ffi",
-        "runtime_catalog_id": "5919363677708604306",
+        "runtime_catalog_id": "4903085783754233295",
         "runtime_ffi": "ok"
       },
-      "name": "dedicated_compaction"
+      "name": "dedicated_compaction",
+      "peak_rss_kib": 510496
     },
     {
       "accounting": {
-        "duckdb_extension_outside_storage_ms": 10715.817,
+        "duckdb_extension_outside_storage_ms": 21574.901,
         "fdb_bytes_read": 0,
         "fdb_rows_read": 0,
         "inside_rust_fdb_kv_ms": 0.0,
         "inside_rust_nested_measurements_ms": 0.0,
         "inside_rust_storage_call_ms": 0.0,
         "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
         "measured_storage_call_ms": 0.0,
         "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
         "runtime_metric_calls": 0,
         "rust_runtime_reported_storage_ms": 0.0,
-        "scenario_wall_ms": 10715.817,
+        "scenario_wall_ms": 21574.901,
         "scope": "join_queries",
-        "unaccounted_wall_ms": 10715.817
+        "unaccounted_wall_ms": 21574.901
       },
-      "duration_ms": 10715.817,
+      "duration_ms": 21574.901,
       "labels": {
         "backend": "foundationdb",
         "metadata_attached": "true",
         "operation": "AttachMetadata",
         "payload_bytes": "225",
         "runtime_bridge": "cpp_ffi",
-        "runtime_catalog_id": "5919363677708604306",
+        "runtime_catalog_id": "4903085783754233295",
         "runtime_ffi": "ok",
-        "varied_join_latest": "100185,26288204400",
-        "varied_join_time_travel": "100185,26288204400"
+        "varied_join_latest": "45,8656600",
+        "varied_join_time_travel": "45,8656600"
       },
-      "name": "join_queries"
+      "name": "join_queries",
+      "peak_rss_kib": 437952
     },
     {
       "accounting": {
-        "duckdb_extension_outside_storage_ms": 929773.345,
+        "duckdb_extension_outside_storage_ms": 175482.5,
         "fdb_bytes_read": 0,
         "fdb_rows_read": 0,
         "inside_rust_fdb_kv_ms": 0.0,
         "inside_rust_nested_measurements_ms": 0.0,
         "inside_rust_storage_call_ms": 0.0,
         "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
         "measured_storage_call_ms": 0.0,
         "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
         "runtime_metric_calls": 0,
         "rust_runtime_reported_storage_ms": 0.0,
-        "scenario_wall_ms": 929773.345,
+        "scenario_wall_ms": 175482.5,
         "scope": "mutation_churn",
-        "unaccounted_wall_ms": 929773.345
+        "unaccounted_wall_ms": 175482.5
       },
-      "duration_ms": 929773.345,
+      "duration_ms": 175482.5,
       "labels": {
         "backend": "foundationdb",
         "metadata_attached": "true",
@@ -214,31 +234,46 @@
         "realistic_latest": "1315319,9433411805",
         "realistic_time_travel": "1310900,8598193100",
         "runtime_bridge": "cpp_ffi",
-        "runtime_catalog_id": "5919363677708604306",
+        "runtime_catalog_id": "4903085783754233295",
         "runtime_ffi": "ok",
-        "varied_join_latest": "99927,26254043700",
-        "varied_join_time_travel": "100185,26288204400"
+        "varied_external_file_cache_blocks_round_0": "0",
+        "varied_external_file_cache_blocks_round_1": "0",
+        "varied_external_file_cache_blocks_round_2": "0",
+        "varied_external_file_cache_blocks_round_3": "0",
+        "varied_join_latest": "40,8653840",
+        "varied_join_time_travel": "45,8656600",
+        "varied_memory_usage_bytes_round_0": "12012084",
+        "varied_memory_usage_bytes_round_1": "15384344",
+        "varied_memory_usage_bytes_round_2": "19895512",
+        "varied_memory_usage_bytes_round_3": "22243512",
+        "varied_object_cache_bytes_round_0": "3252516",
+        "varied_object_cache_bytes_round_1": "4679504",
+        "varied_object_cache_bytes_round_2": "6094296",
+        "varied_object_cache_bytes_round_3": "7512640"
       },
-      "name": "mutation_churn"
+      "name": "mutation_churn",
+      "peak_rss_kib": 1031040
     },
     {
       "accounting": {
-        "duckdb_extension_outside_storage_ms": 9841.486,
+        "duckdb_extension_outside_storage_ms": 14412.049,
         "fdb_bytes_read": 0,
         "fdb_rows_read": 0,
         "inside_rust_fdb_kv_ms": 0.0,
         "inside_rust_nested_measurements_ms": 0.0,
         "inside_rust_storage_call_ms": 0.0,
         "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
         "measured_storage_call_ms": 0.0,
         "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
         "runtime_metric_calls": 0,
         "rust_runtime_reported_storage_ms": 0.0,
-        "scenario_wall_ms": 9841.486,
+        "scenario_wall_ms": 14412.049,
         "scope": "latest_queries",
-        "unaccounted_wall_ms": 9841.486
+        "unaccounted_wall_ms": 14412.049
       },
-      "duration_ms": 9841.486,
+      "duration_ms": 14412.049,
       "labels": {
         "backend": "foundationdb",
         "metadata_attached": "true",
@@ -246,29 +281,32 @@
         "payload_bytes": "225",
         "realistic_latest": "1315319,9433411805",
         "runtime_bridge": "cpp_ffi",
-        "runtime_catalog_id": "5919363677708604306",
+        "runtime_catalog_id": "4903085783754233295",
         "runtime_ffi": "ok"
       },
-      "name": "latest_queries"
+      "name": "latest_queries",
+      "peak_rss_kib": 308128
     },
     {
       "accounting": {
-        "duckdb_extension_outside_storage_ms": 10188.12,
+        "duckdb_extension_outside_storage_ms": 14405.11,
         "fdb_bytes_read": 0,
         "fdb_rows_read": 0,
         "inside_rust_fdb_kv_ms": 0.0,
         "inside_rust_nested_measurements_ms": 0.0,
         "inside_rust_storage_call_ms": 0.0,
         "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
         "measured_storage_call_ms": 0.0,
         "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
         "runtime_metric_calls": 0,
         "rust_runtime_reported_storage_ms": 0.0,
-        "scenario_wall_ms": 10188.12,
+        "scenario_wall_ms": 14405.11,
         "scope": "time_travel_queries",
-        "unaccounted_wall_ms": 10188.12
+        "unaccounted_wall_ms": 14405.11
       },
-      "duration_ms": 10188.12,
+      "duration_ms": 14405.11,
       "labels": {
         "backend": "foundationdb",
         "metadata_attached": "true",
@@ -276,29 +314,32 @@
         "payload_bytes": "225",
         "realistic_time_travel": "1315319,9433411805",
         "runtime_bridge": "cpp_ffi",
-        "runtime_catalog_id": "5919363677708604306",
+        "runtime_catalog_id": "4903085783754233295",
         "runtime_ffi": "ok"
       },
-      "name": "time_travel_queries"
+      "name": "time_travel_queries",
+      "peak_rss_kib": 302896
     },
     {
       "accounting": {
-        "duckdb_extension_outside_storage_ms": 9354.603,
+        "duckdb_extension_outside_storage_ms": 16538.659,
         "fdb_bytes_read": 0,
         "fdb_rows_read": 0,
         "inside_rust_fdb_kv_ms": 0.0,
         "inside_rust_nested_measurements_ms": 0.0,
         "inside_rust_storage_call_ms": 0.0,
         "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
         "measured_storage_call_ms": 0.0,
         "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
         "runtime_metric_calls": 0,
         "rust_runtime_reported_storage_ms": 0.0,
-        "scenario_wall_ms": 9354.603,
+        "scenario_wall_ms": 16538.659,
         "scope": "parallel_latest_queries",
-        "unaccounted_wall_ms": 9354.603
+        "unaccounted_wall_ms": 16538.659
       },
-      "duration_ms": 9354.603,
+      "duration_ms": 16538.659,
       "labels": {
         "backend": "foundationdb",
         "metadata_attached": "true",
@@ -307,15 +348,17 @@
         "realistic_latest": "1315319,9433411805",
         "realistic_parallel_workers": "12",
         "runtime_bridge": "cpp_ffi",
-        "runtime_catalog_id": "5919363677708604306",
+        "runtime_catalog_id": "4903085783754233295",
         "runtime_ffi": "ok"
       },
       "name": "parallel_latest_queries"
     }
   ],
-  "elapsed_ms": 1737859.433,
+  "elapsed_ms": 723738.947,
   "fixture": {
     "backend": "fdb",
+    "churn_mode": "all",
+    "churn_rounds": 4,
     "columns_per_table": 24,
     "component_batches": [
       "preload",
@@ -329,16 +372,23 @@
       "time_travel_queries",
       "parallel_latest_queries"
     ],
+    "concurrent_writers": 0,
     "duckdb_build_profile": "release",
+    "duckdb_memory_limit": "1024MiB",
+    "mutation_tables_per_transaction": 10,
+    "mutation_transaction_scope": "table_batch",
     "parallel_workers": 12,
+    "payload_bytes": 4096,
     "preload_batch_rows": 4096,
     "preload_parallelism": 4,
     "rows_per_table": 13108,
     "same_sql_for_backends": true,
+    "schema_shape": "legacy",
     "small_write_batch_rows": "5-20",
     "table_count": 100,
     "target_logical_data_bytes": 5368709120
   },
-  "generated_at_micros": 1784724210658491,
+  "generated_at_micros": 1785165093142308,
+  "peak_rss_kib": 1183712,
   "profile": "varied"
 }

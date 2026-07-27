@@ -3,6 +3,7 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
+use crate::runtime_metrics::RuntimeMetricStage;
 #[cfg(feature = "runtime-metrics")]
 use crate::runtime_metrics::{record_runtime_measurement, record_runtime_method_elapsed};
 use crate::{
@@ -29,33 +30,6 @@ static FILE_COLUMN_STATS_ROW_CACHE: OnceLock<
 static FILE_COLUMN_STATS_FILE_CACHE: OnceLock<
     Mutex<LruCache<FileColumnStatsFileCacheKey, Vec<FileColumnStatsRow>>>,
 > = OnceLock::new();
-
-#[cfg(feature = "runtime-metrics")]
-#[derive(Clone, Copy)]
-struct RuntimeMetricStage(std::time::Instant);
-
-#[cfg(not(feature = "runtime-metrics"))]
-#[derive(Clone, Copy)]
-struct RuntimeMetricStage;
-
-impl RuntimeMetricStage {
-    #[inline]
-    fn start() -> Self {
-        #[cfg(feature = "runtime-metrics")]
-        {
-            Self(std::time::Instant::now())
-        }
-        #[cfg(not(feature = "runtime-metrics"))]
-        {
-            Self
-        }
-    }
-
-    #[cfg(feature = "runtime-metrics")]
-    fn elapsed_micros(self) -> u64 {
-        u64::try_from(self.0.elapsed().as_micros()).unwrap_or(u64::MAX)
-    }
-}
 
 #[cfg(feature = "runtime-metrics")]
 fn record_runtime_method_stage(operation: &str, started: RuntimeMetricStage) {
@@ -234,13 +208,7 @@ pub fn register_file_column_stats_batch(
     }
     stage_table_file_stats_versions_for_rows(&mut batch, catalog, &rows, version);
     kv.commit(batch)?;
-    let mut invalidated_files = BTreeSet::new();
-    for row in &rows {
-        remove_cached_file_column_stats(kv, catalog, row.data_file_id, row.column_id);
-        if invalidated_files.insert(row.data_file_id) {
-            remove_cached_file_column_stats_for_data_file(kv, catalog, row.data_file_id);
-        }
-    }
+    remove_cached_file_column_stats_rows(kv, catalog, &rows);
     Ok(rows)
 }
 
@@ -722,7 +690,7 @@ fn file_column_stats_cache_key(
     column_id: ColumnId,
 ) -> FileColumnStatsCacheKey {
     FileColumnStatsCacheKey {
-        namespace: kv.catalog_cache_namespace(),
+        namespace: kv.catalog_cache_namespace().without_read_context(),
         catalog,
         data_file_id,
         column_id,
@@ -743,7 +711,7 @@ fn file_column_stats_file_cache_key(
     data_file_id: DataFileId,
 ) -> FileColumnStatsFileCacheKey {
     FileColumnStatsFileCacheKey {
-        namespace: kv.catalog_cache_namespace(),
+        namespace: kv.catalog_cache_namespace().without_read_context(),
         catalog,
         data_file_id,
     }
@@ -796,7 +764,7 @@ fn insert_file_column_stats_for_data_file(
     cache.insert(key, rows);
 }
 
-fn remove_cached_file_column_stats(
+pub(crate) fn remove_cached_file_column_stats(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
     data_file_id: DataFileId,
@@ -810,7 +778,38 @@ fn remove_cached_file_column_stats(
     }
 }
 
+pub(crate) fn remove_cached_file_column_stats_rows(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    rows: &[FileColumnStatsRow],
+) {
+    let mut invalidated_files = BTreeSet::new();
+    for row in rows {
+        remove_cached_file_column_stats(kv, catalog, row.data_file_id, row.column_id);
+        invalidated_files.insert(row.data_file_id);
+    }
+    for data_file_id in invalidated_files {
+        remove_cached_file_column_stats_file_entry(kv, catalog, data_file_id);
+    }
+}
+
 pub(crate) fn remove_cached_file_column_stats_for_data_file(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    data_file_id: DataFileId,
+) {
+    let namespace = kv.catalog_cache_namespace().without_read_context();
+    if let Some(cache) = FILE_COLUMN_STATS_ROW_CACHE.get()
+        && let Ok(mut cache) = cache.lock()
+    {
+        cache.retain(|key, _| {
+            key.namespace != namespace || key.catalog != catalog || key.data_file_id != data_file_id
+        });
+    }
+    remove_cached_file_column_stats_file_entry(kv, catalog, data_file_id);
+}
+
+fn remove_cached_file_column_stats_file_entry(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
     data_file_id: DataFileId,

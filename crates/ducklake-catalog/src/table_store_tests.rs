@@ -1,14 +1,16 @@
-use std::cell::RefCell;
+use std::{cell::RefCell, collections::BTreeSet};
 
 use crate::{
     CatalogId, CatalogOrderId, CatalogResult, FakeOrderedCatalogKv, KvBatch, OrderedCatalogKv,
     RangeDirection, RangeItem, RawSnapshotSequence, SnapshotRow, TableId, TableRow,
     keys::{
-        current_table_row_key, table_object_key, table_object_scan_prefix, table_visibility_prefix,
+        current_table_row_key, table_object_key, table_object_prefix, table_object_scan_prefix,
+        table_visibility_prefix,
     },
     store::stage_snapshot,
     table_store::{
-        list_tables_at, load_current_table_row, stage_current_table_row, stage_table_visibility_row,
+        list_table_rows_for_table, list_tables_at, load_current_table_row, load_current_table_rows,
+        stage_current_table_row, stage_table_visibility_row,
     },
 };
 
@@ -17,6 +19,36 @@ struct ScanRecordingKv {
     get_keys: RefCell<Vec<Vec<u8>>>,
     scanned_prefixes: RefCell<Vec<Vec<u8>>>,
     range_starts: RefCell<Vec<Vec<u8>>>,
+}
+
+#[test]
+fn given_one_table_requested_when_loading_history_then_only_that_table_prefix_is_scanned() {
+    let catalog = CatalogId(5);
+    let requested = TableId(7);
+    let other = TableId(8);
+    let mut kv = FakeOrderedCatalogKv::new();
+    let mut batch = KvBatch::new();
+    for (table_id, order) in [
+        (requested, CatalogOrderId::uuid_v7(10)),
+        (requested, CatalogOrderId::uuid_v7(20)),
+        (other, CatalogOrderId::uuid_v7(30)),
+    ] {
+        batch.put(
+            table_object_key(catalog, table_id, order),
+            TableRow::new(table_id, format!("table_{}", table_id.0), order).encode(),
+        );
+    }
+    kv.commit(batch).unwrap();
+    let recording = ScanRecordingKv::new(kv);
+
+    let rows = list_table_rows_for_table(&recording, catalog, requested).unwrap();
+
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row.table_id == requested));
+    assert_eq!(
+        recording.scanned_prefixes.into_inner(),
+        vec![table_object_prefix(catalog, requested)]
+    );
 }
 
 impl ScanRecordingKv {
@@ -98,6 +130,44 @@ fn given_current_table_row_when_loading_current_table_then_history_is_not_scanne
         recording.range_starts.borrow().is_empty(),
         "current table loading should not scan table history"
     );
+}
+
+#[test]
+fn given_requested_current_tables_when_batch_loading_then_only_requested_keys_are_read() {
+    let catalog = CatalogId(4);
+    let order = CatalogOrderId::uuid_v7(10);
+    let mut kv = FakeOrderedCatalogKv::new();
+    let mut batch = KvBatch::new();
+    for table_id in [TableId(7), TableId(8), TableId(9)] {
+        stage_current_table_row(
+            &mut batch,
+            catalog,
+            &TableRow::new(table_id, format!("table_{}", table_id.0), order),
+        );
+    }
+    kv.commit(batch).unwrap();
+    let recording = ScanRecordingKv::new(kv);
+
+    let rows = load_current_table_rows(
+        &recording,
+        catalog,
+        &BTreeSet::from([TableId(7), TableId(9)]),
+    )
+    .unwrap();
+
+    assert_eq!(
+        rows.iter().map(|row| row.table_id).collect::<Vec<_>>(),
+        vec![TableId(7), TableId(9)]
+    );
+    assert_eq!(
+        recording.get_keys.into_inner(),
+        vec![
+            current_table_row_key(catalog, TableId(7)),
+            current_table_row_key(catalog, TableId(9)),
+        ]
+    );
+    assert!(recording.scanned_prefixes.into_inner().is_empty());
+    assert!(recording.range_starts.into_inner().is_empty());
 }
 
 #[test]

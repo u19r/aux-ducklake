@@ -2,7 +2,7 @@ use ducklake_catalog::{
     CatalogId, CatalogOrderId, ColumnId, DataFileId, DataFileRow, FakeOrderedCatalogKv,
     FileColumnStatsRow, KvBatch, RawSnapshotSequence, TableId, commit_append_data_files,
     initialize_catalog_if_absent,
-    keys::{latest_snapshot_row_key, snapshot_key},
+    keys::{latest_snapshot_row_key, raw_snapshot_row_key, snapshot_key},
     latest_snapshot, list_file_column_stats, list_file_column_stats_for_table_column,
     list_snapshots, register_file_column_stats, snapshot_by_raw_sequence,
 };
@@ -252,10 +252,12 @@ fn replace_snapshot(
     snapshot: &ducklake_catalog::SnapshotRow,
 ) {
     let mut batch = KvBatch::new();
+    let latest_value = latest_snapshot_value(snapshot);
     batch.put(snapshot_key(catalog, snapshot.order), snapshot.encode());
+    batch.put(latest_snapshot_row_key(catalog), latest_value.clone());
     batch.put(
-        latest_snapshot_row_key(catalog),
-        latest_snapshot_value(snapshot),
+        raw_snapshot_row_key(catalog, snapshot.sequence),
+        latest_value,
     );
     kv.commit(batch).unwrap();
 }

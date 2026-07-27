@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DUCKLAKE_DIR="$ROOT_DIR/third_party/ducklake"
 . "$ROOT_DIR/scripts/ducklake_build_common.sh"
 DUCKDB_BIN="$DUCKLAKE_DIR/build/debug/duckdb"
+DUCKLAKE_EXTENSION="$DUCKLAKE_DIR/build/debug/extension/ducklake/ducklake.duckdb_extension"
 
 fail() {
     echo "ducklake runtime cpp ffi smoke failure: $*" >&2
@@ -15,6 +16,12 @@ assert_contains() {
     local haystack="$1"
     local needle="$2"
     [[ "$haystack" == *"$needle"* ]] || fail "expected output to contain: $needle"
+}
+
+assert_not_contains() {
+    local haystack="$1"
+    local needle="$2"
+    [[ "$haystack" != *"$needle"* ]] || fail "expected output not to contain: $needle"
 }
 
 catalog_backend() {
@@ -53,6 +60,7 @@ if ! ducklake_reuse_debug_build_enabled; then
     AUX_DUCKLAKE_SKIP_FETCH=1 "$ROOT_DIR/scripts/build_ducklake_debug.sh"
 fi
 [[ -x "$DUCKDB_BIN" ]] || fail "modified duckdb executable was not built"
+[[ -f "$DUCKLAKE_EXTENSION" ]] || fail "modified ducklake extension was not built"
 
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
@@ -71,12 +79,13 @@ else
 fi
 export AUX_DUCKLAKE_CATALOG_BACKEND="$backend"
 export AUX_DUCKLAKE_FDB_PREFIX="aux-ducklake/runtime-smoke/$catalog_run_id/main/"
+export AUX_DUCKLAKE_RUNTIME_CATALOG_IDENTITY="$AUX_DUCKLAKE_FDB_PREFIX"
 mkdir -p "$tmp_dir/data"
 printf 'orphan\n' > "$tmp_dir/data/runtime-orphan.parquet"
 
 set +e
 output="$("$DUCKDB_BIN" -batch 2>&1 <<SQL
-LOAD ducklake;
+LOAD '$DUCKLAKE_EXTENSION';
 ATTACH 'ducklake:$tmp_dir/metadata.duckdb' AS dl (
     DATA_PATH '$tmp_dir/data',
     META_TYPE 'aux_catalog',
@@ -178,7 +187,7 @@ assert_contains "$output" "orphan_cleanup_dry_run=1"
 
 set +e
 reattach_output="$("$DUCKDB_BIN" -batch 2>&1 <<SQL
-LOAD ducklake;
+LOAD '$DUCKLAKE_EXTENSION';
 ATTACH 'ducklake:$tmp_dir/metadata.duckdb' AS dl (
     DATA_PATH '$tmp_dir/data',
     META_TYPE 'aux_catalog',
@@ -186,6 +195,16 @@ ATTACH 'ducklake:$tmp_dir/metadata.duckdb' AS dl (
     AUTOMATIC_MIGRATION true
 );
 SELECT 'reattach_count=' || count(*)
+FROM dl.main.runtime_probe;
+DETACH dl;
+ATTACH 'ducklake:$tmp_dir/reattach-metadata.duckdb' AS dl (
+    DATA_PATH '$tmp_dir/data',
+    META_TYPE 'aux_catalog',
+    DATA_INLINING_ROW_LIMIT 0,
+    AUTOMATIC_MIGRATION true
+);
+INSERT INTO dl.main.runtime_probe VALUES (1);
+SELECT 'fresh_mirror_append=' || count(*) || ',' || sum(id)
 FROM dl.main.runtime_probe;
 SQL
 )"
@@ -196,12 +215,14 @@ printf '%s\n' "$reattach_output"
 
 [[ "$reattach_status" -eq 0 ]] || fail "expected existing aux_catalog attach to succeed"
 assert_contains "$reattach_output" "reattach_count=0"
+assert_contains "$reattach_output" "fresh_mirror_append=1,1"
 
 export AUX_DUCKLAKE_FDB_PREFIX="aux-ducklake/runtime-smoke/$catalog_run_id/inline/"
+export AUX_DUCKLAKE_RUNTIME_CATALOG_IDENTITY="$AUX_DUCKLAKE_FDB_PREFIX"
 
 set +e
 inline_output="$("$DUCKDB_BIN" -batch 2>&1 <<SQL
-LOAD ducklake;
+LOAD '$DUCKLAKE_EXTENSION';
 ATTACH 'ducklake:$tmp_dir/inline-metadata.duckdb' AS dl (
     DATA_PATH '$tmp_dir/inline-data',
     META_TYPE 'aux_catalog',
@@ -239,6 +260,13 @@ FROM ducklake_table_changes(
     getvariable('after_delete')::BIGINT
 )
 WHERE id = 101;
+SELECT 'inline_cdf_unmatched_delete=' || count(*)
+FROM ducklake_table_changes(
+    'dl', 'main', 'runtime_inline',
+    getvariable('before_delete')::BIGINT + 1,
+    getvariable('after_delete')::BIGINT
+)
+WHERE id = 102;
 SQL
 )"
 inline_status=$?
@@ -251,6 +279,32 @@ assert_contains "$inline_output" "inline_current=2,203,2"
 assert_contains "$inline_output" "inline_cdf_insert=2,203,2,2"
 assert_contains "$inline_output" "inline_after_delete=1,102,1,0"
 assert_contains "$inline_output" "inline_cdf_delete=1,101,1,1"
+assert_contains "$inline_output" "inline_cdf_unmatched_delete=0"
+
+set +e
+inline_reattach_output="$("$DUCKDB_BIN" -batch 2>&1 <<SQL
+LOAD '$DUCKLAKE_EXTENSION';
+ATTACH 'ducklake:$tmp_dir/inline-metadata.duckdb' AS dl (
+    DATA_PATH '$tmp_dir/inline-data',
+    META_TYPE 'aux_catalog',
+    DATA_INLINING_ROW_LIMIT 100,
+    AUTOMATIC_MIGRATION true
+);
+SELECT 'inline_reattach_current=' || count(*) || ',' || sum(id)
+FROM dl.main.runtime_inline;
+SELECT 'inline_reattach_delete=' || count(*) || ',' || sum(id)
+FROM ducklake_table_changes('dl', 'main', 'runtime_inline', 3, 3)
+WHERE id = 101;
+SQL
+)"
+inline_reattach_status=$?
+set -e
+
+printf '%s\n' "$inline_reattach_output"
+
+[[ "$inline_reattach_status" -eq 0 ]] || fail "expected aux_catalog inline reattach smoke to succeed"
+assert_contains "$inline_reattach_output" "inline_reattach_current=1,102"
+assert_contains "$inline_reattach_output" "inline_reattach_delete=1,101"
 if [[ -n "$metrics_path" ]]; then
     [[ -f "$metrics_path" ]] || fail "runtime metrics artifact was not written at $metrics_path"
     metrics_output="$(cat "$metrics_path")"
@@ -262,6 +316,12 @@ if [[ -n "$metrics_path" ]]; then
     assert_contains "$metrics_output" 'family="inline",operation="RegisterInlineRows",scope="unscoped",status="ok"'
     assert_contains "$metrics_output" 'family="change_feed",operation="ListDataFileChanges",scope="unscoped",status="ok"'
     assert_contains "$metrics_output" 'family="cleanup",operation="ListKnownFilesForCleanup",scope="unscoped",status="ok"'
+    assert_contains "$metrics_output" 'family="metadata",operation="RenderBoundedAppendMirrorSql",scope="unscoped",status="ok"'
+    assert_contains "$metrics_output" 'family="metadata",operation="RenderBoundedDeleteFileMirrorSql",scope="unscoped",status="ok"'
+    assert_not_contains "$metrics_output" 'operation="RenderCurrentMetadataDataFileMirrorSql"'
+    assert_not_contains "$metrics_output" 'operation="RenderCurrentMetadataFileColumnStatsMirrorSql"'
+    assert_not_contains "$metrics_output" 'operation="RenderDeleteFileMirrorSql"'
+    assert_not_contains "$metrics_output" 'operation="RenderScheduledCleanupMirrorSql"'
     echo "runtime_metrics_path=$metrics_path"
 fi
 

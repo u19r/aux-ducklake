@@ -46,7 +46,7 @@ pub fn commit_create_macro_rows(
     );
     let mut batch = KvBatch::new();
     stage_snapshot(&mut batch, catalog, &snapshot);
-    stage_next_schema_version(kv, &mut batch, catalog)?;
+    stage_next_schema_version(kv, &mut batch, catalog, &snapshot)?;
     for macro_row in &mut macros {
         macro_row.validity = ValidityWindow::new(order, None);
         batch.put(
@@ -81,7 +81,7 @@ pub fn commit_drop_macros(
     let mut batch = KvBatch::new();
     let mut dropped = Vec::with_capacity(macro_ids.len());
     stage_snapshot(&mut batch, catalog, &snapshot);
-    stage_next_schema_version(kv, &mut batch, catalog)?;
+    stage_next_schema_version(kv, &mut batch, catalog, &snapshot)?;
 
     for macro_id in macro_ids {
         let mut macro_row =
@@ -108,18 +108,12 @@ pub fn list_macros_at(
     catalog: CatalogId,
     snapshot_order: CatalogOrderId,
 ) -> CatalogResult<Vec<MacroRow>> {
-    let mut macros = Vec::new();
-    for item in kv.scan_prefix(
-        &macro_object_scan_prefix(catalog),
-        RangeDirection::Forward,
-        usize::MAX,
-    )? {
-        let row = decode_macro_item(catalog, &item.key, &item.value)?;
-        if row.validity.is_visible_at(snapshot_order) {
-            macros.push(row);
-        }
-    }
-    Ok(macros)
+    Ok(
+        list_macro_rows_for_snapshot_cache(kv, catalog, snapshot_order)?
+            .into_iter()
+            .filter(|row| row.validity.is_visible_at(snapshot_order))
+            .collect(),
+    )
 }
 
 pub(crate) fn list_macro_rows(
@@ -288,8 +282,9 @@ fn macro_order_from_key(
 }
 
 fn reject_duplicate_macro_ids(macro_ids: &[MacroId]) -> CatalogResult<()> {
-    for (index, macro_id) in macro_ids.iter().enumerate() {
-        if macro_ids[..index].iter().any(|prior| prior == macro_id) {
+    let mut unique = BTreeSet::new();
+    for macro_id in macro_ids {
+        if !unique.insert(*macro_id) {
             return Err(CatalogError::InvalidMutation(format!(
                 "macro {} is listed more than once for drop",
                 macro_id.0

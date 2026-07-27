@@ -190,7 +190,7 @@ mod tests {
     }
 
     #[test]
-    fn given_multiple_new_files_for_one_table_when_validating_row_ids_then_current_files_are_scanned_once()
+    fn given_multiple_new_files_for_one_table_when_validating_row_ids_then_current_files_are_not_scanned()
      {
         let catalog = CatalogId(1);
         let table = TableId(7);
@@ -215,7 +215,7 @@ mod tests {
         reject_current_data_file_row_id_overlaps_except(&kv, catalog, &proposed, &BTreeSet::new())
             .unwrap();
 
-        assert_eq!(kv.current_data_file_prefix_scans(), 1);
+        assert_eq!(kv.current_data_file_prefix_scans(), 0);
     }
 
     #[test]
@@ -246,6 +246,45 @@ mod tests {
         reject_current_data_file_row_id_overlaps_except(&kv, catalog, &proposed, &BTreeSet::new())
             .unwrap();
 
+        assert_eq!(kv.current_data_file_prefix_scans(), 0);
+    }
+
+    #[test]
+    fn given_expired_file_when_reusing_allocated_row_ids_then_high_watermark_rejects_without_scan()
+    {
+        let catalog = CatalogId(1);
+        let table = TableId(7);
+        let mut inner = FakeOrderedCatalogKv::new();
+        initialize_catalog_if_absent(&mut inner, catalog).unwrap();
+        let committed = commit_append_data_files(
+            &mut inner,
+            catalog,
+            vec![data_file(DataFileId(3), table, 10, 4)],
+        )
+        .unwrap();
+        expire_data_file(
+            &mut inner,
+            catalog,
+            committed[0].data_file_id,
+            CatalogOrderId::uuid_v7(10),
+        )
+        .unwrap();
+        let kv = CountingPartitionScanKv::new(inner);
+
+        let error = reject_current_data_file_row_id_overlaps_except(
+            &kv,
+            catalog,
+            &[data_file(DataFileId(18), table, 12, 1)],
+            &BTreeSet::new(),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            CatalogError::InvalidMutation(
+                "conflict committing data mutation: data file 18 row ids [12..13) reuse allocated row ids below table 7 next row id 14".to_owned()
+            )
+        );
         assert_eq!(kv.current_data_file_prefix_scans(), 0);
     }
 
@@ -303,6 +342,32 @@ mod tests {
         assert_eq!(second.rows.len(), 1);
         assert_eq!(kv.current_data_file_prefix_scans(), 1);
         assert_eq!(kv.latest_snapshot_gets(), 0);
+    }
+
+    #[test]
+    fn given_one_table_requested_in_read_context_when_listing_current_files_then_catalog_is_not_scanned()
+     {
+        let catalog = CatalogId(1);
+        let requested_table = TableId(107);
+        let mut inner = FakeOrderedCatalogKv::new();
+        commit_append_data_files(
+            &mut inner,
+            catalog,
+            vec![
+                data_file(DataFileId(3), requested_table, 0, 4),
+                data_file(DataFileId(4), TableId(108), 0, 4),
+            ],
+        )
+        .unwrap();
+        let kv = CountingPartitionScanKv::new(inner);
+        let _read_request = crate::store::begin_runtime_read_request(Some(91_007));
+
+        let rows = list_current_data_files(&kv, catalog, requested_table).unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].table_id, requested_table);
+        assert_eq!(kv.current_data_file_prefix_scans(), 1);
+        assert_eq!(kv.broad_current_data_file_prefix_scans(), 0);
     }
 
     #[test]
@@ -995,6 +1060,7 @@ mod tests {
         order_delete_change_range_scans: Cell<usize>,
         data_file_begin_range_scans: Cell<usize>,
         current_data_file_prefix_scans: Cell<usize>,
+        broad_current_data_file_prefix_scans: Cell<usize>,
         current_delete_file_gets: Cell<usize>,
         delete_timeline_scans: Cell<usize>,
         delete_timeline_items: Cell<usize>,
@@ -1009,6 +1075,7 @@ mod tests {
                 order_delete_change_range_scans: Cell::new(0),
                 data_file_begin_range_scans: Cell::new(0),
                 current_data_file_prefix_scans: Cell::new(0),
+                broad_current_data_file_prefix_scans: Cell::new(0),
                 current_delete_file_gets: Cell::new(0),
                 delete_timeline_scans: Cell::new(0),
                 delete_timeline_items: Cell::new(0),
@@ -1038,6 +1105,10 @@ mod tests {
 
         fn current_data_file_prefix_scans(&self) -> usize {
             self.current_data_file_prefix_scans.get()
+        }
+
+        fn broad_current_data_file_prefix_scans(&self) -> usize {
+            self.broad_current_data_file_prefix_scans.get()
         }
 
         fn current_delete_file_gets(&self) -> usize {
@@ -1079,6 +1150,13 @@ mod tests {
             if prefix.starts_with(&family_prefix(CatalogId(1), KeyFamily::CurrentDataFile)) {
                 self.current_data_file_prefix_scans
                     .set(self.current_data_file_prefix_scans.get().saturating_add(1));
+                if prefix == family_prefix(CatalogId(1), KeyFamily::CurrentDataFile) {
+                    self.broad_current_data_file_prefix_scans.set(
+                        self.broad_current_data_file_prefix_scans
+                            .get()
+                            .saturating_add(1),
+                    );
+                }
             }
             Ok(self.inner.scan_prefix(prefix, direction, limit))
         }

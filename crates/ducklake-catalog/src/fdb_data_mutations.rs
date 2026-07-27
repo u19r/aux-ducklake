@@ -1,3 +1,4 @@
+use crate::fdb_inline_tables::{InlineTableDeletePayload, InlineTablePayload};
 use crate::{
     CommitAttemptId, DataFileId, DataFileRow, DeleteFileRow, FdbOrderedCatalogKv,
     FileColumnStatsRow, FilePartitionValueRow, InlineFileDeletionRow, InlineTableFlush,
@@ -6,7 +7,6 @@ use crate::{
 };
 
 const MAX_MUTATION_COMMIT_RETRIES: usize = 3;
-const PARTITION_ESTIMATE_LOOKUP_SCAN_MAX_PRODUCT: usize = 64;
 
 #[derive(Debug, Default)]
 struct FdbFileIdWatermark {
@@ -86,18 +86,75 @@ impl FdbDataMutation {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FdbMutationReadContext {
+    pub(crate) order: Option<crate::CatalogOrderId>,
+    pub(crate) data_files: Vec<DataFileRow>,
+    pub(crate) append_partitions: Vec<FdbAppendPartitionExpectation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FdbAppendPartitionExpectation {
+    pub(crate) data_file_id: DataFileId,
+    pub(crate) table_id: crate::TableId,
+    pub(crate) partition_table_id: Option<crate::TableId>,
+    pub(crate) partition_id: Option<u64>,
+    pub(crate) value_count: usize,
+}
+
+impl FdbAppendPartitionExpectation {
+    pub(crate) fn matches_current_table(self, table: &crate::TableRow) -> bool {
+        if table.table_id != self.table_id {
+            return false;
+        }
+        match &table.partition {
+            Some(partition) => {
+                self.partition_table_id == Some(self.table_id)
+                    && self.partition_id == Some(partition.partition_id)
+                    && self.value_count == partition.fields.len()
+            }
+            None => {
+                self.partition_table_id.is_none()
+                    && self.partition_id.is_none()
+                    && self.value_count == 0
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct FdbMutationPlan {
-    attempt_id: Option<CommitAttemptId>,
+    attempt: FdbMutationAttempt,
     commit_metadata: crate::SnapshotCommitMetadata,
     mutation: FdbDataMutation,
     expired_delete_files: Vec<FdbExpiredDeleteFile>,
     snapshot_operations: Vec<(SnapshotOperationKind, crate::TableId)>,
     row_id_overlap_policy: RowIdOverlapPolicy,
     expired_object_cleanup_policy: ExpiredObjectCleanupPolicy,
-    preloaded_data_files: Vec<DataFileRow>,
+    read_context: FdbMutationReadContext,
+    inline_mutation: FdbInlineMutation,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct FdbMutationAttempt {
+    pub(crate) proposed_snapshot: Option<CommitAttemptId>,
+    pub(crate) recovery: Option<CommitAttemptId>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FdbInlineMutation {
+    pub(crate) tables: Vec<crate::TableRow>,
+    pub(crate) payloads: Vec<InlineTablePayload>,
+    pub(crate) deletes: Vec<InlineTableDeletePayload>,
+}
+
+impl FdbInlineMutation {
+    fn is_empty(&self) -> bool {
+        self.tables.is_empty() && self.payloads.is_empty() && self.deletes.is_empty()
+    }
+}
+
+#[derive(Default)]
 pub(crate) struct FdbCompactionMutation {
     pub data_files: Vec<DataFileRow>,
     pub partition_values: Vec<FilePartitionValueRow>,
@@ -105,6 +162,7 @@ pub(crate) struct FdbCompactionMutation {
     pub dropped_data_files: Vec<DataFileRow>,
 }
 
+#[derive(Default)]
 pub(crate) struct FdbRewriteDeleteMutation {
     pub data_files: Vec<DataFileRow>,
     pub partition_values: Vec<FilePartitionValueRow>,
@@ -112,7 +170,7 @@ pub(crate) struct FdbRewriteDeleteMutation {
     pub file_column_stats: Vec<FileColumnStatsRow>,
     pub dropped_data_files: Vec<DataFileRow>,
     pub expired_delete_files: Vec<FdbExpiredDeleteFile>,
-    pub table_id: crate::TableId,
+    pub table_ids: Vec<crate::TableId>,
 }
 
 mod commit;

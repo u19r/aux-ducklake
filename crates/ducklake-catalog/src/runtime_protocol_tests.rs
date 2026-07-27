@@ -21,6 +21,40 @@ mod tests {
     }
 
     #[test]
+    fn request_round_trips_with_commit_read_context() {
+        let request = RuntimeRequest::new(
+            "req-context",
+            RuntimeCatalogBackend::FoundationDb,
+            "GetSnapshot",
+            Vec::new(),
+        )
+        .unwrap()
+        .with_read_context_id(42)
+        .unwrap();
+
+        assert_eq!(
+            RuntimeRequest::decode(&request.encode().unwrap()).unwrap(),
+            request
+        );
+    }
+
+    #[test]
+    fn atomic_mutation_request_above_previous_one_mib_limit_round_trips() {
+        let request = RuntimeRequest::new(
+            "req-batched-mutation",
+            RuntimeCatalogBackend::FoundationDb,
+            "CommitAttempt",
+            vec![b'x'; 1_200_000],
+        )
+        .unwrap();
+
+        assert_eq!(
+            RuntimeRequest::decode(&request.encode().unwrap()).unwrap(),
+            request
+        );
+    }
+
+    #[test]
     fn request_decode_defaults_legacy_frames_to_catalog_one() {
         let bytes = b"aux-ducklake-runtime/2\nrequest_id=req-1\nbackend=fdb\noperation=GetSnapshot\npayload_len=0\n\n";
 
@@ -35,7 +69,11 @@ mod tests {
 
         let error = RuntimeRequest::decode(bytes).unwrap_err();
 
-        assert!(error.to_string().contains("unsupported runtime protocol version 1"));
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported runtime protocol version 1")
+        );
     }
 
     #[test]

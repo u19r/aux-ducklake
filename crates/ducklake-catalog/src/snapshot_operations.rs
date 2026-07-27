@@ -1,4 +1,12 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+#[cfg(not(test))]
+use std::sync::OnceLock;
+
+#[cfg(not(test))]
+use crate::{
+    CatalogCacheNamespace,
+    bounded_cache::{BoundedCache, static_bounded_cache},
+};
 
 use crate::{
     CatalogError, CatalogId, CatalogOrderId, CatalogOrderKind, CatalogResult, KvBatch,
@@ -8,18 +16,21 @@ use crate::{
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum SnapshotOperationKind {
+    InlineFlush,
     RewriteDelete,
 }
 
 impl SnapshotOperationKind {
-    fn code(self) -> u8 {
+    pub(crate) fn code(self) -> u8 {
         match self {
+            Self::InlineFlush => b'F',
             Self::RewriteDelete => b'R',
         }
     }
 
     fn from_code(code: u8) -> CatalogResult<Self> {
         match code {
+            b'F' => Ok(Self::InlineFlush),
             b'R' => Ok(Self::RewriteDelete),
             _ => Err(CatalogError::InvalidKey(format!(
                 "unknown snapshot operation byte 0x{code:02x}"
@@ -84,6 +95,53 @@ pub(crate) fn snapshot_operation_table_ids_at(
     order: CatalogOrderId,
     kind: SnapshotOperationKind,
 ) -> CatalogResult<BTreeSet<TableId>> {
+    #[cfg(not(test))]
+    {
+        let key = SnapshotOperationCacheKey {
+            namespace: kv.catalog_cache_namespace(),
+            catalog,
+            order,
+            kind,
+        };
+        let cache = snapshot_operation_cache();
+        if let Some(table_ids) = cache.get(key) {
+            return Ok(table_ids);
+        }
+        let table_ids = snapshot_operation_table_ids_at_uncached(kv, catalog, order, kind)?;
+        cache.insert(key, table_ids.clone());
+        Ok(table_ids)
+    }
+    #[cfg(test)]
+    {
+        snapshot_operation_table_ids_at_uncached(kv, catalog, order, kind)
+    }
+}
+
+pub(crate) fn snapshot_operations_by_order(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    order_kind: CatalogOrderKind,
+) -> CatalogResult<BTreeMap<(CatalogOrderId, SnapshotOperationKind), BTreeSet<TableId>>> {
+    let prefix = snapshot_operation_prefix(catalog);
+    let mut operations =
+        BTreeMap::<(CatalogOrderId, SnapshotOperationKind), BTreeSet<TableId>>::new();
+    for item in kv.scan_prefix(&prefix, RangeDirection::Forward, usize::MAX)? {
+        let (order, kind, table_id) =
+            decode_snapshot_operation_key(&prefix, &item.key, order_kind)?;
+        operations
+            .entry((order, kind))
+            .or_default()
+            .insert(table_id);
+    }
+    Ok(operations)
+}
+
+fn snapshot_operation_table_ids_at_uncached(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    order: CatalogOrderId,
+    kind: SnapshotOperationKind,
+) -> CatalogResult<BTreeSet<TableId>> {
     let prefix = snapshot_operation_prefix(catalog);
     let mut table_ids = BTreeSet::new();
     for item in kv.scan_range(
@@ -99,6 +157,26 @@ pub(crate) fn snapshot_operation_table_ids_at(
         }
     }
     Ok(table_ids)
+}
+
+#[cfg(not(test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct SnapshotOperationCacheKey {
+    namespace: CatalogCacheNamespace,
+    catalog: CatalogId,
+    order: CatalogOrderId,
+    kind: SnapshotOperationKind,
+}
+
+#[cfg(not(test))]
+static SNAPSHOT_OPERATION_CACHE: OnceLock<
+    BoundedCache<SnapshotOperationCacheKey, BTreeSet<TableId>>,
+> = OnceLock::new();
+
+#[cfg(not(test))]
+fn snapshot_operation_cache() -> &'static BoundedCache<SnapshotOperationCacheKey, BTreeSet<TableId>>
+{
+    static_bounded_cache(&SNAPSHOT_OPERATION_CACHE, 256)
 }
 
 fn decode_snapshot_operation_key(

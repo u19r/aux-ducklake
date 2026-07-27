@@ -1,14 +1,21 @@
+mod inline_current_rows;
 mod inline_deletions;
 mod inline_file_deletes;
 mod inline_row_deletes;
 mod inline_tables;
 
+#[cfg(test)]
+mod inline_current_rows_tests;
 use crate::{
     CatalogError, CatalogResult, ValidityWindow,
     ids::CatalogOrderId,
     rows::{STORED_ORDER_LEN, decode_stored_order, encode_stored_order},
 };
 
+#[cfg(feature = "foundationdb")]
+pub(crate) use inline_current_rows::{
+    InlineCurrentRow, list_inline_current_rows, load_inline_next_row_id,
+};
 pub use inline_deletions::{
     InlineDeletionChunkRow, load_inline_deletion_payload_at, register_inline_deletion_payload,
 };
@@ -27,8 +34,6 @@ pub use inline_row_deletes::{
     InlineTableDeleteCommit, commit_delete_inline_table_rows,
     commit_delete_inline_table_rows_at_snapshot,
 };
-#[cfg(feature = "foundationdb")]
-pub(crate) use inline_row_deletes::{filter_deleted_rows, visible_inline_payload_chunks};
 #[cfg(not(test))]
 pub(crate) use inline_tables::invalidate_inline_table_payload_read_context;
 pub use inline_tables::{
@@ -39,8 +44,8 @@ pub use inline_tables::{
 };
 pub(crate) use inline_tables::{
     assemble_inline_payload, decode_inline_table_item, inline_chunk_visible_at,
-    inline_table_all_end_orders, inline_table_end_orders_at, inline_table_flushes_ending_at,
-    inline_table_payload_prefix, inline_table_prefix, list_unflushed_inline_table_payloads_at,
+    inline_table_all_end_orders, inline_table_end_orders_at, inline_table_payload_prefix,
+    inline_table_prefix, list_unflushed_inline_table_payloads_at,
     list_unflushed_inline_table_payloads_at_with_end_orders, stage_flush_inline_table_payloads,
 };
 #[cfg(feature = "foundationdb")]

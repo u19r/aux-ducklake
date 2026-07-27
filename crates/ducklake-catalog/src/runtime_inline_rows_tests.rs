@@ -934,6 +934,66 @@ delete_position\t3\t0\n"
     }
 
     #[test]
+    fn given_inline_delete_in_later_public_snapshot_when_listing_exact_snapshot_then_deleted_row_is_returned()
+     {
+        let catalog = CatalogId(1);
+        let table_id = TableId(45);
+        let schema_id = SchemaId(0);
+        let table_name = "runtime_inline_exact_delete_inlined";
+        let mut kv = FakeOrderedCatalogKv::new();
+        initialize_catalog_if_absent(&mut kv, catalog).unwrap();
+        let created = commit_create_table_row(
+            &mut kv,
+            catalog,
+            table_with_inline_schema(table_id, "runtime_inline_exact_delete", schema_id),
+        )
+        .unwrap();
+
+        let mut with_inline = created;
+        with_inline
+            .inlined_data_tables
+            .push(InlinedTableRow::new(table_name, schema_id.0));
+        register_inline_table_payload_with_table(
+            &mut kv,
+            catalog,
+            with_inline,
+            schema_id,
+            b"row\t101\ti:101\nrow\t102\ti:102\n".to_vec(),
+        )
+        .unwrap();
+        let insert_snapshot = latest_snapshot(&kv, catalog).unwrap().unwrap();
+        commit_delete_inline_table_rows(&mut kv, catalog, table_id, schema_id, &[101]).unwrap();
+        let delete_snapshot = latest_snapshot(&kv, catalog).unwrap().unwrap();
+
+        assert_eq!(delete_snapshot.sequence, insert_snapshot.sequence.next());
+        let deletions = inline_row_changes_payload(
+            &kv,
+            catalog,
+            inline_row_changes_payload_request(
+                table_name,
+                delete_snapshot.sequence.0,
+                delete_snapshot.sequence.0,
+            ),
+            crate::InlineRowChangeKind::Deleted,
+        )
+        .unwrap();
+        let deletions = String::from_utf8(deletions).unwrap();
+
+        assert!(
+            deletions.contains("inline_row_change_count=1"),
+            "{deletions}"
+        );
+        assert!(
+            deletions.contains(&format!(
+                "row_change\t\t{}\t101\ti:101",
+                delete_snapshot.sequence
+            )),
+            "{deletions}"
+        );
+        assert!(!deletions.contains("\t102\ti:102"), "{deletions}");
+    }
+
+    #[test]
     fn given_inline_struct_values_when_reading_global_stats_then_child_columns_have_min_max() {
         let catalog = CatalogId(1);
         let table_id = TableId(50);

@@ -1,7 +1,7 @@
 use crate::{
     CatalogId, CatalogOrderId, CatalogResult, OrderedCatalogKv, TableId, TableRow,
     runtime_snapshots::snapshot_schema_versions_by_order, store::list_snapshots,
-    table_store::list_table_rows,
+    table_store::list_table_rows_for_table,
 };
 
 pub fn table_row_for_inline_schema(
@@ -10,7 +10,7 @@ pub fn table_row_for_inline_schema(
     table_id: TableId,
     schema_version: u64,
 ) -> CatalogResult<TableRow> {
-    let table_rows = list_table_rows(kv, catalog)?;
+    let table_rows = list_table_rows_for_table(kv, catalog, table_id)?;
     if let Some(table) = earliest_table_with_inline_schema(&table_rows, table_id, schema_version) {
         return Ok(table);
     }

@@ -1,5 +1,8 @@
 #![cfg_attr(not(feature = "foundationdb"), allow(dead_code))]
 
+#[cfg(test)]
+pub(crate) static FDB_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub mod append_commits;
 mod bounded_cache;
 mod change_keys;
@@ -33,6 +36,8 @@ mod fdb_data_mutation_staging;
 #[cfg(feature = "foundationdb")]
 mod fdb_data_mutations;
 #[cfg(feature = "foundationdb")]
+mod fdb_file_ids;
+#[cfg(feature = "foundationdb")]
 mod fdb_inline_flushes;
 #[cfg(feature = "foundationdb")]
 mod fdb_inline_tables;
@@ -40,6 +45,8 @@ mod fdb_inline_tables;
 mod fdb_kv;
 #[cfg(feature = "foundationdb")]
 mod fdb_macros;
+#[cfg(feature = "foundationdb")]
+mod fdb_metadata_commit;
 #[cfg(feature = "foundationdb")]
 mod fdb_runtime;
 #[cfg(feature = "foundationdb")]

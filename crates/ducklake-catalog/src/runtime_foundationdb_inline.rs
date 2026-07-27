@@ -1,5 +1,16 @@
+#[cfg(feature = "foundationdb")]
+use std::collections::BTreeMap;
+#[cfg(all(feature = "foundationdb", not(test)))]
+use std::sync::OnceLock;
+
+#[cfg(all(feature = "foundationdb", not(test)))]
 use crate::{
-    CatalogId, CatalogResult, InlineRowChangeKind,
+    CatalogCacheNamespace,
+    bounded_cache::{BoundedCache, static_bounded_cache},
+};
+
+use crate::{
+    CatalogId, CatalogResult, InlineRowChangeKind, InlineTableChunkRow,
     runtime_inline_ops::{RuntimeInlineDelete, RuntimeInlineRows},
     runtime_inline_rows::{InlineRowChangesPayload, ReadInlineRowsPayload},
 };
@@ -8,9 +19,9 @@ use crate::{
 use crate::{
     runtime_foundationdb::open_foundationdb_catalog,
     runtime_inline_rows::{
-        inline_row_changes_payload, read_inline_rows_aggregate_stats_payload,
-        read_inline_rows_global_stats_batch_payload, read_inline_rows_global_stats_payload,
-        read_inline_rows_payload,
+        inline_row_changes_payload, read_foundationdb_inline_rows_aggregate_stats_payload,
+        read_foundationdb_inline_rows_global_stats_payload, read_foundationdb_inline_rows_payload,
+        read_inline_rows_global_stats_batch_payload,
     },
     snapshot_by_ducklake_sequence,
     table_store::load_current_table_row,
@@ -22,7 +33,7 @@ pub(crate) fn runtime_foundationdb_read_inline_rows(
     payload: ReadInlineRowsPayload,
 ) -> CatalogResult<Vec<u8>> {
     let kv = open_foundationdb_catalog()?;
-    read_inline_rows_payload(&kv, catalog, payload)
+    read_foundationdb_inline_rows_payload(&kv, catalog, payload)
 }
 
 #[cfg(feature = "foundationdb")]
@@ -31,7 +42,7 @@ pub(crate) fn runtime_foundationdb_read_inline_rows_global_stats(
     payload: ReadInlineRowsPayload,
 ) -> CatalogResult<Vec<u8>> {
     let kv = open_foundationdb_catalog()?;
-    read_inline_rows_global_stats_payload(&kv, catalog, payload)
+    read_foundationdb_inline_rows_global_stats_payload(&kv, catalog, payload)
 }
 
 #[cfg(feature = "foundationdb")]
@@ -40,7 +51,7 @@ pub(crate) fn runtime_foundationdb_read_inline_rows_aggregate_stats(
     payload: ReadInlineRowsPayload,
 ) -> CatalogResult<Vec<u8>> {
     let kv = open_foundationdb_catalog()?;
-    read_inline_rows_aggregate_stats_payload(&kv, catalog, payload)
+    read_foundationdb_inline_rows_aggregate_stats_payload(&kv, catalog, payload)
 }
 
 #[cfg(feature = "foundationdb")]
@@ -49,7 +60,49 @@ pub(crate) fn runtime_foundationdb_read_inline_rows_global_stats_batch(
     payloads: Vec<ReadInlineRowsPayload>,
 ) -> CatalogResult<Vec<u8>> {
     let kv = open_foundationdb_catalog()?;
+    #[cfg(not(test))]
+    if crate::store::runtime_read_context_enabled() {
+        let key = InlineGlobalStatsBatchCacheKey {
+            namespace: kv.catalog_cache_namespace(),
+            catalog,
+            requests: payloads
+                .iter()
+                .map(|payload| {
+                    (
+                        payload.table_name.clone(),
+                        payload.snapshot.map(|snapshot| snapshot.public_id()),
+                    )
+                })
+                .collect(),
+        };
+        let cache = inline_global_stats_batch_cache();
+        if let Some(payload) = cache.get_ref(&key) {
+            return Ok(payload);
+        }
+        let result = read_inline_rows_global_stats_batch_payload(kv, catalog, payloads)?;
+        cache.insert(key, result.clone());
+        return Ok(result);
+    }
     read_inline_rows_global_stats_batch_payload(kv, catalog, payloads)
+}
+
+#[cfg(all(feature = "foundationdb", not(test)))]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct InlineGlobalStatsBatchCacheKey {
+    namespace: CatalogCacheNamespace,
+    catalog: CatalogId,
+    requests: Vec<(String, Option<crate::DuckLakeSnapshotId>)>,
+}
+
+#[cfg(all(feature = "foundationdb", not(test)))]
+static INLINE_GLOBAL_STATS_BATCH_CACHE: OnceLock<
+    BoundedCache<InlineGlobalStatsBatchCacheKey, Vec<u8>>,
+> = OnceLock::new();
+
+#[cfg(all(feature = "foundationdb", not(test)))]
+fn inline_global_stats_batch_cache()
+-> &'static BoundedCache<InlineGlobalStatsBatchCacheKey, Vec<u8>> {
+    static_bounded_cache(&INLINE_GLOBAL_STATS_BATCH_CACHE, 256)
 }
 
 #[cfg(feature = "foundationdb")]
@@ -65,22 +118,132 @@ pub(crate) fn runtime_foundationdb_list_inline_row_changes(
 #[cfg(feature = "foundationdb")]
 pub(crate) fn runtime_foundationdb_register_inline_rows(
     catalog: CatalogId,
-    request: RuntimeInlineRows,
+    requests: Vec<RuntimeInlineRows>,
 ) -> CatalogResult<Vec<crate::InlineTableChunkRow>> {
-    let kv = open_foundationdb_catalog()?;
-    reject_stale_inline_table_metadata(&kv, catalog, &request)?;
-    let table = crate::runtime_inline_ops::inline_table_for_register(&kv, catalog, &request)?;
-    kv.register_inline_table_payload_with_table_at_snapshot_versionstamped(
+    let Some(first) = requests.first() else {
+        return Ok(Vec::new());
+    };
+    let read_snapshot = first.read_snapshot;
+    let commit_snapshot = first.commit_snapshot;
+    let commit_metadata = first.commit_metadata.clone();
+    runtime_foundationdb_commit_inline_mutations(
         catalog,
-        table,
-        crate::SchemaId(request.schema_version),
-        request.payload.into_bytes(),
-        crate::InlineTableCommitContext {
-            commit_snapshot: request.commit_snapshot,
-            read_snapshot: request.read_snapshot,
-            commit_metadata: Some(&request.commit_metadata),
-        },
+        requests,
+        Vec::new(),
+        read_snapshot,
+        commit_snapshot,
+        commit_metadata,
     )
+}
+
+#[cfg(feature = "foundationdb")]
+pub(crate) fn runtime_foundationdb_commit_inline_mutations(
+    catalog: CatalogId,
+    requests: Vec<RuntimeInlineRows>,
+    deletes: Vec<RuntimeInlineDelete>,
+    read_snapshot: Option<crate::DuckLakeSnapshotId>,
+    commit_snapshot: Option<crate::DuckLakeSnapshotId>,
+    commit_metadata: crate::SnapshotCommitMetadata,
+) -> CatalogResult<Vec<InlineTableChunkRow>> {
+    let kv = open_foundationdb_catalog()?;
+    let (tables, payloads, delete_payloads) =
+        prepare_foundationdb_inline_mutations(&kv, catalog, requests, deletes, commit_snapshot)?;
+    let committed = kv.commit_inline_table_mutations_at_snapshot_versionstamped(
+        catalog,
+        tables,
+        payloads,
+        delete_payloads,
+        crate::InlineTableCommitContext {
+            commit_snapshot,
+            read_snapshot,
+            commit_metadata: Some(&commit_metadata),
+        },
+    )?;
+    Ok(committed.rows)
+}
+
+#[cfg(feature = "foundationdb")]
+pub(crate) fn prepare_foundationdb_inline_mutations(
+    kv: &crate::FdbOrderedCatalogKv,
+    catalog: CatalogId,
+    requests: Vec<RuntimeInlineRows>,
+    deletes: Vec<RuntimeInlineDelete>,
+    commit_snapshot: Option<crate::DuckLakeSnapshotId>,
+) -> CatalogResult<(
+    Vec<crate::TableRow>,
+    Vec<crate::fdb_inline_tables::InlineTablePayload>,
+    Vec<crate::fdb_inline_tables::InlineTableDeletePayload>,
+)> {
+    let mut tables = BTreeMap::<crate::TableId, crate::TableRow>::new();
+    let mut changed_tables = std::collections::BTreeSet::new();
+    let mut validated_tables = std::collections::BTreeSet::new();
+    let mut payloads = BTreeMap::<(crate::TableId, crate::SchemaId), Vec<u8>>::new();
+    for request in requests {
+        if validated_tables.insert((request.table_id, request.read_snapshot)) {
+            reject_stale_inline_table_metadata(kv, catalog, &request)?;
+        }
+        let table = match tables.entry(request.table_id) {
+            std::collections::btree_map::Entry::Vacant(entry) => entry.insert(
+                load_current_table_row(kv, catalog, request.table_id)?
+                    .ok_or(crate::CatalogError::NotFound("inline table"))?,
+            ),
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+        };
+        if crate::runtime_inline_ops::register_inlined_table(
+            table,
+            request.table_name,
+            request.schema_version,
+        ) {
+            changed_tables.insert(request.table_id);
+        }
+        payloads
+            .entry((request.table_id, crate::SchemaId(request.schema_version)))
+            .or_default()
+            .extend_from_slice(request.payload.as_bytes());
+    }
+    let mut delete_payloads =
+        BTreeMap::<(crate::TableId, crate::SchemaId), std::collections::BTreeSet<u64>>::new();
+    for delete in deletes {
+        if delete.commit_snapshot != commit_snapshot {
+            return Err(crate::CatalogError::InvalidMutation(
+                "inline delete commit snapshot differs from CommitAttempt".to_owned(),
+            ));
+        }
+        for target in delete.targets {
+            let schema_id =
+                crate::runtime_inline_ops::inline_delete_schema_id(kv, catalog, &target)?;
+            delete_payloads
+                .entry((target.table_id, schema_id))
+                .or_default()
+                .extend(target.row_ids);
+        }
+    }
+    Ok((
+        tables
+            .into_iter()
+            .filter_map(|(table_id, table)| changed_tables.contains(&table_id).then_some(table))
+            .collect(),
+        payloads
+            .into_iter()
+            .map(
+                |((table_id, schema_id), payload)| crate::fdb_inline_tables::InlineTablePayload {
+                    table_id,
+                    schema_id,
+                    payload,
+                },
+            )
+            .collect(),
+        delete_payloads
+            .into_iter()
+            .map(|((table_id, schema_id), row_ids)| {
+                crate::fdb_inline_tables::InlineTableDeletePayload {
+                    table_id,
+                    schema_id,
+                    row_ids: row_ids.into_iter().collect(),
+                }
+            })
+            .collect(),
+    ))
 }
 
 #[cfg(feature = "foundationdb")]
@@ -203,9 +366,23 @@ pub(crate) fn runtime_foundationdb_list_inline_row_changes(
 #[cfg(not(feature = "foundationdb"))]
 pub(crate) fn runtime_foundationdb_register_inline_rows(
     _catalog: CatalogId,
-    _request: RuntimeInlineRows,
+    _requests: Vec<RuntimeInlineRows>,
 ) -> CatalogResult<Vec<crate::InlineTableChunkRow>> {
     foundationdb_runtime_inline_chunks_error()
+}
+
+#[cfg(not(feature = "foundationdb"))]
+pub(crate) fn runtime_foundationdb_commit_inline_mutations(
+    _catalog: CatalogId,
+    _requests: Vec<RuntimeInlineRows>,
+    _deletes: Vec<RuntimeInlineDelete>,
+    _read_snapshot: Option<crate::DuckLakeSnapshotId>,
+    _commit_snapshot: Option<crate::DuckLakeSnapshotId>,
+    _commit_metadata: crate::SnapshotCommitMetadata,
+) -> CatalogResult<Vec<InlineTableChunkRow>> {
+    Err(crate::CatalogError::Backend(
+        "foundationdb runtime requires ducklake-catalog --features foundationdb".to_owned(),
+    ))
 }
 
 #[cfg(not(feature = "foundationdb"))]

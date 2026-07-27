@@ -1,7 +1,8 @@
 use super::*;
 use crate::{
-    CatalogId, CatalogOrderId, CatalogOrderKind, ColumnId, FdbOrderedCatalogKv, MacroId, MacroRow,
-    PartitionKeyIndex, SchemaId, TableColumnRow, ValidityWindow, ViewRow,
+    CatalogId, CatalogOrderId, CatalogOrderKind, ColumnId, DataFileId, DataFileRow, DeleteFileId,
+    DeleteFileRow, FdbOrderedCatalogKv, MacroId, MacroRow, PartitionKeyIndex, SchemaId,
+    TableColumnRow, ValidityWindow, ViewRow,
 };
 
 #[test]
@@ -28,7 +29,7 @@ fn oversized_batches_fail_before_publication() {
 fn many_cleanup_deletes_fail_before_publication() {
     let catalog = CatalogId(7);
     let mut batch = KvBatch::new();
-    for index in 0..20_000 {
+    for index in 0..100_000 {
         let data_file_id = DataFileId(index);
         batch.delete(crate::keys::file_partition_value_key(
             catalog,
@@ -55,7 +56,7 @@ fn wide_schema_create_estimate_exceeds_commit_limit() {
     let catalog = CatalogId(7);
     let snapshot = SnapshotRow::new(incomplete_order(), crate::RawSnapshotSequence(1));
     let long_path = "warehouse/".repeat(200);
-    let schemas = (0..700)
+    let schemas = (0..5_000)
         .map(|index| {
             SchemaRow::new(
                 SchemaId(index),
@@ -194,6 +195,34 @@ fn catalog_object_versionstamp_offsets_point_to_fdb_stamp_bytes() {
         macro_row.encode()[MacroRow::BEGIN_ORDER_BYTES_OFFSET],
         order.as_bytes()[0],
         "macro begin-order offset must point at the first FDB-replaced order byte"
+    );
+}
+
+#[test]
+fn file_max_partial_versionstamp_offsets_point_to_max_partial_order_bytes() {
+    let begin = CatalogOrderId::uuid_v7(11);
+    let max_partial = CatalogOrderId::uuid_v7(42);
+    let data_file = DataFileRow::new(DataFileId(1), TableId(2), "data.parquet", 1, 64, begin)
+        .with_max_partial_order(Some(max_partial));
+    let delete_file = DeleteFileRow::new(
+        DeleteFileId(3),
+        DataFileId(1),
+        "delete.parquet",
+        1,
+        64,
+        begin,
+    )
+    .with_max_partial_order(Some(max_partial));
+
+    assert_eq!(
+        data_file.encode()[DataFileRow::MAX_PARTIAL_ORDER_BYTES_OFFSET],
+        max_partial.as_bytes()[0],
+        "data-file max-partial offset must point at the first FDB-replaced order byte"
+    );
+    assert_eq!(
+        delete_file.encode()[DeleteFileRow::MAX_PARTIAL_ORDER_BYTES_OFFSET],
+        max_partial.as_bytes()[0],
+        "delete-file max-partial offset must point at the first FDB-replaced order byte"
     );
 }
 

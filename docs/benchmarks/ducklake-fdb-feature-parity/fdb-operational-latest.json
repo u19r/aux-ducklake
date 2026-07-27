@@ -1,0 +1,489 @@
+{
+  "artifact": "ducklake-operational-commit-benchmark",
+  "profile": "operational",
+  "generated_at_micros": 1785163425741026,
+  "elapsed_ms": 30618.158,
+  "trial": null,
+  "order_position": null,
+  "fixture": {
+    "backend": "fdb",
+    "duckdb_build_profile": "release",
+    "commit_iterations": 10,
+    "user_rows_per_commit": 101,
+    "membership_rows_per_commit": 50,
+    "payload_bytes": 800,
+    "data_inlining_row_limit": 100,
+    "validation": "each",
+    "operations": [
+      "create_tables",
+      "insert_file_backed_rows",
+      "update_file_backed_rows",
+      "delete_file_backed_rows",
+      "insert_inline_rows",
+      "delete_inline_rows",
+      "replace_inline_checkpoint"
+    ]
+  },
+  "result": "1001,506910,50,46725,10,1,1",
+  "create_transaction_wall_ms": {
+    "samples": 4,
+    "p50": 210.659,
+    "p90": 216.564,
+    "p99": 216.564,
+    "max": 216.564,
+    "values_ms": [
+      210.433,
+      210.659,
+      215.457,
+      216.564
+    ]
+  },
+  "transaction_wall_ms": {
+    "samples": 40,
+    "p50": 366.482,
+    "p90": 383.313,
+    "p99": 397.275,
+    "max": 397.275,
+    "values_ms": [
+      188.645,
+      193.265,
+      195.709,
+      197.526,
+      343.94,
+      346.5,
+      346.592,
+      346.965,
+      348.085,
+      348.891,
+      353.213,
+      353.279,
+      354.204,
+      356.088,
+      358.446,
+      362.112,
+      362.194,
+      363.171,
+      363.186,
+      366.482,
+      368.325,
+      368.746,
+      368.877,
+      369.381,
+      370.196,
+      370.299,
+      372.519,
+      372.618,
+      373.363,
+      374.991,
+      375.485,
+      377.505,
+      378.127,
+      379.336,
+      381.425,
+      383.313,
+      384.378,
+      384.829,
+      385.507,
+      397.275
+    ]
+  },
+  "session_command_wall_ms": 7638.134,
+  "accounting": {
+    "scenario_wall_ms": 30618.158,
+    "inside_rust_storage_ms": 0.0,
+    "inside_rust_storage_call_ms": 0.0,
+    "rust_runtime_reported_storage_ms": 0.0,
+    "inside_rust_nested_measurements_ms": 0.0,
+    "inside_rust_fdb_kv_ms": 0.0,
+    "measured_storage_wall_ms": 0.0,
+    "measured_storage_call_ms": 0.0,
+    "duckdb_extension_outside_storage_ms": 30618.158,
+    "unaccounted_wall_ms": 30618.158,
+    "runtime_metric_calls": 0,
+    "fdb_rows_read": 0,
+    "fdb_bytes_read": 0,
+    "scope": "all_operational_trials",
+    "macro_operation_costs": [],
+    "micro_operation_costs": []
+  },
+  "trials": [
+    {
+      "trial": 1,
+      "order_position": 1,
+      "session_command_wall_ms": 7713.931,
+      "create_transaction_wall_ms": 216.564,
+      "transaction_wall_ms": {
+        "samples": 10,
+        "p50": 363.186,
+        "p90": 375.485,
+        "p99": 383.313,
+        "max": 383.313,
+        "values_ms": [
+          193.265,
+          353.213,
+          353.279,
+          363.171,
+          363.186,
+          369.381,
+          370.196,
+          370.299,
+          375.485,
+          383.313
+        ],
+        "iterations": [
+          {
+            "iteration": 1,
+            "value_ms": 193.265
+          },
+          {
+            "iteration": 2,
+            "value_ms": 370.196
+          },
+          {
+            "iteration": 3,
+            "value_ms": 375.485
+          },
+          {
+            "iteration": 4,
+            "value_ms": 363.171
+          },
+          {
+            "iteration": 5,
+            "value_ms": 363.186
+          },
+          {
+            "iteration": 6,
+            "value_ms": 353.279
+          },
+          {
+            "iteration": 7,
+            "value_ms": 369.381
+          },
+          {
+            "iteration": 8,
+            "value_ms": 370.299
+          },
+          {
+            "iteration": 9,
+            "value_ms": 383.313
+          },
+          {
+            "iteration": 10,
+            "value_ms": 353.213
+          }
+        ]
+      },
+      "accounting": {
+        "duckdb_extension_outside_storage_ms": 7713.931,
+        "fdb_bytes_read": 0,
+        "fdb_rows_read": 0,
+        "inside_rust_fdb_kv_ms": 0.0,
+        "inside_rust_nested_measurements_ms": 0.0,
+        "inside_rust_storage_call_ms": 0.0,
+        "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
+        "measured_storage_call_ms": 0.0,
+        "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
+        "runtime_metric_calls": 0,
+        "rust_runtime_reported_storage_ms": 0.0,
+        "scenario_wall_ms": 7713.931,
+        "scope": "operational_trial_1",
+        "unaccounted_wall_ms": 7713.931
+      }
+    },
+    {
+      "trial": 2,
+      "order_position": 2,
+      "session_command_wall_ms": 7627.376,
+      "create_transaction_wall_ms": 210.659,
+      "transaction_wall_ms": {
+        "samples": 10,
+        "p50": 362.194,
+        "p90": 374.991,
+        "p99": 384.829,
+        "max": 384.829,
+        "values_ms": [
+          197.526,
+          346.5,
+          348.891,
+          358.446,
+          362.194,
+          368.877,
+          372.519,
+          373.363,
+          374.991,
+          384.829
+        ],
+        "iterations": [
+          {
+            "iteration": 1,
+            "value_ms": 197.526
+          },
+          {
+            "iteration": 2,
+            "value_ms": 348.891
+          },
+          {
+            "iteration": 3,
+            "value_ms": 372.519
+          },
+          {
+            "iteration": 4,
+            "value_ms": 346.5
+          },
+          {
+            "iteration": 5,
+            "value_ms": 362.194
+          },
+          {
+            "iteration": 6,
+            "value_ms": 374.991
+          },
+          {
+            "iteration": 7,
+            "value_ms": 384.829
+          },
+          {
+            "iteration": 8,
+            "value_ms": 373.363
+          },
+          {
+            "iteration": 9,
+            "value_ms": 358.446
+          },
+          {
+            "iteration": 10,
+            "value_ms": 368.877
+          }
+        ]
+      },
+      "accounting": {
+        "duckdb_extension_outside_storage_ms": 7627.376,
+        "fdb_bytes_read": 0,
+        "fdb_rows_read": 0,
+        "inside_rust_fdb_kv_ms": 0.0,
+        "inside_rust_nested_measurements_ms": 0.0,
+        "inside_rust_storage_call_ms": 0.0,
+        "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
+        "measured_storage_call_ms": 0.0,
+        "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
+        "runtime_metric_calls": 0,
+        "rust_runtime_reported_storage_ms": 0.0,
+        "scenario_wall_ms": 7627.376,
+        "scope": "operational_trial_2",
+        "unaccounted_wall_ms": 7627.376
+      }
+    },
+    {
+      "trial": 3,
+      "order_position": 1,
+      "session_command_wall_ms": 7638.717,
+      "create_transaction_wall_ms": 210.433,
+      "transaction_wall_ms": {
+        "samples": 10,
+        "p50": 366.482,
+        "p90": 385.507,
+        "p99": 397.275,
+        "max": 397.275,
+        "values_ms": [
+          188.645,
+          346.965,
+          354.204,
+          356.088,
+          366.482,
+          368.325,
+          368.746,
+          381.425,
+          385.507,
+          397.275
+        ],
+        "iterations": [
+          {
+            "iteration": 1,
+            "value_ms": 188.645
+          },
+          {
+            "iteration": 2,
+            "value_ms": 368.746
+          },
+          {
+            "iteration": 3,
+            "value_ms": 368.325
+          },
+          {
+            "iteration": 4,
+            "value_ms": 354.204
+          },
+          {
+            "iteration": 5,
+            "value_ms": 397.275
+          },
+          {
+            "iteration": 6,
+            "value_ms": 356.088
+          },
+          {
+            "iteration": 7,
+            "value_ms": 346.965
+          },
+          {
+            "iteration": 8,
+            "value_ms": 381.425
+          },
+          {
+            "iteration": 9,
+            "value_ms": 366.482
+          },
+          {
+            "iteration": 10,
+            "value_ms": 385.507
+          }
+        ]
+      },
+      "accounting": {
+        "duckdb_extension_outside_storage_ms": 7638.717,
+        "fdb_bytes_read": 0,
+        "fdb_rows_read": 0,
+        "inside_rust_fdb_kv_ms": 0.0,
+        "inside_rust_nested_measurements_ms": 0.0,
+        "inside_rust_storage_call_ms": 0.0,
+        "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
+        "measured_storage_call_ms": 0.0,
+        "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
+        "runtime_metric_calls": 0,
+        "rust_runtime_reported_storage_ms": 0.0,
+        "scenario_wall_ms": 7638.717,
+        "scope": "operational_trial_3",
+        "unaccounted_wall_ms": 7638.717
+      }
+    },
+    {
+      "trial": 4,
+      "order_position": 2,
+      "session_command_wall_ms": 7638.134,
+      "create_transaction_wall_ms": 215.457,
+      "transaction_wall_ms": {
+        "samples": 10,
+        "p50": 362.112,
+        "p90": 379.336,
+        "p99": 384.378,
+        "max": 384.378,
+        "values_ms": [
+          195.709,
+          343.94,
+          346.592,
+          348.085,
+          362.112,
+          372.618,
+          377.505,
+          378.127,
+          379.336,
+          384.378
+        ],
+        "iterations": [
+          {
+            "iteration": 1,
+            "value_ms": 195.709
+          },
+          {
+            "iteration": 2,
+            "value_ms": 346.592
+          },
+          {
+            "iteration": 3,
+            "value_ms": 348.085
+          },
+          {
+            "iteration": 4,
+            "value_ms": 378.127
+          },
+          {
+            "iteration": 5,
+            "value_ms": 377.505
+          },
+          {
+            "iteration": 6,
+            "value_ms": 362.112
+          },
+          {
+            "iteration": 7,
+            "value_ms": 343.94
+          },
+          {
+            "iteration": 8,
+            "value_ms": 372.618
+          },
+          {
+            "iteration": 9,
+            "value_ms": 379.336
+          },
+          {
+            "iteration": 10,
+            "value_ms": 384.378
+          }
+        ]
+      },
+      "accounting": {
+        "duckdb_extension_outside_storage_ms": 7638.134,
+        "fdb_bytes_read": 0,
+        "fdb_rows_read": 0,
+        "inside_rust_fdb_kv_ms": 0.0,
+        "inside_rust_nested_measurements_ms": 0.0,
+        "inside_rust_storage_call_ms": 0.0,
+        "inside_rust_storage_ms": 0.0,
+        "macro_operation_costs": [],
+        "measured_storage_call_ms": 0.0,
+        "measured_storage_wall_ms": 0.0,
+        "micro_operation_costs": [],
+        "runtime_metric_calls": 0,
+        "rust_runtime_reported_storage_ms": 0.0,
+        "scenario_wall_ms": 7638.134,
+        "scope": "operational_trial_4",
+        "unaccounted_wall_ms": 7638.134
+      }
+    }
+  ],
+  "comparison_method": {
+    "isolated_catalog_per_trial": true,
+    "alternating_backend_order": true
+  },
+  "chronological_growth": {
+    "method": "last decile mean divided by first decile mean within each isolated trial",
+    "trials": [
+      {
+        "trial": 1,
+        "window_samples": 1,
+        "first_decile_mean_ms": 193.265,
+        "last_decile_mean_ms": 353.213,
+        "last_first_ratio": 1.827609758621582
+      },
+      {
+        "trial": 2,
+        "window_samples": 1,
+        "first_decile_mean_ms": 197.526,
+        "last_decile_mean_ms": 368.877,
+        "last_first_ratio": 1.8674857993378087
+      },
+      {
+        "trial": 3,
+        "window_samples": 1,
+        "first_decile_mean_ms": 188.645,
+        "last_decile_mean_ms": 385.507,
+        "last_first_ratio": 2.0435580057780487
+      },
+      {
+        "trial": 4,
+        "window_samples": 1,
+        "first_decile_mean_ms": 195.709,
+        "last_decile_mean_ms": 384.378,
+        "last_first_ratio": 1.964028225579815
+      }
+    ],
+    "max_last_first_ratio": 2.0435580057780487
+  }
+}

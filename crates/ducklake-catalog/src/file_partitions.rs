@@ -255,6 +255,70 @@ pub(crate) fn list_file_partition_values_for_data_files(
     Ok(rows)
 }
 
+pub(crate) fn list_file_partition_values_for_data_files_and_keys(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    data_file_ids: &BTreeSet<DataFileId>,
+    partition_key_indices: &BTreeSet<PartitionKeyIndex>,
+) -> CatalogResult<Vec<FilePartitionValueRow>> {
+    let mut rows = Vec::new();
+    let mut missing = Vec::new();
+    for data_file_id in data_file_ids {
+        let cache_key = file_partition_values_cache_key(kv, catalog, *data_file_id);
+        if let Some(cached) = cached_file_partition_values(&cache_key) {
+            rows.extend(
+                cached
+                    .into_iter()
+                    .filter(|row| partition_key_indices.contains(&row.partition_key_index)),
+            );
+        } else {
+            missing.push(*data_file_id);
+        }
+    }
+    let requested = missing
+        .into_iter()
+        .flat_map(|data_file_id| {
+            partition_key_indices
+                .iter()
+                .copied()
+                .map(move |partition_key_index| (data_file_id, partition_key_index))
+        })
+        .collect::<Vec<_>>();
+    let keys = requested
+        .iter()
+        .map(|(data_file_id, partition_key_index)| {
+            file_partition_value_key(catalog, *data_file_id, *partition_key_index)
+        })
+        .collect::<Vec<_>>();
+    for ((data_file_id, partition_key_index), value) in
+        requested.into_iter().zip(kv.batch_get(&keys)?)
+    {
+        let Some(value) = value else {
+            continue;
+        };
+        let row = FilePartitionValueRow::decode(&value)?;
+        if row.data_file_id != data_file_id || row.partition_key_index != partition_key_index {
+            return Err(CatalogError::Decode(format!(
+                "file partition value key for data file {} key {} decoded data file {} key {}",
+                data_file_id.0,
+                partition_key_index.0,
+                row.data_file_id.0,
+                row.partition_key_index.0
+            )));
+        }
+        rows.push(row);
+    }
+    rows.sort_by_key(|row| {
+        (
+            row.table_id.0,
+            row.data_file_id.0,
+            row.partition_key_index.0,
+            row.partition_value.clone(),
+        )
+    });
+    Ok(rows)
+}
+
 fn load_missing_file_partition_values(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
@@ -583,7 +647,7 @@ fn current_data_files_by_id(
         .collect())
 }
 
-fn partition_value_lookup_ids(
+pub(crate) fn partition_value_lookup_ids(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
     table_id: TableId,
@@ -680,7 +744,7 @@ fn partition_value_lookup_current_data_file_ids(
     .collect())
 }
 
-fn partitioned_data_file_ids(
+pub(crate) fn partitioned_data_file_ids(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
     table_id: TableId,

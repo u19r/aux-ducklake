@@ -33,7 +33,7 @@ pub fn commit_create_schema_rows(
     let snapshot = crate::store::snapshot_row_for_next_sequence(latest, order);
     let mut batch = KvBatch::new();
     stage_snapshot(&mut batch, catalog, &snapshot);
-    stage_next_schema_version(kv, &mut batch, catalog)?;
+    stage_next_schema_version(kv, &mut batch, catalog, &snapshot)?;
     for schema in &mut schemas {
         schema.validity = ValidityWindow::new(order, None);
         batch.put(
@@ -62,7 +62,7 @@ pub fn commit_drop_schema_rows(
     let mut batch = KvBatch::new();
     let mut dropped = Vec::with_capacity(schema_ids.len());
     stage_snapshot(&mut batch, catalog, &snapshot);
-    stage_next_schema_version(kv, &mut batch, catalog)?;
+    stage_next_schema_version(kv, &mut batch, catalog, &snapshot)?;
     for schema_id in schema_ids {
         let mut schema = load_schema_at(kv, catalog, *schema_id, latest.order)?
             .ok_or(CatalogError::NotFound("schema"))?;
@@ -82,18 +82,12 @@ pub fn list_schemas_at(
     catalog: CatalogId,
     snapshot_order: CatalogOrderId,
 ) -> CatalogResult<Vec<SchemaRow>> {
-    let mut schemas = Vec::new();
-    for item in kv.scan_prefix(
-        &schema_object_scan_prefix(catalog),
-        RangeDirection::Forward,
-        usize::MAX,
-    )? {
-        let row = decode_schema_item(catalog, &item.key, &item.value)?;
-        if row.validity.is_visible_at(snapshot_order) {
-            schemas.push(row);
-        }
-    }
-    Ok(schemas)
+    Ok(
+        list_schema_rows_for_snapshot_cache(kv, catalog, snapshot_order)?
+            .into_iter()
+            .filter(|row| row.validity.is_visible_at(snapshot_order))
+            .collect(),
+    )
 }
 
 pub(crate) fn list_schema_rows(

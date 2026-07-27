@@ -1,6 +1,7 @@
 use crate::{
     CatalogId, CatalogOrderId, CatalogResult, DuckLakeSnapshotId, OrderedCatalogKv, SchemaId,
     TableId, TableRow, list_tables_at, load_table_at, runtime_tabular_payload::parse_u64_field,
+    table_store::list_table_rows_for_table,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,8 +57,14 @@ pub(super) fn load_inlined_table(
         let (table, schema_id) = find_legacy_inlined_table(&tables, inline_table)?;
         return Ok((table.clone(), schema_id));
     };
-    let table = load_table_at(kv, catalog, table_id, snapshot_order)?
-        .ok_or(crate::CatalogError::NotFound("inlined table"))?;
+    let table = if crate::store::runtime_read_context_enabled() {
+        list_table_rows_for_table(kv, catalog, table_id)?
+            .into_iter()
+            .find(|table| table.validity.is_visible_at(snapshot_order))
+    } else {
+        load_table_at(kv, catalog, table_id, snapshot_order)?
+    }
+    .ok_or(crate::CatalogError::NotFound("inlined table"))?;
     let has_inline_registration = table
         .inlined_data_tables
         .iter()

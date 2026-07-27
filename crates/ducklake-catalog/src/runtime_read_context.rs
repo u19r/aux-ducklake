@@ -531,6 +531,12 @@ impl CatalogSnapshotRequestContext {
         match kind {
             crate::runtime_catalog_snapshot::CatalogSnapshotIdKind::PublicSnapshot => {
                 let latest = self.latest.clone();
+                if let Some(snapshot) = latest
+                    .as_ref()
+                    .filter(|snapshot| snapshot.sequence.0 == snapshot_id.0)
+                {
+                    return Ok(snapshot.clone());
+                }
                 let snapshot_context = self.snapshot_context(kv, catalog)?;
                 snapshot_context
                     .public_snapshot(snapshot_id)
@@ -570,9 +576,7 @@ impl CatalogSnapshotRequestContext {
         catalog: CatalogId,
     ) -> CatalogResult<&SnapshotReadContext> {
         if self.snapshots.is_none() {
-            self.snapshots = Some(SnapshotReadContext::for_current_catalog_uncached(
-                kv, catalog,
-            )?);
+            self.snapshots = Some(SnapshotReadContext::for_current_catalog(kv, catalog)?);
         }
         self.snapshots.as_ref().ok_or_else(|| {
             crate::CatalogError::Decode("snapshot context was not initialized".to_owned())
@@ -662,7 +666,8 @@ impl CatalogSnapshotFacts {
             let key =
                 catalog_snapshot_facts_context_key(kv, catalog, latest.as_ref(), table_scope)?;
             let cache = catalog_snapshot_facts_context_cache();
-            if let Some(context) = cache.get(key) {
+            if let Some(mut context) = cache.get(key) {
+                context.latest = latest;
                 return Ok(context);
             }
             let context = Self::load(kv, catalog, latest, table_scope)?;
@@ -883,7 +888,6 @@ struct CatalogSnapshotFactsContextKey {
     namespace: CatalogCacheNamespace,
     catalog: CatalogId,
     version: CatalogSnapshotFactsVersion,
-    latest_order: Option<CatalogOrderId>,
     table_scope: CatalogSnapshotTableScopeKey,
 }
 
@@ -930,7 +934,6 @@ fn catalog_snapshot_facts_context_key(
         namespace: kv.catalog_cache_namespace(),
         catalog,
         version,
-        latest_order: latest.map(|row| row.order),
         table_scope: match table_scope {
             CatalogSnapshotTableScope::CompleteHistory => {
                 CatalogSnapshotTableScopeKey::CompleteHistory

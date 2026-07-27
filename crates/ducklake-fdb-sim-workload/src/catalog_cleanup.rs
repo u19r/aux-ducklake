@@ -23,6 +23,7 @@ pub(crate) struct CatalogCleanupWorkload {
     check_count: u64,
     append_count: u64,
     metadata_count: u64,
+    reuse_count: u64,
     cleanup_count: u64,
     error_count: u64,
     context: WorkloadContext,
@@ -46,6 +47,7 @@ impl CatalogCleanupWorkload {
             check_count: 0,
             append_count: 0,
             metadata_count: 0,
+            reuse_count: 0,
             cleanup_count: 0,
             error_count: 0,
             context,
@@ -110,11 +112,20 @@ impl CatalogCleanupWorkload {
         let partition_key = PartitionKeyIndex(scenario.partition_key_index);
         let column = ColumnId(scenario.column_id);
         let kv = self.catalog(db);
+        let metadata = CleanupMetadataCoordinates {
+            catalog,
+            table,
+            data_file,
+            partition_key,
+            partition_value: scenario.partition_value.clone(),
+            column,
+        };
 
         let initial = kv
             .initialize_catalog_if_absent_versionstamped_async(catalog)
             .await
             .map_err(|err| format!("initialize catalog: {err}"))?;
+        self.trace_step("catalog_initialized");
         let committed = kv
             .commit_data_files_versionstamped_async(
                 catalog,
@@ -132,45 +143,23 @@ impl CatalogCleanupWorkload {
             .map_err(|err| format!("append before cleanup: {err}"))?;
         let file = require_exactly_one_committed_file(&committed.data_files)?.clone();
         self.append_count += 1;
+        self.trace_step("file_appended");
 
-        kv.register_file_cleanup_metadata_async(
-            catalog,
-            FilePartitionValueRow::new(
-                file.data_file_id,
-                table,
-                partition_key,
-                &scenario.partition_value,
-            ),
-            FileColumnStatsRow::new(file.data_file_id, table, column, 0, Some("1".into()), None),
-        )
-        .await
-        .map_err(|err| format!("register cleanup metadata: {err}"))?;
+        register_cleanup_metadata(&kv, &metadata, "1").await?;
         self.metadata_count += 1;
-
-        let before = kv
-            .file_cleanup_metadata_counts_async(
-                catalog,
-                file.data_file_id,
-                table,
-                partition_key,
-                &scenario.partition_value,
-                column,
-            )
-            .await
-            .map_err(|err| format!("count metadata before cleanup: {err}"))?;
-        if before.partition_values != 1
-            || before.partition_lookups != 1
-            || before.column_stats != 1
-            || before.column_stats_lookups != 1
-        {
-            return Err(format!(
-                "unexpected metadata counts before cleanup: {before:?}"
-            ));
-        }
+        self.trace_step("metadata_registered");
+        require_cleanup_metadata_count(&kv, &metadata, 1, "before cleanup").await?;
+        self.trace_step("metadata_verified");
+        register_cleanup_metadata(&kv, &metadata, "2").await?;
+        self.trace_step("metadata_reused");
+        require_cleanup_metadata_count(&kv, &metadata, 1, "after reuse").await?;
+        self.reuse_count += 1;
+        self.trace_step("reuse_verified");
 
         kv.expire_data_file_versionstamped_async(catalog, file.data_file_id)
             .await
             .map_err(|err| format!("expire before cleanup: {err}"))?;
+        self.trace_step("file_expired");
         let removed = kv
             .remove_expired_data_file_metadata_async(catalog, file.data_file_id)
             .await
@@ -179,27 +168,73 @@ impl CatalogCleanupWorkload {
             return Err("cleanup did not remove the expired data file".to_owned());
         }
         self.cleanup_count += 1;
-
-        let after = kv
-            .file_cleanup_metadata_counts_async(
-                catalog,
-                file.data_file_id,
-                table,
-                partition_key,
-                &scenario.partition_value,
-                column,
-            )
-            .await
-            .map_err(|err| format!("count metadata after cleanup: {err}"))?;
-        if after.partition_values != 0
-            || after.partition_lookups != 0
-            || after.column_stats != 0
-            || after.column_stats_lookups != 0
-        {
-            return Err(format!("metadata remained after cleanup: {after:?}"));
-        }
+        self.trace_step("file_removed");
+        require_cleanup_metadata_count(&kv, &metadata, 0, "after cleanup").await?;
+        self.trace_step("cleanup_verified");
         Ok(())
     }
+}
+
+struct CleanupMetadataCoordinates {
+    catalog: CatalogId,
+    table: TableId,
+    data_file: DataFileId,
+    partition_key: PartitionKeyIndex,
+    partition_value: String,
+    column: ColumnId,
+}
+
+async fn register_cleanup_metadata(
+    kv: &FdbOrderedCatalogKv,
+    metadata: &CleanupMetadataCoordinates,
+    min_value: &str,
+) -> Result<(), String> {
+    kv.register_file_cleanup_metadata_async(
+        metadata.catalog,
+        FilePartitionValueRow::new(
+            metadata.data_file,
+            metadata.table,
+            metadata.partition_key,
+            &metadata.partition_value,
+        ),
+        FileColumnStatsRow::new(
+            metadata.data_file,
+            metadata.table,
+            metadata.column,
+            0,
+            Some(min_value.to_owned()),
+            None,
+        ),
+    )
+    .await
+    .map_err(|err| format!("register cleanup metadata: {err}"))
+}
+
+async fn require_cleanup_metadata_count(
+    kv: &FdbOrderedCatalogKv,
+    metadata: &CleanupMetadataCoordinates,
+    expected: usize,
+    phase: &str,
+) -> Result<(), String> {
+    let actual = kv
+        .file_cleanup_metadata_counts_async(
+            metadata.catalog,
+            metadata.data_file,
+            metadata.table,
+            metadata.partition_key,
+            &metadata.partition_value,
+            metadata.column,
+        )
+        .await
+        .map_err(|err| format!("count metadata {phase}: {err}"))?;
+    if actual.partition_values == expected
+        && actual.partition_lookups == expected
+        && actual.column_stats == expected
+        && actual.column_stats_lookups == expected
+    {
+        return Ok(());
+    }
+    Err(format!("unexpected metadata count {phase}: {actual:?}"))
 }
 
 impl RustWorkload for CatalogCleanupWorkload {
@@ -234,6 +269,7 @@ impl RustWorkload for CatalogCleanupWorkload {
                 "ducklake_catalog_cleanup_metadata_count",
                 self.metadata_count,
             ),
+            metric("ducklake_catalog_cleanup_reuse_count", self.reuse_count),
             metric("ducklake_catalog_cleanup_cleanup_count", self.cleanup_count),
             metric("ducklake_catalog_cleanup_error_count", self.error_count),
         ]);

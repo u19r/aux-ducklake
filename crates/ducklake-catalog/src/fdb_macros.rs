@@ -1,4 +1,4 @@
-use std::ops::Deref;
+use std::{collections::BTreeSet, ops::Deref};
 
 use foundationdb::options::MutationType;
 use futures::executor::block_on;
@@ -15,7 +15,7 @@ use crate::{
     keys::{macro_object_key, macro_object_prefix, snapshot_key, snapshot_timestamp_key},
     macro_store::{load_macro_at, reject_macro_create_conflicts},
     schema_version_state::stage_fdb_next_schema_version,
-    store::{latest_snapshot, stage_fdb_latest_snapshot_value},
+    store::{latest_snapshot, stage_fdb_snapshot_indexes},
 };
 
 impl FdbOrderedCatalogKv {
@@ -45,7 +45,7 @@ impl FdbOrderedCatalogKv {
 
         let trx = self.create_transaction()?;
         stage_snapshot(self, &trx, catalog, &snapshot)?;
-        stage_fdb_next_schema_version(self, &trx, catalog)?;
+        stage_fdb_next_schema_version(self, &trx, catalog, &snapshot)?;
         for macro_row in &macros {
             trx.atomic_op(
                 &self.versionstamped_key(
@@ -89,7 +89,7 @@ impl FdbOrderedCatalogKv {
 
         let trx = self.create_transaction()?;
         stage_snapshot(self, &trx, catalog, &snapshot)?;
-        stage_fdb_next_schema_version(self, &trx, catalog)?;
+        stage_fdb_next_schema_version(self, &trx, catalog, &snapshot)?;
         for macro_id in macro_ids {
             let mut macro_row =
                 load_macro_at(self, catalog, *macro_id, latest.order)?.ok_or_else(|| {
@@ -137,7 +137,7 @@ fn stage_snapshot(
         &snapshot.sequence.to_be_bytes(),
         MutationType::SetVersionstampedKey,
     );
-    stage_fdb_latest_snapshot_value(kv, trx, catalog, snapshot)?;
+    stage_fdb_snapshot_indexes(kv, trx, catalog, snapshot)?;
     Ok(())
 }
 
@@ -146,8 +146,9 @@ fn macro_object_key_order_offset(catalog: CatalogId, macro_id: MacroId) -> usize
 }
 
 fn reject_duplicate_macro_ids(macro_ids: &[MacroId]) -> CatalogResult<()> {
-    for (index, macro_id) in macro_ids.iter().enumerate() {
-        if macro_ids[..index].iter().any(|prior| prior == macro_id) {
+    let mut unique = BTreeSet::new();
+    for macro_id in macro_ids {
+        if !unique.insert(*macro_id) {
             return Err(CatalogError::InvalidMutation(format!(
                 "macro {} is listed more than once for drop",
                 macro_id.0

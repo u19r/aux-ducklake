@@ -22,6 +22,7 @@ use ducklake_catalog::{
     expire_snapshots,
     keys::{
         conflict_fence_key, current_delete_file_key, current_schema_version_key, delete_file_key,
+        inline_live_row_key,
     },
     latest_snapshot, list_current_data_files,
     list_current_data_files_for_partition_scan_with_deletes, list_current_data_files_with_deletes,
@@ -35,6 +36,235 @@ use ducklake_catalog::{
     remove_old_data_files, remove_old_delete_files, remove_old_inline_table_payloads,
     snapshot_by_public_sequence,
 };
+
+#[test]
+fn given_data_file_max_partial_is_current_commit_when_committed_then_stored_order_is_versionstamped()
+ {
+    if live_fdb_disabled() {
+        return;
+    }
+
+    let catalog = CatalogId(87);
+    let table = TableId(87);
+    let kv = FdbOrderedCatalogKv::open_default_with_prefix(
+        unique_prefix("data-file-max-partial-versionstamp").into_bytes(),
+    )
+    .unwrap();
+    kv.initialize_catalog_if_absent_versionstamped(catalog)
+        .unwrap();
+    let table_snapshot =
+        create_current_table(&kv, catalog, table, "data_file_max_partial").unwrap();
+    let incomplete_order = CatalogOrderId::fdb_versionstamp([0; 10], 0);
+
+    let committed = kv
+        .commit_data_mutation_versionstamped(
+            catalog,
+            None,
+            FdbDataMutation {
+                data_files: vec![
+                    DataFileRow::new(
+                        DataFileId(1),
+                        table,
+                        "data-file-max-partial.parquet",
+                        1,
+                        64,
+                        table_snapshot.order,
+                    )
+                    .with_max_partial_order(Some(incomplete_order)),
+                ],
+                ..FdbDataMutation::default()
+            },
+        )
+        .unwrap();
+
+    let commit_order = latest_snapshot(&kv, catalog).unwrap().unwrap().order;
+    assert_eq!(
+        committed.data_files[0].max_partial_order,
+        Some(commit_order)
+    );
+    let stored = list_current_data_files(&kv, catalog, table).unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].validity.begin_order, table_snapshot.order);
+    assert_eq!(stored[0].max_partial_order, Some(commit_order));
+}
+
+#[test]
+fn given_staged_mutation_exceeds_fdb_limit_when_committed_then_preflight_rejects_it() {
+    if live_fdb_disabled() {
+        return;
+    }
+
+    let catalog = CatalogId(89);
+    let table = TableId(89);
+    let kv = FdbOrderedCatalogKv::open_default_with_prefix(
+        unique_prefix("staged-mutation-size-preflight").into_bytes(),
+    )
+    .unwrap();
+    kv.initialize_catalog_if_absent_versionstamped(catalog)
+        .unwrap();
+    let table_snapshot =
+        create_current_table(&kv, catalog, table, "staged_mutation_size_preflight").unwrap();
+    let path = format!(
+        "main/staged-mutation-size-preflight/{}.parquet",
+        "x".repeat(500)
+    );
+    let data_files = (0..5_500)
+        .map(|index| DataFileRow::new(DataFileId(index), table, &path, 1, 64, table_snapshot.order))
+        .collect();
+
+    let error = kv
+        .commit_data_mutation_versionstamped(
+            catalog,
+            None,
+            FdbDataMutation {
+                data_files,
+                ..FdbDataMutation::default()
+            },
+        )
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            CatalogError::InvalidMutation(ref message)
+                if message.contains("staged foundationdb data mutation")
+                    && message.contains("over 8000000 byte limit")
+        ),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn given_delete_file_max_partial_is_current_commit_when_committed_then_stored_order_is_versionstamped()
+ {
+    if live_fdb_disabled() {
+        return;
+    }
+
+    let catalog = CatalogId(88);
+    let table = TableId(88);
+    let kv = FdbOrderedCatalogKv::open_default_with_prefix(
+        unique_prefix("delete-file-max-partial-versionstamp").into_bytes(),
+    )
+    .unwrap();
+    kv.initialize_catalog_if_absent_versionstamped(catalog)
+        .unwrap();
+    let table_snapshot =
+        create_current_table(&kv, catalog, table, "delete_file_max_partial").unwrap();
+    let [data_file] = kv
+        .append_data_files_versionstamped(
+            catalog,
+            vec![DataFileRow::new(
+                DataFileId(1),
+                table,
+                "delete-file-source.parquet",
+                2,
+                128,
+                table_snapshot.order,
+            )],
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let incomplete_order = CatalogOrderId::fdb_versionstamp([0; 10], 0);
+
+    let committed = kv
+        .commit_data_mutation_versionstamped(
+            catalog,
+            None,
+            FdbDataMutation {
+                delete_files: vec![
+                    DeleteFileRow::new(
+                        DeleteFileId(2),
+                        data_file.data_file_id,
+                        "delete-file-max-partial.parquet",
+                        1,
+                        64,
+                        data_file.validity.begin_order,
+                    )
+                    .with_max_partial_order(Some(incomplete_order)),
+                ],
+                ..FdbDataMutation::default()
+            },
+        )
+        .unwrap();
+
+    let commit_order = latest_snapshot(&kv, catalog).unwrap().unwrap().order;
+    assert_eq!(
+        committed.delete_files[0].max_partial_order,
+        Some(commit_order)
+    );
+    let stored = list_current_data_files_with_deletes(&kv, catalog, table).unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(
+        stored[0].delete_file.as_ref().unwrap().max_partial_order,
+        Some(commit_order)
+    );
+}
+
+#[test]
+fn given_fdb_appends_when_row_ids_reuse_allocated_range_then_transaction_rejects_reuse() {
+    if live_fdb_disabled() {
+        return;
+    }
+
+    let catalog = CatalogId(83);
+    let table = TableId(81);
+    let prefix = unique_prefix("table-row-id-watermark");
+    let kv = FdbOrderedCatalogKv::open_default_with_prefix(prefix.into_bytes()).unwrap();
+    kv.initialize_catalog_if_absent_versionstamped(catalog)
+        .unwrap();
+    let table_row = create_current_table(&kv, catalog, table, "events").unwrap();
+    for (file_id, row_id_start) in [(801, 0), (802, 10)] {
+        kv.commit_data_mutation_versionstamped(
+            catalog,
+            None,
+            FdbDataMutation {
+                data_files: vec![
+                    DataFileRow::new(
+                        DataFileId(file_id),
+                        table,
+                        format!("events-{file_id}.parquet"),
+                        1,
+                        128,
+                        table_row.order,
+                    )
+                    .with_row_id_start(row_id_start),
+                ],
+                ..FdbDataMutation::default()
+            },
+        )
+        .unwrap();
+    }
+
+    let error = kv
+        .commit_data_mutation_versionstamped(
+            catalog,
+            None,
+            FdbDataMutation {
+                data_files: vec![
+                    DataFileRow::new(
+                        DataFileId(803),
+                        table,
+                        "events-reused.parquet",
+                        1,
+                        128,
+                        table_row.order,
+                    )
+                    .with_row_id_start(5),
+                ],
+                ..FdbDataMutation::default()
+            },
+        )
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("reuse allocated row ids below table 81 next row id 11"),
+        "{error}"
+    );
+}
 
 #[test]
 fn given_commit_results_are_ambiguous_when_later_table_commits_then_reopen_lists_both_once() {
@@ -52,10 +282,7 @@ fn given_commit_results_are_ambiguous_when_later_table_commits_then_reopen_lists
     let first_table_row = create_current_table(&kv, catalog, first_table, "memberships").unwrap();
     let second_table_row = create_current_table(&kv, catalog, second_table, "users").unwrap();
     unsafe {
-        std::env::set_var(
-            "AUX_DUCKLAKE_TEST_FDB_COMMIT_UNKNOWN_ONCE",
-            "after:joined-visibility",
-        );
+        std::env::set_var("AUX_DUCKLAKE_TEST_FDB_COMMIT_UNKNOWN_ONCE", "after:100");
     }
 
     let first_mutation = FdbDataMutation {
@@ -105,22 +332,11 @@ fn given_commit_results_are_ambiguous_when_later_table_commits_then_reopen_lists
     assert_eq!(first_commit.data_files.len(), 0);
     assert_eq!(first_retry.data_files.len(), 0);
     assert_eq!(second_commit.data_files.len(), 1);
-    assert_eq!(
-        list_current_data_files(&reopened, catalog, first_table)
-            .unwrap()
-            .iter()
-            .map(|file| file.data_file_id)
-            .collect::<Vec<_>>(),
-        vec![DataFileId(801)]
-    );
-    assert_eq!(
-        list_current_data_files(&reopened, catalog, second_table)
-            .unwrap()
-            .iter()
-            .map(|file| file.data_file_id)
-            .collect::<Vec<_>>(),
-        vec![DataFileId(802)]
-    );
+    let first_files = list_current_data_files(&reopened, catalog, first_table).unwrap();
+    assert_eq!(first_files.len(), 1);
+    assert_eq!(first_files[0].path, "membership.parquet");
+    let second_files = list_current_data_files(&reopened, catalog, second_table).unwrap();
+    assert_eq!(second_files, second_commit.data_files);
 
     let retry_catalog = CatalogId(84);
     let retry_prefix = unique_prefix("commit-unknown-retry");
@@ -145,10 +361,7 @@ fn given_commit_results_are_ambiguous_when_later_table_commits_then_reopen_lists
         ..FdbDataMutation::default()
     };
     unsafe {
-        std::env::set_var(
-            "AUX_DUCKLAKE_TEST_FDB_COMMIT_UNKNOWN_ONCE",
-            "before:joined-visibility",
-        );
+        std::env::set_var("AUX_DUCKLAKE_TEST_FDB_COMMIT_UNKNOWN_ONCE", "before:110");
     }
     let first_error = retry_kv
         .commit_data_mutation_versionstamped(
@@ -674,17 +887,28 @@ fn fdb_live_delete_file_registration_attaches_current_and_historical_reads_when_
         .try_into()
         .unwrap();
     let delete_file = kv
-        .register_delete_file_versionstamped(
+        .commit_data_mutation_versionstamped(
             catalog,
-            DeleteFileRow::new(
-                DeleteFileId(30),
-                file.data_file_id,
-                "fdb-delete-file.parquet",
-                7,
-                70,
-                file.validity.begin_order,
+            None,
+            ducklake_catalog::FdbDataMutation::new(
+                Vec::new(),
+                vec![DeleteFileRow::new(
+                    DeleteFileId(30),
+                    file.data_file_id,
+                    "fdb-delete-file.parquet",
+                    7,
+                    70,
+                    CatalogOrderId::uuid_v7(0),
+                )],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
             ),
         )
+        .unwrap()
+        .delete_files
+        .into_iter()
+        .next()
         .unwrap();
 
     assert_eq!(
@@ -707,6 +931,115 @@ fn fdb_live_delete_file_registration_attaches_current_and_historical_reads_when_
     assert_eq!(before_delete[0].delete_file, None);
     assert_eq!(after_delete.len(), 1);
     assert_eq!(after_delete[0].delete_file, Some(delete_file));
+}
+
+#[test]
+fn fdb_live_delete_file_registration_rejects_non_current_target_in_commit_transaction_when_enabled()
+{
+    if live_fdb_disabled() {
+        return;
+    }
+
+    let catalog = CatalogId(67);
+    let table = TableId(47);
+    let kv = FdbOrderedCatalogKv::open_default_with_prefix(
+        unique_prefix("delete-file-current-conflict").into_bytes(),
+    )
+    .unwrap();
+    let initial = kv
+        .initialize_catalog_if_absent_versionstamped(catalog)
+        .unwrap();
+    let [file] = kv
+        .append_data_files_versionstamped(
+            catalog,
+            vec![DataFileRow::new(
+                DataFileId(21),
+                table,
+                "fdb-delete-stale-base.parquet",
+                100,
+                1_000,
+                initial.order,
+            )],
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+    kv.commit_data_mutation_versionstamped(
+        catalog,
+        None,
+        FdbDataMutation {
+            dropped_data_file_ids: vec![file.data_file_id],
+            ..FdbDataMutation::default()
+        },
+    )
+    .unwrap();
+
+    let error = kv
+        .commit_data_mutation_versionstamped(
+            catalog,
+            None,
+            FdbDataMutation::new(
+                Vec::new(),
+                vec![DeleteFileRow::new(
+                    DeleteFileId(31),
+                    file.data_file_id,
+                    "fdb-delete-stale-target.parquet",
+                    7,
+                    70,
+                    CatalogOrderId::uuid_v7(0),
+                )],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+        )
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("data file 21 is no longer current"),
+        "{error}"
+    );
+}
+
+#[test]
+fn fdb_live_data_file_registration_rejects_missing_table_in_commit_transaction_when_enabled() {
+    if live_fdb_disabled() {
+        return;
+    }
+
+    let catalog = CatalogId(68);
+    let missing_table = TableId(48);
+    let kv = FdbOrderedCatalogKv::open_default_with_prefix(
+        unique_prefix("data-file-current-table-conflict").into_bytes(),
+    )
+    .unwrap();
+    kv.initialize_catalog_if_absent_versionstamped(catalog)
+        .unwrap();
+
+    let error = kv
+        .commit_data_mutation_versionstamped(
+            catalog,
+            None,
+            FdbDataMutation {
+                data_files: vec![DataFileRow::new(
+                    DataFileId(22),
+                    missing_table,
+                    "fdb-missing-table.parquet",
+                    100,
+                    1_000,
+                    CatalogOrderId::uuid_v7(0),
+                )],
+                ..FdbDataMutation::default()
+            },
+        )
+        .unwrap_err();
+
+    assert!(
+        error.to_string().contains("table 48 is not current"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -832,19 +1165,9 @@ fn fdb_live_file_cleanup_removes_only_expired_unreachable_metadata_when_enabled(
     .unwrap();
     expire_snapshots(&mut kv, catalog, &[first_delete_snapshot.sequence]).unwrap();
     let old_deletes = list_old_delete_files_for_cleanup(&kv, catalog).unwrap();
-    assert_eq!(old_deletes.len(), 1);
-    assert_eq!(
-        old_deletes[0].delete_file.delete_file_id,
-        first_delete.delete_file_id
-    );
-    assert_eq!(
-        remove_old_delete_files(&mut kv, catalog, &[first_delete.delete_file_id])
-            .unwrap()
-            .len(),
-        1
-    );
+    assert!(old_deletes.is_empty());
     assert!(
-        list_old_delete_files_for_cleanup(&kv, catalog)
+        remove_old_delete_files(&mut kv, catalog, &[first_delete.delete_file_id])
             .unwrap()
             .is_empty()
     );
@@ -858,6 +1181,11 @@ fn fdb_live_file_cleanup_removes_only_expired_unreachable_metadata_when_enabled(
         row,
         ducklake_catalog::KnownCleanupFileRow::Delete { delete_file, table_id }
             if delete_file.path == "cleanup-delete-current.parquet" && *table_id == table
+    )));
+    assert!(known.iter().any(|row| matches!(
+        row,
+        ducklake_catalog::KnownCleanupFileRow::Delete { delete_file, table_id }
+            if delete_file.path == first_delete.path && *table_id == table
     )));
 }
 
@@ -893,42 +1221,49 @@ fn fdb_live_data_mutation_can_delete_file_appended_in_same_commit_when_enabled()
         .try_into()
         .unwrap();
 
-    kv.commit_data_mutation_versionstamped(
-        catalog,
-        Some(CommitAttemptId(4001)),
-        ducklake_catalog::FdbDataMutation::new(
-            vec![DataFileRow::new(
-                DataFileId(11),
-                table,
-                "mutation-new-file.parquet",
-                100,
-                1_024,
-                existing.validity.begin_order,
-            )],
-            vec![
-                DeleteFileRow::new(
-                    DeleteFileId(20),
-                    existing.data_file_id,
-                    "mutation-delete-existing.parquet",
-                    10,
-                    512,
-                    existing.validity.begin_order,
-                ),
-                DeleteFileRow::new(
-                    DeleteFileId(21),
+    let committed = kv
+        .commit_data_mutation_versionstamped(
+            catalog,
+            Some(CommitAttemptId(4001)),
+            ducklake_catalog::FdbDataMutation::new(
+                vec![DataFileRow::new(
                     DataFileId(11),
-                    "mutation-delete-new-file.parquet",
-                    15,
-                    512,
+                    table,
+                    "mutation-new-file.parquet",
+                    100,
+                    1_024,
                     existing.validity.begin_order,
-                ),
-            ],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        ),
-    )
-    .unwrap();
+                )],
+                vec![
+                    DeleteFileRow::new(
+                        DeleteFileId(20),
+                        existing.data_file_id,
+                        "mutation-delete-existing.parquet",
+                        10,
+                        512,
+                        existing.validity.begin_order,
+                    ),
+                    DeleteFileRow::new(
+                        DeleteFileId(21),
+                        DataFileId(11),
+                        "mutation-delete-new-file.parquet",
+                        15,
+                        512,
+                        existing.validity.begin_order,
+                    ),
+                ],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+        )
+        .unwrap();
+    let new_file = committed.data_files.first().unwrap();
+    let new_file_delete = committed
+        .delete_files
+        .iter()
+        .find(|delete| delete.data_file_id == new_file.data_file_id)
+        .unwrap();
 
     let current = list_current_data_files_with_deletes(&kv, catalog, table).unwrap();
 
@@ -938,11 +1273,11 @@ fn fdb_live_data_mutation_can_delete_file_appended_in_same_commit_when_enabled()
         "storage should attach delete metadata for both committed and newly appended files"
     );
     assert!(current.iter().any(|file| {
-        file.data_file.data_file_id == DataFileId(11)
+        file.data_file.data_file_id == new_file.data_file_id
             && file
                 .delete_file
                 .as_ref()
-                .is_some_and(|delete| delete.delete_file_id == DeleteFileId(21))
+                .is_some_and(|delete| delete.delete_file_id == new_file_delete.delete_file_id)
     }));
 }
 
@@ -1103,13 +1438,10 @@ fn fdb_live_delete_file_cleanup_rechecks_stale_candidate_before_removing_when_en
     )
     .unwrap();
     expire_snapshots(&mut kv, catalog, &[first_delete_snapshot.sequence]).unwrap();
-    assert_eq!(
+    assert!(
         list_old_delete_files_for_cleanup(&kv, catalog)
             .unwrap()
-            .iter()
-            .map(|row| row.delete_file.delete_file_id)
-            .collect::<Vec<_>>(),
-        vec![first_delete.delete_file_id]
+            .is_empty()
     );
 
     let replacement = DeleteFileRow::new(
@@ -1296,12 +1628,47 @@ fn fdb_live_inline_rows_attach_read_and_emit_insert_cdf_when_enabled() {
     assert_eq!(changes.len(), 2);
     assert_eq!(changes[0].payload, b"row\t1\tone\n");
     assert_eq!(changes[1].payload, b"row\t2\ttwo\n");
+    assert_eq!(
+        kv.get(&inline_live_row_key(catalog, table_id, schema_id, 1))
+            .unwrap(),
+        Some(inline_snapshot.sequence.0.to_be_bytes().to_vec())
+    );
+    let duplicate = kv
+        .register_inline_table_payload_with_table_versionstamped(
+            catalog,
+            current_table.clone(),
+            schema_id,
+            b"row\t1\tduplicate\n".to_vec(),
+        )
+        .unwrap_err();
+    assert!(
+        duplicate
+            .to_string()
+            .contains("inline row id 1 is already live")
+    );
 
     let delete = kv
         .commit_delete_inline_table_rows_versionstamped(catalog, table_id, schema_id, &[1], None)
         .unwrap();
     assert_eq!(delete.deleted_row_count, 1);
-    assert_eq!(delete.rewritten_payload_count, 1);
+    assert_eq!(delete.rewritten_payload_count, 0);
+    assert_eq!(
+        kv.get(&inline_live_row_key(catalog, table_id, schema_id, 1))
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        kv.commit_delete_inline_table_rows_versionstamped(
+            catalog,
+            table_id,
+            schema_id,
+            &[1],
+            None,
+        )
+        .unwrap()
+        .deleted_row_count,
+        0
+    );
     let delete_snapshot = latest_snapshot(&kv, catalog).unwrap().unwrap();
     let historical_after_delete =
         list_inline_table_payloads_at(&kv, catalog, table_id, schema_id, inline_snapshot.order)
@@ -1315,7 +1682,10 @@ fn fdb_live_inline_rows_attach_read_and_emit_insert_cdf_when_enabled() {
         list_inline_table_payloads_at(&kv, catalog, table_id, schema_id, delete_snapshot.order)
             .unwrap();
     assert_eq!(latest_after_delete.len(), 1);
-    assert_eq!(latest_after_delete[0].payload, b"row\t2\ttwo\n");
+    assert_eq!(
+        latest_after_delete[0].payload,
+        b"row\t1\tone\nrow\t2\ttwo\n"
+    );
     let delete_changes = list_inline_row_payload_changes(
         &kv,
         catalog,
@@ -1359,20 +1729,21 @@ fn fdb_live_inline_rows_attach_read_and_emit_insert_cdf_when_enabled() {
         list_inline_table_payloads_at(&kv, catalog, table_id, schema_id, delete_snapshot.order)
             .unwrap()[0]
             .payload,
-        b"row\t2\ttwo\n"
+        b"row\t1\tone\nrow\t2\ttwo\n"
     );
     assert!(
         list_inline_table_payloads_at(&kv, catalog, table_id, schema_id, flush_snapshot.order)
             .unwrap()
             .is_empty()
     );
+    let flushed_file_id = flush.data_files.first().unwrap().data_file_id;
     assert_eq!(
         list_current_data_files(&kv, catalog, table_id)
             .unwrap()
             .last()
             .unwrap()
             .data_file_id,
-        DataFileId(820)
+        flushed_file_id
     );
 
     expire_snapshots(
@@ -1382,13 +1753,13 @@ fn fdb_live_inline_rows_attach_read_and_emit_insert_cdf_when_enabled() {
     )
     .unwrap();
     let cleanup = list_old_inline_table_payloads_for_cleanup(&kv, catalog).unwrap();
-    assert_eq!(cleanup.len(), 2);
+    assert_eq!(cleanup.len(), 1);
     let cleanup_ids = cleanup.iter().map(|row| row.id).collect::<Vec<_>>();
     assert_eq!(
         remove_old_inline_table_payloads(&mut kv, catalog, &cleanup_ids,)
             .unwrap()
             .len(),
-        2
+        1
     );
     assert!(
         list_old_inline_table_payloads_for_cleanup(&kv, catalog)
@@ -1401,7 +1772,7 @@ fn fdb_live_inline_rows_attach_read_and_emit_insert_cdf_when_enabled() {
             .last()
             .unwrap()
             .data_file_id,
-        DataFileId(820)
+        flushed_file_id
     );
 }
 
@@ -1517,13 +1888,14 @@ fn fdb_live_given_inline_rows_already_flushed_when_stale_flush_replays_then_no_d
         stale_replay,
         ducklake_catalog::DataMutationCommit::default()
     );
+    let first_flush_file_id = first_flush.data_files.first().unwrap().data_file_id;
     assert_eq!(
         list_current_data_files(&kv, catalog, table_id)
             .unwrap()
             .iter()
             .map(|row| row.data_file_id)
             .collect::<Vec<_>>(),
-        vec![DataFileId(831)]
+        vec![first_flush_file_id]
     );
 }
 
@@ -2144,7 +2516,7 @@ fn fdb_live_data_mutation_appends_and_registers_delete_files_atomically_when_ena
                     "fdb-mutation-delete.parquet",
                     30,
                     300,
-                    initial.order,
+                    CatalogOrderId::uuid_v7(0),
                 )],
                 Vec::new(),
                 Vec::new(),
@@ -2231,7 +2603,7 @@ fn fdb_live_data_mutation_appends_and_registers_delete_files_atomically_when_ena
                     "fdb-mutation-delete.parquet",
                     30,
                     300,
-                    initial.order,
+                    CatalogOrderId::uuid_v7(0),
                 )],
                 Vec::new(),
                 Vec::new(),
@@ -2517,6 +2889,83 @@ fn fdb_live_append_retry_is_idempotent_without_duplicate_publish_when_enabled() 
 }
 
 #[test]
+fn fdb_live_concurrent_same_attempt_publishes_data_mutation_once_when_enabled() {
+    if live_fdb_disabled() {
+        return;
+    }
+
+    let catalog = CatalogId(65);
+    let table = TableId(45);
+    let attempt = CommitAttemptId(124);
+    let kv = Arc::new(
+        FdbOrderedCatalogKv::open_default_with_prefix(
+            unique_prefix("concurrent-idempotent-mutation").into_bytes(),
+        )
+        .unwrap(),
+    );
+    kv.initialize_catalog_if_absent_versionstamped(catalog)
+        .unwrap();
+    let current_table = create_current_table(&kv, catalog, table, "events").unwrap();
+    let barrier = Arc::new(Barrier::new(3));
+
+    let handles = (0..2)
+        .map(|_| {
+            let writer_kv = Arc::clone(&kv);
+            let writer_barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                writer_barrier.wait();
+                writer_kv
+                    .commit_data_mutation_versionstamped(
+                        catalog,
+                        Some(attempt),
+                        FdbDataMutation {
+                            data_files: vec![DataFileRow::new(
+                                DataFileId(12),
+                                table,
+                                "concurrent-idempotent.parquet",
+                                10,
+                                1_024,
+                                current_table.order,
+                            )],
+                            ..FdbDataMutation::default()
+                        },
+                    )
+                    .unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+
+    barrier.wait();
+    let commits = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        commits
+            .iter()
+            .map(|commit| commit.data_files.len())
+            .sum::<usize>(),
+        1
+    );
+    assert_eq!(
+        commits
+            .iter()
+            .filter(|commit| commit.data_files.is_empty())
+            .count(),
+        1
+    );
+    let files = list_current_data_files(kv.as_ref(), catalog, table).unwrap();
+    assert_eq!(files.len(), 1);
+    let published = commits
+        .iter()
+        .flat_map(|commit| &commit.data_files)
+        .next()
+        .unwrap();
+    assert_eq!(published, &files[0]);
+}
+
+#[test]
 fn fdb_live_append_after_concurrent_schema_change_conflicts_without_publishing_when_enabled() {
     if live_fdb_disabled() {
         return;
@@ -2639,15 +3088,22 @@ fn fdb_live_append_after_table_drop_conflicts_without_publishing_when_enabled() 
         .unwrap()
         .try_into()
         .unwrap();
-    kv.register_delete_file_versionstamped(
+    kv.commit_data_mutation_versionstamped(
         catalog,
-        DeleteFileRow::new(
-            DeleteFileId(91),
-            data_file.data_file_id,
-            "drop-conflict-delete.parquet",
-            1,
-            128,
-            CatalogOrderId::uuid_v7(0),
+        None,
+        ducklake_catalog::FdbDataMutation::new(
+            Vec::new(),
+            vec![DeleteFileRow::new(
+                DeleteFileId(91),
+                data_file.data_file_id,
+                "drop-conflict-delete.parquet",
+                1,
+                128,
+                CatalogOrderId::uuid_v7(0),
+            )],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
         ),
     )
     .unwrap();
@@ -2876,14 +3332,14 @@ fn fdb_live_partitioned_merge_replacement_survives_cleanup_for_time_travel_when_
             .iter()
             .map(|file| file.data_file.data_file_id)
             .collect::<Vec<_>>(),
-        vec![DataFileId(1), DataFileId(2)]
+        vec![committed[0].data_file_id, committed[1].data_file_id]
     );
 
     let committed_compaction = kv
         .commit_merge_adjacent_data_files_versionstamped(
             catalog,
             MergeAdjacentCompaction {
-                source_file_ids: vec![DataFileId(1), DataFileId(2)],
+                source_file_ids: vec![committed[0].data_file_id, committed[1].data_file_id],
                 new_files: vec![DataFileRow::new(
                     DataFileId(5),
                     table,
@@ -2914,8 +3370,11 @@ fn fdb_live_partitioned_merge_replacement_survives_cleanup_for_time_travel_when_
         Some(committed[1].validity.begin_order)
     );
 
-    kv.remove_old_data_files_checked(catalog, &[DataFileId(1), DataFileId(2)])
-        .unwrap();
+    kv.remove_old_data_files_checked(
+        catalog,
+        &[committed[0].data_file_id, committed[1].data_file_id],
+    )
+    .unwrap();
 
     let files_at_second_insert =
         list_data_files_at(&kv, catalog, table, first_partition_second_snapshot.order).unwrap();
@@ -2924,7 +3383,7 @@ fn fdb_live_partitioned_merge_replacement_survives_cleanup_for_time_travel_when_
             .iter()
             .map(|file| (file.data_file_id, file.row_id_start, file.record_count))
             .collect::<Vec<_>>(),
-        vec![(DataFileId(5), 0, 2)]
+        vec![(replacement.data_file_id, 0, 2)]
     );
     let partition_one_after_cleanup = list_current_data_files_for_partition_scan_with_deletes(
         &kv,
@@ -2939,7 +3398,7 @@ fn fdb_live_partitioned_merge_replacement_survives_cleanup_for_time_travel_when_
             .iter()
             .map(|file| file.data_file.data_file_id)
             .collect::<Vec<_>>(),
-        vec![DataFileId(5)]
+        vec![replacement.data_file_id]
     );
 }
 
@@ -3099,46 +3558,51 @@ fn fdb_live_partitioned_multi_output_merge_derives_row_ids_by_partition_when_ena
     )
     .unwrap();
 
+    let mut source_file_ids = Vec::new();
     for (file_id, row_id_start, partition) in [
         (DataFileId(1), 0, "1"),
         (DataFileId(2), 1, "2"),
         (DataFileId(3), 2, "1"),
         (DataFileId(4), 3, "2"),
     ] {
-        kv.commit_data_mutation_versionstamped(
-            catalog,
-            None,
-            ducklake_catalog::FdbDataMutation::new(
-                vec![
-                    DataFileRow::new(
+        source_file_ids.push(
+            kv.commit_data_mutation_versionstamped(
+                catalog,
+                None,
+                ducklake_catalog::FdbDataMutation::new(
+                    vec![
+                        DataFileRow::new(
+                            file_id,
+                            table,
+                            format!("source-{}.parquet", file_id.0),
+                            1,
+                            64,
+                            CatalogOrderId::uuid_v7(0),
+                        )
+                        .with_row_id_start(row_id_start),
+                    ],
+                    Vec::new(),
+                    Vec::new(),
+                    vec![FilePartitionValueRow::new(
                         file_id,
                         table,
-                        format!("source-{}.parquet", file_id.0),
-                        1,
-                        64,
-                        CatalogOrderId::uuid_v7(0),
-                    )
-                    .with_row_id_start(row_id_start),
-                ],
-                Vec::new(),
-                Vec::new(),
-                vec![FilePartitionValueRow::new(
-                    file_id,
-                    table,
-                    PartitionKeyIndex(0),
-                    partition,
-                )],
-                Vec::new(),
-            ),
-        )
-        .unwrap();
+                        PartitionKeyIndex(0),
+                        partition,
+                    )],
+                    Vec::new(),
+                ),
+            )
+            .unwrap()
+            .data_files[0]
+                .data_file_id,
+        );
     }
 
     let committed = kv
         .commit_merge_adjacent_data_files_versionstamped(
             catalog,
             MergeAdjacentCompaction {
-                source_file_ids: vec![DataFileId(1), DataFileId(2), DataFileId(3), DataFileId(4)],
+                source_file_ids,
                 new_files: vec![
                     DataFileRow::new(
                         DataFileId(5),
@@ -3166,13 +3630,12 @@ fn fdb_live_partitioned_multi_output_merge_derives_row_ids_by_partition_when_ena
         )
         .unwrap();
 
-    assert_eq!(
+    assert_eq!(committed.new_files.len(), 2);
+    assert!(
         committed
             .new_files
             .iter()
-            .map(|file| (file.data_file_id, file.row_id_start_known))
-            .collect::<Vec<_>>(),
-        vec![(DataFileId(5), false), (DataFileId(6), false)]
+            .all(|file| !file.row_id_start_known)
     );
     assert_eq!(
         list_current_data_files(&kv, catalog, table)
@@ -3180,7 +3643,11 @@ fn fdb_live_partitioned_multi_output_merge_derives_row_ids_by_partition_when_ena
             .iter()
             .map(|file| file.data_file_id)
             .collect::<Vec<_>>(),
-        vec![DataFileId(5), DataFileId(6)]
+        committed
+            .new_files
+            .iter()
+            .map(|file| file.data_file_id)
+            .collect::<Vec<_>>()
     );
 }
 
@@ -3270,14 +3737,17 @@ fn fdb_live_rewrite_delete_compaction_replaces_source_and_delete_file_when_enabl
     let [source] = kv
         .append_data_files_versionstamped(
             catalog,
-            vec![DataFileRow::new(
-                DataFileId(120),
-                table,
-                "rewrite-delete-source.parquet",
-                10,
-                1_024,
-                initial.order,
-            )],
+            vec![
+                DataFileRow::new(
+                    DataFileId(120),
+                    table,
+                    "rewrite-delete-source.parquet",
+                    10,
+                    1_024,
+                    initial.order,
+                )
+                .with_row_id_start(0),
+            ],
         )
         .unwrap()
         .try_into()
@@ -3570,14 +4040,17 @@ fn fdb_live_rewrite_delete_compaction_uses_inline_file_deletions_when_enabled() 
     let [source] = kv
         .append_data_files_versionstamped(
             catalog,
-            vec![DataFileRow::new(
-                DataFileId(160),
-                table,
-                "rewrite-inline-source.parquet",
-                10,
-                1_024,
-                initial.order,
-            )],
+            vec![
+                DataFileRow::new(
+                    DataFileId(160),
+                    table,
+                    "rewrite-inline-source.parquet",
+                    10,
+                    1_024,
+                    initial.order,
+                )
+                .with_row_id_start(0),
+            ],
         )
         .unwrap()
         .try_into()

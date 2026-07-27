@@ -11,7 +11,8 @@ mod tests {
 
     use super::super::{
         FilePartitionValueRow, encode_partition_lookup_value,
-        list_file_partition_values_for_data_files, partition_lookup_key,
+        list_file_partition_values_for_data_files,
+        list_file_partition_values_for_data_files_and_keys, partition_lookup_key,
         stage_file_partition_value,
     };
 
@@ -186,6 +187,38 @@ mod tests {
     }
 
     #[test]
+    fn given_sparse_partition_file_set_and_known_keys_when_loaded_then_uses_one_exact_batch() {
+        let catalog = CatalogId(126);
+        let table = TableId(7);
+        let data_file_ids = [DataFileId(11), DataFileId(10_000)];
+        let mut inner = FakeOrderedCatalogKv::new();
+        for data_file_id in data_file_ids {
+            let data_file = data_file(data_file_id, table);
+            let partition =
+                FilePartitionValueRow::new(data_file_id, table, PartitionKeyIndex(0), "eu");
+            let mut batch = KvBatch::new();
+            stage_file_partition_value(&mut batch, catalog, &partition, &data_file);
+            inner.commit(batch).unwrap();
+        }
+        let kv = PartitionValueScanCountingKv::new(inner, catalog);
+        let data_file_ids = data_file_ids.into_iter().collect();
+        let partition_key_indices = [PartitionKeyIndex(0)].into_iter().collect();
+
+        let rows = list_file_partition_values_for_data_files_and_keys(
+            &kv,
+            catalog,
+            &data_file_ids,
+            &partition_key_indices,
+        )
+        .unwrap();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(kv.file_partition_value_batch_gets(), 1);
+        assert_eq!(kv.file_partition_value_prefix_scans(), 0);
+        assert_eq!(kv.file_partition_value_range_scans(), 0);
+    }
+
+    #[test]
     fn given_empty_partition_cache_when_partition_is_registered_then_next_load_sees_new_row() {
         let catalog = CatalogId(124);
         let table = TableId(7);
@@ -218,6 +251,7 @@ mod tests {
         catalog: CatalogId,
         file_partition_value_prefix_scans: Cell<usize>,
         file_partition_value_range_scans: Cell<usize>,
+        file_partition_value_batch_gets: Cell<usize>,
     }
 
     impl PartitionValueScanCountingKv {
@@ -227,6 +261,7 @@ mod tests {
                 catalog,
                 file_partition_value_prefix_scans: Cell::new(0),
                 file_partition_value_range_scans: Cell::new(0),
+                file_partition_value_batch_gets: Cell::new(0),
             }
         }
 
@@ -237,6 +272,10 @@ mod tests {
         fn file_partition_value_range_scans(&self) -> usize {
             self.file_partition_value_range_scans.get()
         }
+
+        fn file_partition_value_batch_gets(&self) -> usize {
+            self.file_partition_value_batch_gets.get()
+        }
     }
 
     impl OrderedCatalogKv for PartitionValueScanCountingKv {
@@ -245,6 +284,15 @@ mod tests {
         }
 
         fn batch_get(&self, keys: &[Vec<u8>]) -> crate::CatalogResult<Vec<Option<Vec<u8>>>> {
+            if keys.iter().any(|key| {
+                key.starts_with(&crate::keys::family_prefix(
+                    self.catalog,
+                    crate::keys::KeyFamily::FilePartitionValue,
+                ))
+            }) {
+                self.file_partition_value_batch_gets
+                    .set(self.file_partition_value_batch_gets.get().saturating_add(1));
+            }
             OrderedCatalogKv::batch_get(&self.inner, keys)
         }
 

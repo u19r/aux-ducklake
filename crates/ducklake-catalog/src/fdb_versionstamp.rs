@@ -1,16 +1,13 @@
 use crate::{
-    CatalogError, CatalogResult, DataFileChangeKind, DataFileRow, DeleteFileRow, KvBatch,
-    SnapshotRow,
+    CatalogError, CatalogResult, DataFileChangeKind, DataFileRow, KvBatch, SnapshotRow,
     conflict::{CommitAttemptRow, commit_attempt_key},
     ids::{CatalogOrderId, CommitAttemptId, DataFileId, TableId, incomplete_fdb_order},
     keys::{
-        current_data_file_key, current_delete_file_key, current_table_name_key,
-        current_table_row_key, data_file_begin_key, data_file_begin_prefix, data_file_end_key,
-        data_file_key, delete_file_key, delete_file_timeline_key, delete_file_timeline_prefix,
-        order_delete_file_change_key, order_delete_file_change_prefix, schema_object_key,
-        schema_object_prefix, snapshot_data_file_change_key, snapshot_data_file_change_prefix,
-        snapshot_key, snapshot_timestamp_key, table_data_file_change_key,
-        table_data_file_change_prefix, table_delete_file_change_key,
+        current_data_file_key, current_table_name_key, current_table_row_key, data_file_begin_key,
+        data_file_begin_prefix, data_file_end_key, data_file_key, delete_file_timeline_prefix,
+        order_delete_file_change_prefix, schema_object_key, schema_object_prefix,
+        snapshot_data_file_change_key, snapshot_data_file_change_prefix, snapshot_key,
+        snapshot_timestamp_key, table_data_file_change_key, table_data_file_change_prefix,
         table_delete_file_change_prefix, table_object_key, table_object_prefix,
         table_visibility_key, table_visibility_prefix,
     },
@@ -280,47 +277,6 @@ pub(crate) fn estimate_versionstamped_append_bytes(
         })
         .sum::<usize>();
     snapshot_bytes.saturating_add(row_bytes)
-}
-
-pub(crate) fn estimate_versionstamped_delete_bytes(
-    catalog: crate::CatalogId,
-    table_id: TableId,
-    row: &DeleteFileRow,
-) -> usize {
-    let row_len = row.encode().len();
-    delete_file_key(catalog, row.delete_file_id)
-        .len()
-        .saturating_add(row_len)
-        .saturating_add(current_delete_file_key(catalog, row.data_file_id).len())
-        .saturating_add(row_len)
-        .saturating_add(
-            delete_file_timeline_key(
-                catalog,
-                row.data_file_id,
-                row.validity.begin_order,
-                row.delete_file_id,
-            )
-            .len(),
-        )
-        .saturating_add(row_len)
-        .saturating_add(
-            table_delete_file_change_key(
-                catalog,
-                table_id,
-                row.validity.begin_order,
-                row.delete_file_id,
-            )
-            .len(),
-        )
-        .saturating_add(
-            order_delete_file_change_key(
-                catalog,
-                row.validity.begin_order,
-                table_id,
-                row.delete_file_id,
-            )
-            .len(),
-        )
 }
 
 pub(crate) fn estimate_versionstamped_expire_bytes(

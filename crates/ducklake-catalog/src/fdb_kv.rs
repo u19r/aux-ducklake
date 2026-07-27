@@ -6,6 +6,7 @@ use foundationdb::{
 };
 use futures::{TryStreamExt, executor::block_on, future::try_join_all};
 
+use crate::runtime_metrics::RuntimeMetricStage;
 use crate::{
     CatalogError, CatalogId, CatalogOrderId, CatalogResult, FdbOrderedCatalogKv, KvBatch,
     MutableCatalogKv, OrderedCatalogKv, RangeDirection, RangeItem, RawSnapshotSequence,
@@ -20,33 +21,6 @@ use crate::{
     runtime_metrics::{RuntimeMetricStatus, record_runtime_kv},
     runtime_protocol::RuntimeCatalogBackend,
 };
-
-#[cfg(feature = "runtime-metrics")]
-#[derive(Clone, Copy)]
-struct RuntimeMetricStage(std::time::Instant);
-
-#[cfg(not(feature = "runtime-metrics"))]
-#[derive(Clone, Copy)]
-struct RuntimeMetricStage;
-
-impl RuntimeMetricStage {
-    #[inline]
-    fn start() -> Self {
-        #[cfg(feature = "runtime-metrics")]
-        {
-            Self(std::time::Instant::now())
-        }
-        #[cfg(not(feature = "runtime-metrics"))]
-        {
-            Self
-        }
-    }
-
-    #[cfg(feature = "runtime-metrics")]
-    fn elapsed_micros(self) -> u64 {
-        u64::try_from(self.0.elapsed().as_micros()).unwrap_or(u64::MAX)
-    }
-}
 
 #[cfg(feature = "runtime-metrics")]
 macro_rules! record_kv_result {

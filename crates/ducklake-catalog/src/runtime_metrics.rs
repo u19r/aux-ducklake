@@ -1,6 +1,48 @@
 use crate::runtime_protocol::RuntimeCatalogBackend;
 
 #[cfg(feature = "runtime-metrics")]
+#[derive(Clone, Copy)]
+pub(crate) struct RuntimeMetricStage(Option<std::time::Instant>);
+
+#[cfg(not(feature = "runtime-metrics"))]
+#[derive(Clone, Copy)]
+pub(crate) struct RuntimeMetricStage;
+
+impl RuntimeMetricStage {
+    #[inline]
+    pub(crate) fn start() -> Self {
+        #[cfg(feature = "runtime-metrics")]
+        {
+            Self(Some(std::time::Instant::now()))
+        }
+        #[cfg(not(feature = "runtime-metrics"))]
+        {
+            Self
+        }
+    }
+
+    #[cfg(not(test))]
+    #[inline]
+    pub(crate) fn zero() -> Self {
+        #[cfg(feature = "runtime-metrics")]
+        {
+            Self(None)
+        }
+        #[cfg(not(feature = "runtime-metrics"))]
+        {
+            Self
+        }
+    }
+
+    #[cfg(feature = "runtime-metrics")]
+    pub(crate) fn elapsed_micros(self) -> u64 {
+        self.0
+            .map(|started| u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX))
+            .unwrap_or(0)
+    }
+}
+
+#[cfg(feature = "runtime-metrics")]
 use std::{
     collections::BTreeMap,
     fs::{File, OpenOptions},
@@ -173,10 +215,15 @@ pub(crate) fn flush_runtime_metrics() {
     let Some(counters) = RUNTIME_COUNTERS.get() else {
         return;
     };
-    let Ok(counters) = counters.lock() else {
+    let Ok(mut counters) = counters.lock() else {
         return;
     };
-    write_metrics_if_requested(&counters);
+    if counters.is_empty() {
+        return;
+    }
+    let pending = std::mem::take(&mut *counters);
+    drop(counters);
+    write_metrics_if_requested(&pending);
 }
 
 #[cfg(not(feature = "runtime-metrics"))]
@@ -314,51 +361,5 @@ fn operation_family(operation: &str) -> &'static str {
     if operation.starts_with("method.") {
         return "method";
     }
-    match operation {
-        "AttachMetadata" | "MetadataExists" | "InitializeDuckLake" | "CommitMetadataBatch" => {
-            "metadata"
-        }
-        "CreateSchemas"
-        | "DropSchemas"
-        | "CreateTables"
-        | "AddColumns"
-        | "RenameColumns"
-        | "ChangeColumnTypes"
-        | "ChangeColumnDefaults"
-        | "ChangeComments"
-        | "ChangePartitionKeys"
-        | "ChangeSortKeys"
-        | "DropColumns"
-        | "RenameTables"
-        | "GetNextColumnId"
-        | "IsColumnCreatedWithTable" => "schema",
-        "DropTables" | "CreateViews" | "RenameViews" | "DropViews" | "ChangeViewComment"
-        | "CreateMacros" | "DropMacros" => "object",
-        "CommitDataMutation" => "data_mutation",
-        "GetSnapshot"
-        | "GetSnapshotAt"
-        | "GetSnapshotAtTimestamp"
-        | "ListSnapshots"
-        | "GetCatalogForSnapshot"
-        | "ListGlobalStatsForSnapshot"
-        | "ListSnapshotStatsAndChangesInputs"
-        | "ListDeleteFiles"
-        | "ListDataFilesAt"
-        | "ListCurrentDataFilesForPartitionScan"
-        | "ListDataFilesForPartitionScanAt" => "read",
-        "ReadInlineRows"
-        | "ReadInlineRowsForGlobalStats"
-        | "ReadInlineRowsForAggregateStats"
-        | "ReadInlineRowsForGlobalStatsBatch"
-        | "RegisterInlineRows"
-        | "DeleteInlineRows"
-        | "InlineFileDeletionsExist"
-        | "ListInlineRowInsertions"
-        | "ListInlineRowDeletions" => "inline",
-        "ListDataFileChanges" | "ListTableDeletions" => "change_feed",
-        "ListOldFilesForCleanup" | "ListKnownFilesForCleanup" | "RemoveCleanupFiles" => "cleanup",
-        "ExpireSnapshots" => "snapshot_maintenance",
-        "MergeAdjacentFiles" | "RewriteDeleteFiles" => "compaction",
-        _ => "unknown",
-    }
+    crate::runtime_operations::runtime_operation_policy(operation).family
 }

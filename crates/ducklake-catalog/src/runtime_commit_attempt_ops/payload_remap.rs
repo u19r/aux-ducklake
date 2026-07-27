@@ -30,6 +30,15 @@ pub(super) fn payload_with_commit_header(
         commit_snapshot_u64(intent.proposed_commit_snapshot)?
     )
     .map_err(|error| CatalogError::Backend(format!("failed to render commit header: {error}")))?;
+    if operation == "CommitDataMutation"
+        && let Some(recovery_attempt_id) = intent.recovery_attempt_id
+    {
+        writeln!(&mut out, "recovery_attempt\t{:032x}", recovery_attempt_id.0).map_err(
+            |error| {
+                CatalogError::Backend(format!("failed to render recovery attempt header: {error}"))
+            },
+        )?;
+    }
     if include_commit_metadata {
         push_commit_metadata_rows(&mut out, &intent.commit_metadata)?;
     }

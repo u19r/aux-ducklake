@@ -19,6 +19,24 @@ fn inline_row_limit_stays_under_foundationdb_item_limit() {
 }
 
 #[test]
+fn current_inline_index_rejects_payloads_without_row_identity() {
+    let error = match prepare_inline_payload(
+        CatalogId(1),
+        incomplete_order(),
+        InlineTablePayload {
+            table_id: TableId(2),
+            schema_id: SchemaId(3),
+            payload: b"not-a-row".to_vec(),
+        },
+    ) {
+        Ok(_) => panic!("invalid inline row unexpectedly prepared"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("invalid shape"), "{error}");
+}
+
+#[test]
 fn row_change_heavy_inline_payloads_are_rejected_before_commit() {
     let catalog = CatalogId(9);
     let snapshot = SnapshotRow::new(incomplete_order(), crate::RawSnapshotSequence(1));
@@ -30,7 +48,7 @@ fn row_change_heavy_inline_payloads_are_rejected_before_commit() {
         1,
         vec![b'x'; INLINE_PAYLOAD_LIMIT_BYTES],
     );
-    let row_changes = (0..25_000)
+    let row_changes = (0..100_000)
         .map(|index| {
             let key = table_inline_row_change_key(
                 catalog,
@@ -43,12 +61,23 @@ fn row_change_heavy_inline_payloads_are_rejected_before_commit() {
             VersionstampedInlineChangeKey {
                 order_offset: table_inline_row_change_prefix(catalog, row.table_id).len(),
                 key,
+                row_id: Some(index),
             }
         })
         .collect::<Vec<_>>();
 
-    let estimated_bytes =
-        estimate_inline_payload_bytes(catalog, &snapshot, None, &[row], &row_changes);
+    let estimated_bytes = estimate_inline_payload_bytes(
+        catalog,
+        &snapshot,
+        &[],
+        &[PreparedInlinePayload {
+            table_id: row.table_id,
+            schema_id: row.schema_id,
+            rows: vec![row],
+            row_changes,
+            current_rows: BTreeMap::new(),
+        }],
+    );
 
     assert!(estimated_bytes > FdbOrderedCatalogKv::MAX_COMMIT_BYTES);
 }
@@ -76,7 +105,7 @@ fn row_change_heavy_inline_deletes_are_rejected_before_commit() {
     let snapshot = SnapshotRow::new(incomplete_order(), crate::RawSnapshotSequence(1));
     let table_id = TableId(33);
     let schema_id = SchemaId(44);
-    let deleted_rows = (0..25_000).collect::<Vec<_>>();
+    let deleted_rows = (0..100_000).collect::<Vec<_>>();
 
     let estimated_bytes =
         estimate_inline_delete_bytes(catalog, &snapshot, table_id, schema_id, &deleted_rows);

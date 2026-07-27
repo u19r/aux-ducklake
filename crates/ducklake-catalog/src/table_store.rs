@@ -1,4 +1,6 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+#[cfg(all(not(test), feature = "runtime-metrics"))]
+use std::panic::Location;
 #[cfg(not(test))]
 use std::sync::OnceLock;
 
@@ -6,6 +8,8 @@ use std::sync::OnceLock;
 use crate::CatalogCacheNamespace;
 #[cfg(not(test))]
 use crate::bounded_cache::{BoundedCache, static_bounded_cache};
+#[cfg(feature = "runtime-metrics")]
+use crate::runtime_metrics::record_runtime_method_elapsed;
 use crate::{
     CatalogError, CatalogId, CatalogResult, KvBatch, MutableCatalogKv, OrderedCatalogKv,
     RangeDirection, SnapshotRow, TableColumnRow, TableId, TableRow, TableVersionReplacement,
@@ -22,18 +26,40 @@ use crate::{
 };
 
 #[cfg(not(test))]
-static TABLE_ROWS_CACHE: OnceLock<
-    BoundedCache<(CatalogCacheNamespace, CatalogId, CatalogOrderId), Vec<TableRow>>,
-> = OnceLock::new();
+type TableRowsCache<Key> = OnceLock<BoundedCache<Key, Vec<TableRow>>>;
 
 #[cfg(not(test))]
-static CURRENT_TABLE_ROWS_CACHE: OnceLock<
-    BoundedCache<(CatalogCacheNamespace, CatalogId), Vec<TableRow>>,
-> = OnceLock::new();
+static TABLE_ROWS_CACHE: TableRowsCache<(CatalogCacheNamespace, CatalogId, CatalogOrderId)> =
+    OnceLock::new();
+
+#[cfg(not(test))]
+static TABLE_ID_ROWS_CACHE: TableRowsCache<(
+    CatalogCacheNamespace,
+    CatalogId,
+    TableId,
+    CatalogOrderId,
+)> = OnceLock::new();
+
+#[cfg(not(test))]
+static VISIBLE_TABLE_ROWS_CACHE: TableRowsCache<(
+    CatalogCacheNamespace,
+    CatalogId,
+    CatalogOrderId,
+)> = OnceLock::new();
+
+#[cfg(not(test))]
+static CURRENT_TABLE_ROWS_CACHE: TableRowsCache<(CatalogCacheNamespace, CatalogId)> =
+    OnceLock::new();
 
 #[cfg(not(test))]
 pub(crate) fn invalidate_runtime_table_read_context(catalog: CatalogId) {
     if let Some(cache) = TABLE_ROWS_CACHE.get() {
+        cache.retain(|(_, cached_catalog, _), _| *cached_catalog != catalog);
+    }
+    if let Some(cache) = TABLE_ID_ROWS_CACHE.get() {
+        cache.retain(|(_, cached_catalog, _, _), _| *cached_catalog != catalog);
+    }
+    if let Some(cache) = VISIBLE_TABLE_ROWS_CACHE.get() {
         cache.retain(|(_, cached_catalog, _), _| *cached_catalog != catalog);
     }
     if let Some(cache) = CURRENT_TABLE_ROWS_CACHE.get() {
@@ -110,7 +136,7 @@ pub fn commit_create_table_row(
     table.validity = crate::ValidityWindow::new(order, None);
     let mut batch = KvBatch::new();
     stage_snapshot(&mut batch, catalog, &snapshot);
-    stage_next_schema_version(kv, &mut batch, catalog)?;
+    stage_next_schema_version(kv, &mut batch, catalog, &snapshot)?;
     batch.put(
         table_object_key(catalog, table.table_id, order),
         table.encode(),
@@ -244,19 +270,43 @@ pub fn commit_rename_tables_with_conflict_check(
     commit_rename_tables(kv, catalog, renames)
 }
 
+#[track_caller]
 pub fn load_table_at(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
     table_id: TableId,
     snapshot_order: CatalogOrderId,
 ) -> CatalogResult<Option<TableRow>> {
+    load_table_at_callsite(
+        kv,
+        catalog,
+        table_id,
+        snapshot_order,
+        std::panic::Location::caller(),
+    )
+}
+
+fn load_table_at_callsite(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    table_id: TableId,
+    snapshot_order: CatalogOrderId,
+    _caller: &'static std::panic::Location<'static>,
+) -> CatalogResult<Option<TableRow>> {
+    #[cfg(feature = "runtime-metrics")]
+    let started = std::time::Instant::now();
     let prefix = table_object_prefix(catalog, table_id);
     let end = prefix_end(&table_object_key(catalog, table_id, snapshot_order));
-    let Some(item) = kv
+    let item = kv
         .scan_range(&prefix, &end, RangeDirection::Reverse, 1)?
         .into_iter()
-        .next()
-    else {
+        .next();
+    #[cfg(feature = "runtime-metrics")]
+    record_runtime_method_elapsed(
+        &format!("load_table_at:{}:{}", _caller.file(), _caller.line()),
+        u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+    );
+    let Some(item) = item else {
         return Ok(None);
     };
     let row = decode_table_item(catalog, &item.key, &item.value)?;
@@ -286,12 +336,36 @@ pub(crate) fn load_current_table_row(
         .transpose()
 }
 
+pub(crate) fn load_current_table_rows(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    table_ids: &BTreeSet<TableId>,
+) -> CatalogResult<Vec<TableRow>> {
+    let keys = table_ids
+        .iter()
+        .map(|table_id| current_table_row_key(catalog, *table_id))
+        .collect::<Vec<_>>();
+    let mut rows = Vec::with_capacity(table_ids.len());
+    for (table_id, value) in table_ids.iter().zip(kv.batch_get(&keys)?) {
+        let Some(value) = value else {
+            continue;
+        };
+        let row = TableRow::decode(&value)?;
+        if row.table_id != *table_id {
+            return Err(CatalogError::Decode(format!(
+                "current table key {} decoded as table {}",
+                table_id.0, row.table_id.0
+            )));
+        }
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
 fn reject_duplicate_renames(renames: &[TableRename]) -> CatalogResult<()> {
-    for (index, rename) in renames.iter().enumerate() {
-        if renames[..index]
-            .iter()
-            .any(|previous| previous.table_id == rename.table_id)
-        {
+    let mut unique = BTreeSet::new();
+    for rename in renames {
+        if !unique.insert(rename.table_id) {
             return Err(CatalogError::InvalidMutation(format!(
                 "table {} is listed more than once for rename",
                 rename.table_id.0
@@ -330,21 +404,24 @@ fn reject_table_name_conflict(
 }
 
 fn reject_duplicate_columns(table: &TableRow, columns: &[TableColumnRow]) -> CatalogResult<()> {
+    let mut column_ids = table
+        .columns
+        .iter()
+        .map(|column| column.column_id)
+        .collect::<BTreeSet<_>>();
+    let mut column_names = table
+        .columns
+        .iter()
+        .map(|column| (column.parent_id, column.name.to_ascii_lowercase()))
+        .collect::<BTreeSet<_>>();
     for column in columns {
-        if table
-            .columns
-            .iter()
-            .any(|existing| existing.column_id == column.column_id)
-        {
+        if !column_ids.insert(column.column_id) {
             return Err(CatalogError::InvalidMutation(format!(
                 "column id {} already exists on table {}",
                 column.column_id.0, table.table_id.0
             )));
         }
-        if table.columns.iter().any(|existing| {
-            existing.parent_id == column.parent_id
-                && existing.name.eq_ignore_ascii_case(&column.name)
-        }) {
+        if !column_names.insert((column.parent_id, column.name.to_ascii_lowercase())) {
             return Err(CatalogError::InvalidMutation(format!(
                 "column {} already exists on table {}",
                 column.name, table.table_id.0
@@ -359,7 +436,22 @@ pub fn list_tables_at(
     catalog: CatalogId,
     snapshot_order: CatalogOrderId,
 ) -> CatalogResult<Vec<TableRow>> {
-    list_tables_at_with_latest(kv, catalog, snapshot_order, latest_snapshot(kv, catalog)?)
+    #[cfg(not(test))]
+    {
+        let key = (kv.catalog_cache_namespace(), catalog, snapshot_order);
+        let cache = static_bounded_cache(&VISIBLE_TABLE_ROWS_CACHE, 1024);
+        if let Some(rows) = cache.get(key) {
+            return Ok(rows);
+        }
+        let rows =
+            list_tables_at_with_latest(kv, catalog, snapshot_order, latest_snapshot(kv, catalog)?)?;
+        cache.insert(key, rows.clone());
+        Ok(rows)
+    }
+    #[cfg(test)]
+    {
+        list_tables_at_with_latest(kv, catalog, snapshot_order, latest_snapshot(kv, catalog)?)
+    }
 }
 
 pub(crate) fn list_tables_at_with_latest(
@@ -455,6 +547,7 @@ fn list_current_table_rows_uncached(
     Ok(rows)
 }
 
+#[track_caller]
 pub(crate) fn list_table_rows(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
@@ -473,12 +566,83 @@ pub(crate) fn list_table_rows(
         if let Some(rows) = cache.get(key) {
             return Ok(rows);
         }
-        let rows = list_table_rows_uncached(kv, catalog)?;
+        let rows =
+            list_table_rows_uncached_at_callsite(kv, catalog, std::panic::Location::caller())?;
         cache.insert(key, rows.clone());
         Ok(rows)
     }
 }
 
+pub(crate) fn list_table_rows_for_table(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    table_id: TableId,
+) -> CatalogResult<Vec<TableRow>> {
+    #[cfg(not(test))]
+    {
+        let Some(latest) = latest_snapshot(kv, catalog)? else {
+            return list_table_rows_for_table_uncached(kv, catalog, table_id);
+        };
+        let key = (
+            kv.catalog_cache_namespace(),
+            catalog,
+            table_id,
+            latest.order,
+        );
+        let cache = static_bounded_cache(&TABLE_ID_ROWS_CACHE, 1024);
+        if let Some(rows) = cache.get(key) {
+            return Ok(rows);
+        }
+        let rows = list_table_rows_for_table_uncached(kv, catalog, table_id)?;
+        cache.insert(key, rows.clone());
+        Ok(rows)
+    }
+    #[cfg(test)]
+    {
+        list_table_rows_for_table_uncached(kv, catalog, table_id)
+    }
+}
+
+fn list_table_rows_for_table_uncached(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    table_id: TableId,
+) -> CatalogResult<Vec<TableRow>> {
+    kv.scan_prefix(
+        &table_object_prefix(catalog, table_id),
+        RangeDirection::Forward,
+        usize::MAX,
+    )?
+    .into_iter()
+    .map(|item| decode_table_item(catalog, &item.key, &item.value))
+    .collect()
+}
+
+#[cfg(all(not(test), feature = "runtime-metrics"))]
+fn list_table_rows_uncached_at_callsite(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    caller: &'static Location<'static>,
+) -> CatalogResult<Vec<TableRow>> {
+    let started = std::time::Instant::now();
+    let result = list_table_rows_uncached(kv, catalog);
+    record_runtime_method_elapsed(
+        &format!("list_table_rows:{}:{}", caller.file(), caller.line()),
+        u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+    );
+    result
+}
+
+#[cfg(all(not(test), not(feature = "runtime-metrics")))]
+fn list_table_rows_uncached_at_callsite(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    _caller: &'static std::panic::Location<'static>,
+) -> CatalogResult<Vec<TableRow>> {
+    list_table_rows_uncached(kv, catalog)
+}
+
+#[track_caller]
 pub(crate) fn list_table_rows_with_snapshot_cache(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
@@ -496,7 +660,8 @@ pub(crate) fn list_table_rows_with_snapshot_cache(
         if let Some(rows) = cache.get(key) {
             return Ok(rows);
         }
-        let rows = list_table_rows_uncached(kv, catalog)?;
+        let rows =
+            list_table_rows_uncached_at_callsite(kv, catalog, std::panic::Location::caller())?;
         cache.insert(key, rows.clone());
         Ok(rows)
     }

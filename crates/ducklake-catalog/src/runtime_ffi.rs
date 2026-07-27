@@ -1,9 +1,9 @@
-use crate::runtime_metrics::RuntimeMetricStatus;
 #[cfg(feature = "runtime-metrics")]
 use crate::runtime_metrics::record_runtime_request_elapsed;
+use crate::runtime_metrics::{RuntimeMetricStage, RuntimeMetricStatus};
 use crate::{
     CatalogResult,
-    runtime_operations::payload_for_request,
+    runtime_operations::{payload_for_request, runtime_operation_policy},
     runtime_protocol::{
         RuntimeCatalogBackend, RuntimeRequest, RuntimeResponse, RuntimeResponseStatus,
         paged_runtime_response,
@@ -21,33 +21,6 @@ pub struct DuckLakeRuntimeBuffer {
 const FFI_OK: i32 = 0;
 const FFI_INVALID_ARGUMENT: i32 = 1;
 const FFI_RUNTIME_ERROR: i32 = 2;
-
-#[cfg(feature = "runtime-metrics")]
-#[derive(Clone, Copy)]
-struct RuntimeMetricStage(std::time::Instant);
-
-#[cfg(not(feature = "runtime-metrics"))]
-#[derive(Clone, Copy)]
-struct RuntimeMetricStage;
-
-impl RuntimeMetricStage {
-    #[inline]
-    fn start() -> Self {
-        #[cfg(feature = "runtime-metrics")]
-        {
-            Self(std::time::Instant::now())
-        }
-        #[cfg(not(feature = "runtime-metrics"))]
-        {
-            Self
-        }
-    }
-
-    #[cfg(feature = "runtime-metrics")]
-    fn elapsed_micros(self) -> u64 {
-        u64::try_from(self.0.elapsed().as_micros()).unwrap_or(u64::MAX)
-    }
-}
 
 #[cfg(feature = "runtime-metrics")]
 fn record_runtime_request_stage(
@@ -195,24 +168,22 @@ fn runtime_probe_response(bytes: &[u8]) -> RuntimeProbeResult {
 }
 
 fn runtime_response_from_request(request: RuntimeRequest) -> CatalogResult<RuntimeResponse> {
+    let mut read_request = crate::store::begin_runtime_read_request(request.read_context_id);
+    if read_request.is_new_context() {
+        crate::store::invalidate_runtime_read_context(request.catalog_id);
+    }
     let started = RuntimeMetricStage::start();
-    let mutates_catalog = runtime_operation_mutates_catalog(&request.operation);
+    let mutates_catalog = runtime_operation_policy(&request.operation).mutates_catalog;
     if mutates_catalog && request.page_offset != 0 {
         return Err(crate::CatalogError::Decode(
             "mutating runtime operations cannot be paginated".to_owned(),
         ));
     }
+    if mutates_catalog {
+        read_request.invalidate_catalog_on_drop(request.catalog_id);
+    }
     let payload = match payload_for_request(&request) {
         Ok(payload) => {
-            if mutates_catalog {
-                crate::store::invalidate_runtime_read_context(request.catalog_id);
-            }
-            if runtime_operation_mutates_inline_file_deletions(&request.operation, &request.payload)
-            {
-                crate::runtime_read_context::invalidate_inline_deletion_read_context(
-                    request.catalog_id,
-                );
-            }
             record_runtime_request_stage(
                 request.backend,
                 &request.operation,
@@ -233,9 +204,6 @@ fn runtime_response_from_request(request: RuntimeRequest) -> CatalogResult<Runti
     };
     let request_id = request.request_id;
     if mutates_catalog {
-        crate::store::invalidate_runtime_read_context(request.catalog_id);
-    }
-    if mutates_catalog {
         RuntimeResponse::ok(request_id, payload)
     } else {
         paged_runtime_response(
@@ -244,54 +212,6 @@ fn runtime_response_from_request(request: RuntimeRequest) -> CatalogResult<Runti
             request.page_offset,
             request.page_etag.as_deref(),
         )
-    }
-}
-
-fn runtime_operation_mutates_catalog(operation: &str) -> bool {
-    matches!(
-        operation,
-        "InitializeDuckLake"
-            | "CommitMetadataBatch"
-            | "SetConfigOption"
-            | "CommitColumnMappings"
-            | "CreateSchemas"
-            | "DropSchemas"
-            | "CreateTables"
-            | "ReplaceTables"
-            | "DropTables"
-            | "CreateViews"
-            | "RenameViews"
-            | "DropViews"
-            | "ChangeViewComment"
-            | "CreateMacros"
-            | "DropMacros"
-            | "AddColumns"
-            | "RenameColumns"
-            | "ChangeColumnTypes"
-            | "ChangeColumnDefaults"
-            | "ChangeComments"
-            | "ChangePartitionKeys"
-            | "ChangeSortKeys"
-            | "DropColumns"
-            | "RenameTables"
-            | "CommitDataMutation"
-            | "CommitAttempt"
-            | "MergeAdjacentFiles"
-            | "RewriteDeleteFiles"
-            | "RegisterInlineTables"
-            | "RegisterInlineRows"
-            | "DeleteInlineRows"
-            | "RemoveCleanupFiles"
-            | "ExpireSnapshots"
-    )
-}
-
-fn runtime_operation_mutates_inline_file_deletions(operation: &str, payload: &[u8]) -> bool {
-    match operation {
-        "CommitDataMutation" | "CommitAttempt" => payload
-            .windows(b"inline_file_delete".len())
-            .any(|window| window == b"inline_file_delete"),
-        _ => false,
     }
 }
 

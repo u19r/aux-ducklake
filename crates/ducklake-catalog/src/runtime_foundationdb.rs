@@ -1,3 +1,38 @@
+#[cfg(feature = "foundationdb")]
+use std::collections::{BTreeMap, BTreeSet};
+
+#[cfg(feature = "runtime-metrics")]
+#[derive(Clone, Copy)]
+struct DataMutationMetricStage(std::time::Instant);
+
+#[cfg(not(feature = "runtime-metrics"))]
+#[derive(Clone, Copy)]
+struct DataMutationMetricStage;
+
+impl DataMutationMetricStage {
+    fn start() -> Self {
+        #[cfg(feature = "runtime-metrics")]
+        {
+            Self(std::time::Instant::now())
+        }
+        #[cfg(not(feature = "runtime-metrics"))]
+        {
+            Self
+        }
+    }
+}
+
+#[cfg(feature = "runtime-metrics")]
+fn record_data_mutation_stage(stage: &str, started: DataMutationMetricStage) {
+    crate::runtime_metrics::record_runtime_method_elapsed(
+        &format!("method.runtime_foundationdb_data_mutation.{stage}"),
+        u64::try_from(started.0.elapsed().as_micros()).unwrap_or(u64::MAX),
+    );
+}
+
+#[cfg(not(feature = "runtime-metrics"))]
+fn record_data_mutation_stage(_stage: &str, _started: DataMutationMetricStage) {}
+
 use crate::{
     CatalogId, CatalogResult, RawSnapshotSequence, SchemaRow, SnapshotTimestampBound, TableId,
     TableRow,
@@ -15,13 +50,10 @@ use crate::{
 
 #[cfg(feature = "foundationdb")]
 use crate::{
-    DataFileId, DataFileRow, DeleteFileId, DeleteFileRow, DuckLakeSnapshotId, FdbOrderedCatalogKv,
+    DataFileId, DataFileRow, DeleteFileRow, DuckLakeSnapshotId, FdbOrderedCatalogKv,
     FilePartitionValueRow,
     fdb_tables::{current_table_name_value_id, table_metadata_recovery_attempt_id},
-    keys::{
-        current_data_file_key, current_delete_file_key, current_table_name_key, data_file_key,
-        delete_file_key,
-    },
+    keys::{current_table_name_key, data_file_key},
     kv::OrderedCatalogKv,
     latest_snapshot, list_schemas_at, list_tables_at, load_commit_attempt,
     runtime_catalog_snapshot::{
@@ -42,7 +74,7 @@ use crate::{
     },
     snapshot_by_timestamp,
     store::latest_snapshot_uncached,
-    table_store::load_current_table_row,
+    table_store::{load_current_table_row, load_current_table_rows},
 };
 
 #[cfg(feature = "foundationdb")]
@@ -56,7 +88,12 @@ pub(crate) fn runtime_get_foundationdb_conflict_snapshot(
     catalog: CatalogId,
 ) -> CatalogResult<Vec<u8>> {
     let kv = open_foundationdb_catalog()?;
-    let Some(latest) = latest_snapshot_uncached(&kv, catalog).row? else {
+    let latest = if crate::store::runtime_read_context_enabled() {
+        latest_snapshot(&kv, catalog)?
+    } else {
+        latest_snapshot_uncached(&kv, catalog).row?
+    };
+    let Some(latest) = latest else {
         return conflict_snapshot_payload(&kv, catalog);
     };
     conflict_snapshot_payload_for_row(&kv, catalog, latest)
@@ -462,14 +499,17 @@ pub(crate) fn runtime_foundationdb_commit_data_mutation(
         catalog,
         &mut mutation,
     )?;
-    reject_stale_data_mutation(&kv, catalog, &mutation)?;
+    let validated = reject_stale_data_mutation(&kv, catalog, &mutation)?;
     let affected_table_ids = crate::runtime_data_mutation_ops::affected_table_ids(&mutation)?;
     let materialized_delete_files = mutation.materialized_delete_files();
     let commit = kv.commit_data_mutation_versionstamped_with_inline_file_deletions_and_stats(
         catalog,
-        mutation
-            .proposed_commit_snapshot
-            .map(crate::runtime_snapshot_range::ProposedCommitSnapshot::commit_attempt_id),
+        crate::fdb_data_mutations::FdbMutationAttempt {
+            proposed_snapshot: mutation
+                .proposed_commit_snapshot
+                .map(crate::runtime_snapshot_range::ProposedCommitSnapshot::commit_attempt_id),
+            recovery: mutation.recovery_attempt_id,
+        },
         mutation.commit_metadata,
         crate::FdbDataMutation {
             data_files: mutation.data_files,
@@ -480,7 +520,76 @@ pub(crate) fn runtime_foundationdb_commit_data_mutation(
             file_column_stats: mutation.file_column_stats,
             dropped_data_file_ids: mutation.dropped_data_file_ids,
         },
+        validated,
     )?;
+    Ok((commit, affected_table_ids))
+}
+
+#[cfg(feature = "foundationdb")]
+pub(crate) fn runtime_foundationdb_commit_data_and_inline_mutation(
+    catalog: CatalogId,
+    mut mutation: RuntimeDataMutation,
+    inline_rows: Vec<crate::runtime_inline_ops::RuntimeInlineRows>,
+    inline_deletes: Vec<crate::runtime_inline_ops::RuntimeInlineDelete>,
+    commit_snapshot: Option<DuckLakeSnapshotId>,
+) -> CatalogResult<(crate::DataMutationCommit, Vec<crate::TableId>)> {
+    let started = DataMutationMetricStage::start();
+    let kv = open_foundationdb_catalog()?;
+    record_data_mutation_stage("Open", started);
+    let started = DataMutationMetricStage::start();
+    crate::runtime_data_mutation_ops::resolve_data_file_visibility(&kv, catalog, &mut mutation)?;
+    record_data_mutation_stage("ResolveVisibility", started);
+    let started = DataMutationMetricStage::start();
+    crate::runtime_data_mutation_ops::complete_inline_flushes_from_materialized_files(
+        &kv,
+        catalog,
+        &mut mutation,
+    )?;
+    record_data_mutation_stage("CompleteInlineFlushes", started);
+    let started = DataMutationMetricStage::start();
+    let validated = reject_stale_data_mutation(&kv, catalog, &mutation)?;
+    record_data_mutation_stage("RejectStale", started);
+    let started = DataMutationMetricStage::start();
+    let affected_table_ids = crate::runtime_data_mutation_ops::affected_table_ids(&mutation)?;
+    record_data_mutation_stage("AffectedTables", started);
+    let started = DataMutationMetricStage::start();
+    let (inline_tables, inline_payloads, inline_deletes) =
+        crate::runtime_foundationdb_inline::prepare_foundationdb_inline_mutations(
+            &kv,
+            catalog,
+            inline_rows,
+            inline_deletes,
+            commit_snapshot,
+        )?;
+    record_data_mutation_stage("PrepareInline", started);
+    let materialized_delete_files = mutation.materialized_delete_files();
+    let started = DataMutationMetricStage::start();
+    let commit = kv.commit_data_and_inline_mutation_versionstamped(
+        catalog,
+        crate::fdb_data_mutations::FdbMutationAttempt {
+            proposed_snapshot: mutation
+                .proposed_commit_snapshot
+                .map(crate::runtime_snapshot_range::ProposedCommitSnapshot::commit_attempt_id),
+            recovery: mutation.recovery_attempt_id,
+        },
+        mutation.commit_metadata,
+        crate::FdbDataMutation {
+            data_files: mutation.data_files,
+            delete_files: materialized_delete_files,
+            inline_flushes: mutation.inline_flushes,
+            partition_values: mutation.partition_values,
+            inline_file_deletions: mutation.inline_file_deletions,
+            file_column_stats: mutation.file_column_stats,
+            dropped_data_file_ids: mutation.dropped_data_file_ids,
+        },
+        crate::fdb_data_mutations::FdbInlineMutation {
+            tables: inline_tables,
+            payloads: inline_payloads,
+            deletes: inline_deletes,
+        },
+        validated,
+    )?;
+    record_data_mutation_stage("Commit", started);
     Ok((commit, affected_table_ids))
 }
 
@@ -489,7 +598,8 @@ fn reject_stale_data_mutation(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
     mutation: &RuntimeDataMutation,
-) -> CatalogResult<()> {
+) -> CatalogResult<crate::fdb_data_mutations::FdbMutationReadContext> {
+    let started = DataMutationMetricStage::start();
     let read_snapshot = if let Some(read_snapshot) = mutation.read_snapshot {
         snapshot_by_public_sequence(kv, catalog, read_snapshot)?
     } else if let Some(flush_snapshot) = mutation
@@ -503,15 +613,18 @@ fn reject_stale_data_mutation(
         None
     };
     let Some(read_snapshot) = read_snapshot else {
-        return Ok(());
+        return Ok(crate::fdb_data_mutations::FdbMutationReadContext::default());
     };
+    record_data_mutation_stage("RejectStaleResolveSnapshot", started);
+    let started = DataMutationMetricStage::start();
     let latest = latest_snapshot(kv, catalog)?;
+    record_data_mutation_stage("RejectStaleLatest", started);
     let proposed_sequence = mutation
         .proposed_commit_snapshot
         .and_then(|snapshot| u64::try_from(snapshot.commit_attempt_id().0).ok())
         .map(crate::RawSnapshotSequence);
     if !mutation.inline_flushes.is_empty()
-        && latest.is_some_and(|latest| {
+        && latest.as_ref().is_some_and(|latest| {
             latest.order > read_snapshot.order && Some(latest.sequence) != proposed_sequence
         })
     {
@@ -519,66 +632,55 @@ fn reject_stale_data_mutation(
             "conflict flushing inline data: catalog changed after read snapshot".to_owned(),
         ));
     }
-    reject_append_files_incompatible_with_current_tables(
-        kv,
-        catalog,
-        read_snapshot.order,
+    let started = DataMutationMetricStage::start();
+    let append_partitions = append_partition_expectations(
         &mutation.data_files,
         &mutation.partition_values,
         &mutation.file_partition_sets,
-    )?;
-    reject_delete_targets_changed_after_read(
+    );
+    record_data_mutation_stage("RejectStaleAppend", started);
+    let started = DataMutationMetricStage::start();
+    let preloaded_data_files = reject_delete_targets_changed_after_read(
         kv,
         catalog,
         read_snapshot.order,
+        latest.as_ref().map(|snapshot| snapshot.order),
         &mutation.data_files,
         &mutation.materialized_delete_files(),
         &mutation.dropped_data_file_ids,
-    )
+    )?;
+    record_data_mutation_stage("RejectStaleDeletes", started);
+    Ok(crate::fdb_data_mutations::FdbMutationReadContext {
+        order: Some(read_snapshot.order),
+        data_files: preloaded_data_files,
+        append_partitions,
+    })
 }
 
 #[cfg(feature = "foundationdb")]
-fn reject_append_files_incompatible_with_current_tables(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    read_order: crate::CatalogOrderId,
+fn append_partition_expectations(
     data_files: &[DataFileRow],
     partition_values: &[FilePartitionValueRow],
     file_partition_sets: &[crate::runtime_data_mutation_ops::RuntimeFilePartitionSet],
-) -> CatalogResult<()> {
-    if data_files.is_empty() {
-        return Ok(());
-    }
-    let Some(latest) = latest_snapshot(kv, catalog)? else {
-        return Ok(());
-    };
-    let current_tables = list_tables_at(kv, catalog, latest.order)?;
-    for data_file in data_files {
-        let table_id = data_file.table_id;
-        let Some(current_table) = current_tables
-            .iter()
-            .find(|table| table.table_id == table_id)
-        else {
-            return Err(crate::CatalogError::InvalidMutation(format!(
-                "conflict committing data mutation: table {} was dropped after read snapshot",
-                table_id.0
-            )));
-        };
-        if !append_partition_metadata_matches_table(
-            data_file.data_file_id,
-            table_id,
-            current_table,
-            partition_values,
-            file_partition_sets,
-        ) {
-            return Err(crate::CatalogError::InvalidMutation(format!(
-                "conflict committing data mutation: table {} partition metadata is stale",
-                table_id.0
-            )));
-        }
-        let _ = read_order;
-    }
-    Ok(())
+) -> Vec<crate::fdb_data_mutations::FdbAppendPartitionExpectation> {
+    data_files
+        .iter()
+        .map(|data_file| {
+            let partition_set = file_partition_sets
+                .iter()
+                .find(|set| set.data_file_id == data_file.data_file_id);
+            crate::fdb_data_mutations::FdbAppendPartitionExpectation {
+                data_file_id: data_file.data_file_id,
+                table_id: data_file.table_id,
+                partition_table_id: partition_set.map(|set| set.table_id),
+                partition_id: partition_set.map(|set| set.partition_id),
+                value_count: partition_values
+                    .iter()
+                    .filter(|value| value.data_file_id == data_file.data_file_id)
+                    .count(),
+            }
+        })
+        .collect()
 }
 
 #[cfg(feature = "foundationdb")]
@@ -586,174 +688,111 @@ fn reject_delete_targets_changed_after_read(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
     read_order: crate::CatalogOrderId,
+    latest_order: Option<crate::CatalogOrderId>,
     data_files: &[DataFileRow],
     delete_files: &[DeleteFileRow],
     dropped_data_file_ids: &[DataFileId],
-) -> CatalogResult<()> {
-    for row in delete_files {
-        if data_files
-            .iter()
-            .any(|data_file| data_file.data_file_id == row.data_file_id)
+) -> CatalogResult<Vec<DataFileRow>> {
+    let appended_data_file_ids = data_files
+        .iter()
+        .map(|row| row.data_file_id)
+        .collect::<BTreeSet<_>>();
+    let target_ids = delete_files
+        .iter()
+        .map(|row| row.data_file_id)
+        .chain(dropped_data_file_ids.iter().copied())
+        .filter(|data_file_id| !appended_data_file_ids.contains(data_file_id))
+        .collect::<BTreeSet<_>>();
+    let target_files = load_data_files_for_conflict_check(kv, catalog, &target_ids)?;
+    if target_files.is_empty() {
+        return Ok(target_files);
+    }
+    if latest_order != Some(read_order) {
+        reject_target_tables_changed_after_read(kv, catalog, read_order, &target_files)?;
+    }
+    for row in target_files
+        .iter()
+        .filter(|row| row.validity.begin_order <= read_order)
+    {
+        if row
+            .validity
+            .end_order
+            .is_some_and(|end_order| end_order > read_order)
         {
+            return Err(crate::CatalogError::InvalidMutation(format!(
+                "conflict committing data mutation: data file {} was dropped after read snapshot",
+                row.data_file_id.0
+            )));
+        }
+    }
+    Ok(target_files)
+}
+
+#[cfg(feature = "foundationdb")]
+fn reject_target_tables_changed_after_read(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    read_order: crate::CatalogOrderId,
+    data_files: &[DataFileRow],
+) -> CatalogResult<()> {
+    let table_ids = data_files
+        .iter()
+        .map(|row| row.table_id)
+        .collect::<BTreeSet<_>>();
+    let current_tables = load_current_table_rows(kv, catalog, &table_ids)?
+        .into_iter()
+        .map(|table| (table.table_id, table))
+        .collect::<BTreeMap<_, _>>();
+    for table_id in table_ids {
+        let Some(read_table) = crate::load_table_at(kv, catalog, table_id, read_order)? else {
             continue;
+        };
+        let Some(current_table) = current_tables.get(&table_id) else {
+            return Err(crate::CatalogError::InvalidMutation(format!(
+                "conflict committing data mutation: table {} was dropped after read snapshot",
+                table_id.0
+            )));
+        };
+        if read_table.columns != current_table.columns
+            || read_table.partition != current_table.partition
+        {
+            return Err(crate::CatalogError::InvalidMutation(format!(
+                "conflict committing data mutation: another transaction has altered it; table {} changed after read snapshot",
+                table_id.0
+            )));
         }
-        reject_data_file_changed_after_read(kv, catalog, read_order, row.data_file_id)?;
-    }
-    for data_file_id in dropped_data_file_ids {
-        reject_data_file_changed_after_read(kv, catalog, read_order, *data_file_id)?;
     }
     Ok(())
 }
 
 #[cfg(feature = "foundationdb")]
-fn reject_data_file_changed_after_read(
+fn load_data_files_for_conflict_check(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
-    read_order: crate::CatalogOrderId,
-    data_file_id: DataFileId,
-) -> CatalogResult<()> {
-    let data_file = load_data_file_for_conflict_check(kv, catalog, data_file_id)?;
-    reject_target_table_changed_after_read(kv, catalog, read_order, data_file.table_id)?;
-    if data_file.validity.begin_order > read_order {
-        return Ok(());
-    }
-    if data_file
-        .validity
-        .end_order
-        .is_some_and(|end_order| end_order > read_order)
-    {
-        return Err(crate::CatalogError::InvalidMutation(format!(
-            "conflict committing data mutation: data file {} was dropped after read snapshot",
-            data_file_id.0
-        )));
-    }
-    if kv
-        .get(&current_data_file_key(
-            catalog,
-            data_file.table_id,
-            data_file.data_file_id,
-        ))?
-        .is_none()
-    {
-        return Err(crate::CatalogError::InvalidMutation(format!(
-            "conflict committing data mutation: data file {} is no longer current",
-            data_file_id.0
-        )));
-    }
-    let Some(current_delete_file_id) = current_delete_file_id(kv, catalog, data_file_id)? else {
-        return Ok(());
-    };
-    let current_delete_file =
-        load_delete_file_for_conflict_check(kv, catalog, current_delete_file_id)?;
-    if current_delete_file.validity.begin_order > read_order {
-        return Err(crate::CatalogError::InvalidMutation(format!(
-            "conflict committing data mutation: data file {} was deleted from after read snapshot",
-            data_file_id.0
-        )));
-    }
-    Ok(())
-}
-
-#[cfg(feature = "foundationdb")]
-fn reject_target_table_changed_after_read(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    read_order: crate::CatalogOrderId,
-    table_id: crate::TableId,
-) -> CatalogResult<()> {
-    let Some(read_table) = crate::load_table_at(kv, catalog, table_id, read_order)? else {
-        return Ok(());
-    };
-    let Some(current_table) = load_current_table_row(kv, catalog, table_id)? else {
-        return Err(crate::CatalogError::InvalidMutation(format!(
-            "conflict committing data mutation: table {} was dropped after read snapshot",
-            table_id.0
-        )));
-    };
-    if read_table.columns != current_table.columns
-        || read_table.partition != current_table.partition
-    {
-        return Err(crate::CatalogError::InvalidMutation(format!(
-            "conflict committing data mutation: another transaction has altered it; table {} changed after read snapshot",
-            table_id.0
-        )));
-    }
-    Ok(())
-}
-
-#[cfg(feature = "foundationdb")]
-fn append_partition_metadata_matches_table(
-    data_file_id: DataFileId,
-    table_id: crate::TableId,
-    table: &TableRow,
-    partition_values: &[FilePartitionValueRow],
-    file_partition_sets: &[crate::runtime_data_mutation_ops::RuntimeFilePartitionSet],
-) -> bool {
-    let value_count = partition_values
+    data_file_ids: &BTreeSet<DataFileId>,
+) -> CatalogResult<Vec<DataFileRow>> {
+    let keys = data_file_ids
         .iter()
-        .filter(|value| value.data_file_id == data_file_id)
-        .count();
-    let partition_set = file_partition_sets
+        .map(|data_file_id| data_file_key(catalog, *data_file_id))
+        .collect::<Vec<_>>();
+    data_file_ids
         .iter()
-        .find(|set| set.data_file_id == data_file_id);
-    match &table.partition {
-        Some(partition) => {
-            value_count == partition.fields.len()
-                && partition_set.is_some_and(|set| {
-                    set.table_id == table_id && set.partition_id == partition.partition_id
-                })
-        }
-        None => value_count == 0 && partition_set.is_none(),
-    }
-}
-
-#[cfg(feature = "foundationdb")]
-fn current_delete_file_id(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    data_file_id: DataFileId,
-) -> CatalogResult<Option<DeleteFileId>> {
-    let Some(value) = kv.get(&current_delete_file_key(catalog, data_file_id))? else {
-        return Ok(None);
-    };
-    if let Ok(row) = DeleteFileRow::decode(&value) {
-        return Ok(Some(row.delete_file_id));
-    }
-    if value.len() != 8 {
-        return Err(crate::CatalogError::Decode(format!(
-            "current delete file pointer must be 8 bytes, got {}",
-            value.len()
-        )));
-    }
-    Ok(Some(DeleteFileId(u64::from_be_bytes(
-        value.try_into().map_err(|_| {
-            crate::CatalogError::Decode("current delete file pointer is truncated".to_owned())
-        })?,
-    ))))
-}
-
-#[cfg(feature = "foundationdb")]
-fn load_data_file_for_conflict_check(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    data_file_id: DataFileId,
-) -> CatalogResult<DataFileRow> {
-    let Some(value) = kv.get(&data_file_key(catalog, data_file_id))? else {
-        return Err(crate::CatalogError::NotFound("data file"));
-    };
-    DataFileRow::decode(&value)
-}
-
-#[cfg(feature = "foundationdb")]
-fn load_delete_file_for_conflict_check(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    delete_file_id: DeleteFileId,
-) -> CatalogResult<DeleteFileRow> {
-    let Some(value) = kv.get(&delete_file_key(catalog, delete_file_id))? else {
-        return Err(crate::CatalogError::NotFound("delete file"));
-    };
-    DeleteFileRow::decode(&value)
+        .copied()
+        .zip(kv.batch_get(&keys)?)
+        .map(|(data_file_id, value)| {
+            let Some(value) = value else {
+                return Err(crate::CatalogError::NotFound("data file"));
+            };
+            let row = DataFileRow::decode(&value)?;
+            if row.data_file_id != data_file_id {
+                return Err(crate::CatalogError::Decode(format!(
+                    "data file key {} decoded as data file {}",
+                    data_file_id.0, row.data_file_id.0
+                )));
+            }
+            Ok(row)
+        })
+        .collect()
 }
 
 #[cfg(feature = "foundationdb")]
@@ -988,6 +1027,17 @@ pub(crate) fn runtime_foundationdb_replace_tables(
 pub(crate) fn runtime_foundationdb_commit_data_mutation(
     _catalog: CatalogId,
     _mutation: RuntimeDataMutation,
+) -> CatalogResult<(crate::DataMutationCommit, Vec<crate::TableId>)> {
+    foundationdb_runtime_data_mutation_error()
+}
+
+#[cfg(not(feature = "foundationdb"))]
+pub(crate) fn runtime_foundationdb_commit_data_and_inline_mutation(
+    _catalog: CatalogId,
+    _mutation: RuntimeDataMutation,
+    _inline_rows: Vec<crate::runtime_inline_ops::RuntimeInlineRows>,
+    _inline_deletes: Vec<crate::runtime_inline_ops::RuntimeInlineDelete>,
+    _commit_snapshot: Option<crate::DuckLakeSnapshotId>,
 ) -> CatalogResult<(crate::DataMutationCommit, Vec<crate::TableId>)> {
     foundationdb_runtime_data_mutation_error()
 }

@@ -3,22 +3,20 @@
 use super::*;
 use crate::{
     CatalogId, CatalogOrderId, ColumnId, DataFileId, DataFileRow, DeleteFileId, DeleteFileRow,
-    FilePartitionValueRow, InlinedTableRow, MacroId, PartitionKeyIndex, SchemaId, TableColumnRow,
-    TableId, TableRow, list_data_files_at, load_macro_at, load_schema_at, load_table_at,
-    load_view_at, register_file_partition_value, runtime_protocol::RuntimeCatalogBackend,
+    FakeOrderedCatalogKv, FilePartitionValueRow, InlinedTableRow, KvBatch, MacroId,
+    PartitionKeyIndex, RawSnapshotSequence, SchemaId, SnapshotRow, TableColumnRow, TableId,
+    TableRow, list_data_files_at, load_macro_at, load_schema_at, load_table_at, load_view_at,
+    register_file_partition_value, runtime_protocol::RuntimeCatalogBackend, store::stage_snapshot,
 };
-use std::sync::Mutex;
 #[cfg(feature = "foundationdb")]
 use std::time::{SystemTime, UNIX_EPOCH};
-
-static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn mutating_runtime_operation_rejects_page_continuation_before_execution() {
     let request = RuntimeRequest::new(
         "ffi-mutation-page",
         RuntimeCatalogBackend::FoundationDb,
-        "CommitMetadataBatch",
+        "CommitAttempt",
         Vec::new(),
     )
     .unwrap()
@@ -28,6 +26,39 @@ fn mutating_runtime_operation_rejects_page_continuation_before_execution() {
     let error = runtime_response_from_request(request).unwrap_err();
 
     assert!(error.to_string().contains("cannot be paginated"));
+}
+
+#[test]
+fn given_cached_read_context_when_mutation_fails_then_retry_reads_latest_snapshot() {
+    let catalog = CatalogId(1);
+    let read_context_id = 9_003;
+    let mut kv = FakeOrderedCatalogKv::new();
+    let initial = SnapshotRow::new(kv.generated_order_id(), RawSnapshotSequence(1));
+    let mut batch = KvBatch::new();
+    stage_snapshot(&mut batch, catalog, &initial);
+    kv.commit(batch).unwrap();
+    {
+        let _request = crate::store::begin_runtime_read_request(Some(read_context_id));
+        assert_eq!(crate::latest_snapshot(&kv, catalog).unwrap(), Some(initial));
+    }
+    let latest = SnapshotRow::new(kv.generated_order_id(), RawSnapshotSequence(2));
+    let mut batch = KvBatch::new();
+    stage_snapshot(&mut batch, catalog, &latest);
+    kv.commit(batch).unwrap();
+    let request = RuntimeRequest::new(
+        "ffi-failed-mutation-read-context",
+        RuntimeCatalogBackend::FoundationDb,
+        "CommitAttempt",
+        b"invalid".to_vec(),
+    )
+    .unwrap()
+    .with_read_context_id(read_context_id)
+    .unwrap();
+
+    assert!(runtime_response_from_request(request).is_err());
+
+    let _retry = crate::store::begin_runtime_read_request(Some(read_context_id));
+    assert_eq!(crate::latest_snapshot(&kv, catalog).unwrap(), Some(latest));
 }
 
 #[test]
@@ -149,7 +180,7 @@ fn ffi_partition_file_scans_read_live_foundationdb_catalog_when_enabled() {
     if live_fdb_disabled() {
         return;
     }
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = crate::FDB_ENV_LOCK.lock().unwrap();
     let prefix = unique_fdb_prefix("runtime-partition-files");
     let table = TableId(47);
     let partition_key = PartitionKeyIndex(0);
@@ -240,7 +271,7 @@ fn ffi_partition_prune_file_scans_read_live_foundationdb_catalog_when_enabled() 
     if live_fdb_disabled() {
         return;
     }
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = crate::FDB_ENV_LOCK.lock().unwrap();
     let prefix = unique_fdb_prefix("runtime-partition-prune-files");
     let table = TableId(48);
     let mut kv = crate::FdbOrderedCatalogKv::open_default_with_prefix(prefix.as_bytes()).unwrap();
@@ -343,7 +374,7 @@ fn ffi_inline_reads_and_change_feeds_read_live_foundationdb_catalog_when_enabled
     if live_fdb_disabled() {
         return;
     }
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = crate::FDB_ENV_LOCK.lock().unwrap();
     let prefix = unique_fdb_prefix("runtime-inline-rows");
     let table_id = TableId(49);
     let schema_id = SchemaId(0);
@@ -417,7 +448,7 @@ fn ffi_inline_reads_and_change_feeds_read_live_foundationdb_catalog_when_enabled
         "ListInlineRowDeletions",
         format!(
             "inlined_table_name={inlined_table_name}\nstart_snapshot_id={}\nend_snapshot_id={}\n",
-            insert_snapshot.sequence, delete_snapshot.sequence
+            delete_snapshot.sequence, delete_snapshot.sequence
         ),
     );
     remove_env("AUX_DUCKLAKE_FDB_PREFIX");
@@ -453,7 +484,7 @@ fn ffi_change_feed_reads_live_foundationdb_catalog_when_enabled() {
     if live_fdb_disabled() {
         return;
     }
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = crate::FDB_ENV_LOCK.lock().unwrap();
     let prefix = unique_fdb_prefix("runtime-change-feed");
     let table = TableId(51);
     let kv = crate::FdbOrderedCatalogKv::open_default_with_prefix(prefix.as_bytes()).unwrap();
@@ -558,7 +589,7 @@ fn ffi_get_catalog_for_snapshot_reads_live_foundationdb_catalog_when_enabled() {
     if live_fdb_disabled() {
         return;
     }
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = crate::FDB_ENV_LOCK.lock().unwrap();
     let prefix = unique_fdb_prefix("runtime-catalog-snapshot");
     let kv = crate::FdbOrderedCatalogKv::open_default_with_prefix(prefix.as_bytes()).unwrap();
     let initialized = kv
@@ -601,7 +632,7 @@ fn ffi_metadata_attach_and_initialization_use_live_foundationdb_catalog_when_ena
     if live_fdb_disabled() {
         return;
     }
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = crate::FDB_ENV_LOCK.lock().unwrap();
     let prefix = unique_fdb_prefix("runtime-metadata-init");
     set_env("AUX_DUCKLAKE_FDB_PREFIX", &prefix);
     remove_env("AUX_DUCKLAKE_FDB_CLUSTER_FILE");
@@ -647,7 +678,7 @@ fn ffi_create_schemas_mutates_live_foundationdb_catalog_when_enabled() {
     if live_fdb_disabled() {
         return;
     }
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = crate::FDB_ENV_LOCK.lock().unwrap();
     let prefix = unique_fdb_prefix("runtime-create-schemas");
     let kv = crate::FdbOrderedCatalogKv::open_default_with_prefix(prefix.as_bytes()).unwrap();
     kv.initialize_catalog_if_absent_versionstamped(CatalogId(1))
@@ -683,7 +714,7 @@ fn ffi_create_tables_mutates_live_foundationdb_catalog_when_enabled() {
     if live_fdb_disabled() {
         return;
     }
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = crate::FDB_ENV_LOCK.lock().unwrap();
     let prefix = unique_fdb_prefix("runtime-create-tables");
     let kv = crate::FdbOrderedCatalogKv::open_default_with_prefix(prefix.as_bytes()).unwrap();
     kv.initialize_catalog_if_absent_versionstamped(CatalogId(1))
@@ -718,7 +749,7 @@ fn ffi_create_table_commit_snapshot_keeps_public_snapshot_id_when_enabled() {
     if live_fdb_disabled() {
         return;
     }
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = crate::FDB_ENV_LOCK.lock().unwrap();
     let prefix = unique_fdb_prefix("runtime-create-table-public-snapshot");
     set_env("AUX_DUCKLAKE_FDB_PREFIX", &prefix);
     remove_env("AUX_DUCKLAKE_FDB_CLUSTER_FILE");
@@ -798,11 +829,11 @@ fn ffi_create_table_commit_snapshot_keeps_public_snapshot_id_when_enabled() {
 
 #[cfg(feature = "foundationdb")]
 #[test]
-fn ffi_standalone_inline_insert_then_flush_keeps_single_snapshot_insert_feed_when_enabled() {
+fn ffi_standalone_inline_insert_then_flush_moves_snapshot_insert_feed_to_file_when_enabled() {
     if live_fdb_disabled() {
         return;
     }
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = crate::FDB_ENV_LOCK.lock().unwrap();
     let prefix = unique_fdb_prefix("runtime-inline-flush-insert-feed");
     set_env("AUX_DUCKLAKE_FDB_PREFIX", &prefix);
     remove_env("AUX_DUCKLAKE_FDB_CLUSTER_FILE");
@@ -889,6 +920,16 @@ fn ffi_standalone_inline_insert_then_flush_keeps_single_snapshot_insert_feed_whe
              end_snapshot_id={public_inline_insert}\n"
         ),
     );
+    let files_after_flush = runtime_request_payload(
+        "ffi-fdb-inline-flush-files-after",
+        RuntimeCatalogBackend::FoundationDb,
+        "ListDataFileChanges",
+        format!(
+            "table_id=15\n\
+             start_snapshot_id={public_inline_insert}\n\
+             end_snapshot_id={public_inline_insert}\n"
+        ),
+    );
 
     remove_env("AUX_DUCKLAKE_FDB_PREFIX");
     assert!(initialized.contains("operation=InitializeDuckLake"));
@@ -901,7 +942,20 @@ fn ffi_standalone_inline_insert_then_flush_keeps_single_snapshot_insert_feed_whe
         &insertions_before_flush,
         public_inline_insert,
     );
-    assert_inline_flush_insertions("after flush", &insertions_after_flush, public_inline_insert);
+    assert!(
+        insertions_after_flush.contains("inline_row_change_count=0"),
+        "after flush: {insertions_after_flush}"
+    );
+    assert!(
+        files_after_flush.contains(&format!(
+            "change_file\tadded\t{public_inline_insert}\t30\t15\t"
+        )),
+        "after flush: {files_after_flush}"
+    );
+    assert!(
+        files_after_flush.contains("change_count=1"),
+        "after flush: {files_after_flush}"
+    );
 }
 
 #[cfg(feature = "foundationdb")]
@@ -926,7 +980,7 @@ fn ffi_commit_data_mutation_mutates_live_foundationdb_catalog_when_enabled() {
     if live_fdb_disabled() {
         return;
     }
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = crate::FDB_ENV_LOCK.lock().unwrap();
     let prefix = unique_fdb_prefix("runtime-data-mutation");
     let kv = crate::FdbOrderedCatalogKv::open_default_with_prefix(prefix.as_bytes()).unwrap();
     kv.initialize_catalog_if_absent_versionstamped(CatalogId(1))
@@ -947,12 +1001,6 @@ fn ffi_commit_data_mutation_mutates_live_foundationdb_catalog_when_enabled() {
         "CommitDataMutation",
         data_mutation_runtime_payload(TableId(12), DataFileId(16), 42),
     );
-    let batch = runtime_request_payload(
-        "ffi-fdb-commit-metadata-batch",
-        RuntimeCatalogBackend::FoundationDb,
-        "CommitMetadataBatch",
-        String::new(),
-    );
     let kv = crate::FdbOrderedCatalogKv::open_default_with_prefix(prefix.as_bytes()).unwrap();
     let latest = crate::latest_snapshot(&kv, CatalogId(1)).unwrap().unwrap();
     drop(kv);
@@ -968,7 +1016,6 @@ fn ffi_commit_data_mutation_mutates_live_foundationdb_catalog_when_enabled() {
     let files = crate::list_data_files_at(&kv, CatalogId(1), TableId(12), latest.order).unwrap();
     assert!(committed.contains("appended_file_count=1"));
     assert!(committed.contains("file_partition_value_count=1"));
-    assert!(batch.contains("metadata_batch_committed=true"));
     assert!(inline_file_deletions.contains("inline_file_deletion_exists=true"));
     assert!(inline_file_deletions.contains("inline_file_deletion_file_count=1"));
     assert!(inline_file_deletions.contains("inline_file_deletion_row_count=1"));
@@ -984,7 +1031,7 @@ fn ffi_object_mutations_mutate_live_foundationdb_catalog_when_enabled() {
     if live_fdb_disabled() {
         return;
     }
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = crate::FDB_ENV_LOCK.lock().unwrap();
     let prefix = unique_fdb_prefix("runtime-object-mutations");
     let kv = crate::FdbOrderedCatalogKv::open_default_with_prefix(prefix.as_bytes()).unwrap();
     kv.initialize_catalog_if_absent_versionstamped(CatalogId(1))
@@ -1092,7 +1139,7 @@ fn ffi_schema_changes_mutate_live_foundationdb_catalog_when_enabled() {
     if live_fdb_disabled() {
         return;
     }
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = crate::FDB_ENV_LOCK.lock().unwrap();
     let prefix = unique_fdb_prefix("runtime-schema-changes");
     let kv = crate::FdbOrderedCatalogKv::open_default_with_prefix(prefix.as_bytes()).unwrap();
     kv.initialize_catalog_if_absent_versionstamped(CatalogId(1))
@@ -1127,7 +1174,7 @@ fn ffi_list_snapshots_reads_live_foundationdb_catalog_when_enabled() {
     if live_fdb_disabled() {
         return;
     }
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = crate::FDB_ENV_LOCK.lock().unwrap();
     let prefix = unique_fdb_prefix("runtime-list-snapshots");
     let table = TableId(52);
     let kv = crate::FdbOrderedCatalogKv::open_default_with_prefix(prefix.as_bytes()).unwrap();
@@ -1203,7 +1250,7 @@ fn ffi_list_data_files_at_reads_live_foundationdb_catalog_when_enabled() {
     if live_fdb_disabled() {
         return;
     }
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = crate::FDB_ENV_LOCK.lock().unwrap();
     let prefix = unique_fdb_prefix("runtime-list-files");
     let table = TableId(45);
     let kv = crate::FdbOrderedCatalogKv::open_default_with_prefix(prefix.as_bytes()).unwrap();
@@ -1276,7 +1323,7 @@ fn ffi_cleanup_listing_reads_live_foundationdb_catalog_when_enabled() {
     if live_fdb_disabled() {
         return;
     }
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = crate::FDB_ENV_LOCK.lock().unwrap();
     let prefix = unique_fdb_prefix("runtime-cleanup-listing");
     let table = TableId(54);
     let kv = crate::FdbOrderedCatalogKv::open_default_with_prefix(prefix.as_bytes()).unwrap();
@@ -1382,11 +1429,11 @@ fn ffi_cleanup_listing_reads_live_foundationdb_catalog_when_enabled() {
 
 #[cfg(feature = "foundationdb")]
 #[test]
-fn ffi_fdb_cleanup_removal_preserves_reachable_delete_metadata_for_time_travel() {
+fn ffi_fdb_cleanup_preserves_reachable_delete_file_for_time_travel() {
     if live_fdb_disabled() {
         return;
     }
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = crate::FDB_ENV_LOCK.lock().unwrap();
     let prefix = unique_fdb_prefix("runtime-delete-cleanup-time-travel");
     let catalog = CatalogId(1);
     let table = TableId(154);
@@ -1497,32 +1544,22 @@ fn ffi_fdb_cleanup_removal_preserves_reachable_delete_metadata_for_time_travel()
     );
 
     remove_env("AUX_DUCKLAKE_FDB_PREFIX");
-    assert!(listed.contains("cleanup_file_count=1"), "{listed}");
+    assert!(listed.contains("cleanup_file_count=0"), "{listed}");
     assert!(
-        listed.contains(&format!(
-            "cleanup_file\tdelete\t{}\t{}\tmain/runtime/fdb-delete-cleanup-delete-1.parquet",
-            first_delete_file.delete_file_id.0, table.0
-        )),
-        "{listed}"
-    );
-    assert!(
-        removed.contains("removed_cleanup_file_count=1"),
-        "{removed}"
-    );
-    assert!(
-        removed.contains(&format!(
-            "removed_cleanup_file\tdelete\t{}",
-            first_delete_file.delete_file_id.0
-        )),
+        removed.contains("removed_cleanup_file_count=0"),
         "{removed}"
     );
     assert!(historical_files.contains("file_count=1"));
     assert!(
         historical_files.contains(&format!(
-            "file\t{}\t{}\tmain/runtime/fdb-delete-cleanup-data.parquet\t100\t8192\t0\t\t{}\tmain/runtime/fdb-delete-cleanup-delete-2.parquet\t75\t4096",
-            data_file.data_file_id.0, table.0, second_delete_file.delete_file_id.0,
+            "file\t{}\t{}\tmain/runtime/fdb-delete-cleanup-data.parquet\t100\t8192\t0\t\t{}\tmain/runtime/fdb-delete-cleanup-delete-1.parquet\t50\t4096",
+            data_file.data_file_id.0, table.0, first_delete_file.delete_file_id.0,
         )),
         "{historical_files}"
+    );
+    assert_ne!(
+        first_delete_file.delete_file_id,
+        second_delete_file.delete_file_id
     );
 }
 
@@ -1532,7 +1569,7 @@ fn ffi_compaction_mutations_update_live_foundationdb_catalog_when_enabled() {
     if live_fdb_disabled() {
         return;
     }
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = crate::FDB_ENV_LOCK.lock().unwrap();
     let prefix = unique_fdb_prefix("runtime-compaction");
     let table = TableId(57);
     let kv = crate::FdbOrderedCatalogKv::open_default_with_prefix(prefix.as_bytes()).unwrap();
@@ -1608,7 +1645,7 @@ fn ffi_rewrite_delete_mutation_updates_live_foundationdb_catalog_when_enabled() 
     if live_fdb_disabled() {
         return;
     }
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = crate::FDB_ENV_LOCK.lock().unwrap();
     let prefix = unique_fdb_prefix("runtime-rewrite-delete");
     let table = TableId(58);
     let kv = crate::FdbOrderedCatalogKv::open_default_with_prefix(prefix.as_bytes()).unwrap();

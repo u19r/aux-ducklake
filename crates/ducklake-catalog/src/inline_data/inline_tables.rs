@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 use crate::CatalogCacheNamespace;
 #[cfg(not(test))]
 use crate::bounded_cache::{BoundedCache, static_bounded_cache};
+use crate::runtime_metrics::RuntimeMetricStage;
 #[cfg(feature = "runtime-metrics")]
 use crate::runtime_metrics::record_runtime_method_elapsed;
 use crate::{
@@ -27,33 +28,6 @@ use crate::{
     },
     table_store::{load_current_table_row, stage_current_table_row, stage_table_visibility_row},
 };
-
-#[cfg(feature = "runtime-metrics")]
-#[derive(Clone, Copy)]
-struct RuntimeMetricStage(std::time::Instant);
-
-#[cfg(not(feature = "runtime-metrics"))]
-#[derive(Clone, Copy)]
-struct RuntimeMetricStage;
-
-impl RuntimeMetricStage {
-    #[inline]
-    fn start() -> Self {
-        #[cfg(feature = "runtime-metrics")]
-        {
-            Self(std::time::Instant::now())
-        }
-        #[cfg(not(feature = "runtime-metrics"))]
-        {
-            Self
-        }
-    }
-
-    #[cfg(feature = "runtime-metrics")]
-    fn elapsed_micros(self) -> u64 {
-        u64::try_from(self.0.elapsed().as_micros()).unwrap_or(u64::MAX)
-    }
-}
 
 #[cfg(feature = "runtime-metrics")]
 fn record_inline_tables_stage(operation: &'static str, started: RuntimeMetricStage) {
@@ -446,6 +420,13 @@ pub(crate) fn stage_flush_inline_table_payloads(
     end_order: CatalogOrderId,
 ) -> CatalogResult<()> {
     crate::inline_data::stage_flush_inline_file_deletions(kv, batch, catalog, flush, end_order)?;
+    crate::snapshot_operations::stage_snapshot_operation(
+        batch,
+        catalog,
+        end_order,
+        crate::snapshot_operations::SnapshotOperationKind::InlineFlush,
+        flush.table_id,
+    );
     for row in flush_inline_table_payload_rows(kv, catalog, flush, end_order)? {
         if row.chunk_index == 0 {
             batch.put(
@@ -537,44 +518,6 @@ pub(crate) fn flush_inline_table_payload_rows_at_snapshot_order(
         rows.push(row);
     }
     Ok(rows)
-}
-
-pub(crate) fn inline_table_flushes_ending_at(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    end_order: CatalogOrderId,
-) -> CatalogResult<std::collections::BTreeSet<TableId>> {
-    let prefix = family_prefix(catalog, KeyFamily::EndOrder);
-    let mut tables = std::collections::BTreeSet::new();
-    for item in kv.scan_prefix(&prefix, RangeDirection::Forward, usize::MAX)? {
-        let tail = &item.key[prefix.len()..];
-        let minimum_len = 8 + 1 + CatalogOrderId::LEN + 1 + 2 + 8 + 1 + CatalogOrderId::LEN;
-        if tail.len() != minimum_len || tail[8] != b'/' {
-            continue;
-        }
-        let order_start = 9;
-        let object_start = order_start + CatalogOrderId::LEN + 1;
-        if tail[order_start + CatalogOrderId::LEN] != b'/'
-            || tail[object_start] != b'i'
-            || tail[object_start + 1] != b'/'
-        {
-            continue;
-        }
-        let marker_order = CatalogOrderId::from_bytes(
-            end_order.kind(),
-            tail[order_start..order_start + CatalogOrderId::LEN]
-                .try_into()
-                .map_err(|_| {
-                    CatalogError::InvalidKey("inline end order is truncated".to_owned())
-                })?,
-        );
-        if marker_order == end_order {
-            tables.insert(TableId(u64::from_be_bytes(tail[0..8].try_into().map_err(
-                |_| CatalogError::InvalidKey("inline end table id is truncated".to_owned()),
-            )?)));
-        }
-    }
-    Ok(tables)
 }
 
 pub fn load_inline_table_payload_at(

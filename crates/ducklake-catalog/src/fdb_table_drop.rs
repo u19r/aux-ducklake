@@ -25,7 +25,7 @@ use crate::{
         snapshot_timestamp_key, table_object_key, table_visibility_key,
     },
     schema_version_state::stage_fdb_next_schema_version,
-    store::stage_fdb_latest_snapshot_value,
+    store::stage_fdb_snapshot_indexes,
     table_store::{list_tables_at, load_current_table_row, load_table_at},
 };
 
@@ -70,7 +70,7 @@ impl FdbOrderedCatalogKv {
 
         let trx = self.create_transaction()?;
         stage_snapshot(self, &trx, catalog, &snapshot)?;
-        stage_fdb_next_schema_version(self, &trx, catalog)?;
+        stage_fdb_next_schema_version(self, &trx, catalog, &snapshot)?;
         for drop in &drops {
             stage_drop(self, &trx, catalog, drop)?;
         }
@@ -162,7 +162,7 @@ impl FdbOrderedCatalogKv {
             );
         }
         stage_snapshot(self, &trx, catalog, &snapshot)?;
-        stage_fdb_next_schema_version(self, &trx, catalog)?;
+        stage_fdb_next_schema_version(self, &trx, catalog, &snapshot)?;
         for drop in &drops {
             stage_drop(self, &trx, catalog, drop)?;
         }
@@ -215,7 +215,7 @@ fn recover_committed_replacement(
         .map(Some)
 }
 
-fn reject_replacement_create_conflicts(
+pub(crate) fn reject_replacement_create_conflicts(
     kv: &FdbOrderedCatalogKv,
     catalog: CatalogId,
     latest_order: crate::CatalogOrderId,
@@ -250,8 +250,8 @@ fn reject_replacement_create_conflicts(
     Ok(())
 }
 
-struct PreparedTableDrop {
-    table: TableRow,
+pub(crate) struct PreparedTableDrop {
+    pub(crate) table: TableRow,
     data_files: Vec<DataFileRow>,
     delete_files: Vec<DeleteFileRow>,
 }
@@ -294,7 +294,7 @@ impl PreparedTableDrop {
     }
 }
 
-fn prepare_table_drop(
+pub(crate) fn prepare_table_drop(
     kv: &FdbOrderedCatalogKv,
     catalog: CatalogId,
     table: TableRow,
@@ -351,11 +351,11 @@ fn stage_snapshot(
         &snapshot.sequence.to_be_bytes(),
         MutationType::SetVersionstampedKey,
     );
-    stage_fdb_latest_snapshot_value(kv, trx, catalog, snapshot)?;
+    stage_fdb_snapshot_indexes(kv, trx, catalog, snapshot)?;
     Ok(())
 }
 
-fn stage_drop(
+pub(crate) fn stage_drop(
     kv: &FdbOrderedCatalogKv,
     trx: &foundationdb::Transaction,
     catalog: CatalogId,
@@ -382,7 +382,7 @@ fn stage_drop(
     Ok(())
 }
 
-fn estimate_drop_bytes(
+pub(crate) fn estimate_drop_bytes(
     catalog: CatalogId,
     snapshot: &SnapshotRow,
     drops: &[PreparedTableDrop],

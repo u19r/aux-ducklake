@@ -1,6 +1,8 @@
+use std::collections::BTreeMap;
+
 use crate::{
-    CatalogError, CatalogId, CatalogResult, KvBatch, OrderedCatalogKv,
-    keys::{conflict_max_catalog_id_key, conflict_max_file_id_key},
+    CatalogError, CatalogId, CatalogResult, KvBatch, OrderedCatalogKv, TableId,
+    keys::{conflict_max_catalog_id_key, conflict_max_file_id_key, table_next_row_id_key},
 };
 
 pub(crate) struct ConflictWatermarkValues {
@@ -57,6 +59,57 @@ pub(crate) fn stage_max_file_id_watermark(
     stage_max_u64(kv, batch, conflict_max_file_id_key(catalog), candidate)
 }
 
+pub(crate) fn load_table_next_row_id(
+    kv: &(impl OrderedCatalogKv + ?Sized),
+    catalog: CatalogId,
+    table_id: TableId,
+) -> CatalogResult<u64> {
+    Ok(load_u64(kv, &table_next_row_id_key(catalog, table_id))?.unwrap_or_default())
+}
+
+pub(crate) fn load_table_next_row_ids(
+    kv: &(impl OrderedCatalogKv + ?Sized),
+    catalog: CatalogId,
+    table_ids: &[TableId],
+) -> CatalogResult<BTreeMap<TableId, u64>> {
+    let keys = table_ids
+        .iter()
+        .map(|table_id| table_next_row_id_key(catalog, *table_id))
+        .collect::<Vec<_>>();
+    let values = kv.batch_get(&keys)?;
+    if values.len() != keys.len() {
+        return Err(CatalogError::Backend(format!(
+            "table next-row-id batch returned {} values for {} keys",
+            values.len(),
+            keys.len()
+        )));
+    }
+    table_ids
+        .iter()
+        .copied()
+        .zip(keys.iter().zip(values))
+        .map(|(table_id, (key, value))| {
+            decode_optional_u64(key, value.as_deref())
+                .map(|next_row_id| (table_id, next_row_id.unwrap_or_default()))
+        })
+        .collect()
+}
+
+pub(crate) fn stage_table_next_row_id(
+    kv: &(impl OrderedCatalogKv + ?Sized),
+    batch: &mut KvBatch,
+    catalog: CatalogId,
+    table_id: TableId,
+    candidate: u64,
+) -> CatalogResult<()> {
+    stage_max_u64(
+        kv,
+        batch,
+        table_next_row_id_key(catalog, table_id),
+        candidate,
+    )
+}
+
 fn stage_max_u64(
     kv: &(impl OrderedCatalogKv + ?Sized),
     batch: &mut KvBatch,
@@ -103,6 +156,17 @@ pub(crate) fn stage_fdb_max_file_id_watermark(
     candidate: u64,
 ) {
     stage_fdb_max_u64(kv, trx, conflict_max_file_id_key(catalog), candidate);
+}
+
+#[cfg(feature = "foundationdb")]
+pub(crate) fn stage_fdb_table_next_row_id(
+    kv: &crate::FdbOrderedCatalogKv,
+    trx: &foundationdb::Transaction,
+    catalog: CatalogId,
+    table_id: TableId,
+    candidate: u64,
+) {
+    stage_fdb_max_u64(kv, trx, table_next_row_id_key(catalog, table_id), candidate);
 }
 
 #[cfg(feature = "foundationdb")]

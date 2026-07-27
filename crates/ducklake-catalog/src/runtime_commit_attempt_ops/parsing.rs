@@ -4,13 +4,14 @@ use crate::{
         data_mutation_payload_values, proposed_commit_snapshot_covering_inline_flushes,
     },
     runtime_snapshot_range::ProposedCommitSnapshot,
-    runtime_tabular_payload::{TabularPayload, parse_u64_field},
+    runtime_tabular_payload::{TabularPayload, parse_u64_field, parse_uuid_u128_field},
 };
 
 use crate::runtime_commit_attempt_ops::*;
 pub(crate) fn commit_attempt_intent(payload: &[u8]) -> CatalogResult<RuntimeCommitAttemptIntent> {
     let mut read_snapshot = None;
     let mut proposed_commit_snapshot = None;
+    let mut recovery_attempt_id = None;
     let mut metadata_intents = Vec::new();
     let mut compaction_intents = Vec::new();
     let mut data_mutation_payload = Vec::new();
@@ -33,6 +34,13 @@ pub(crate) fn commit_attempt_intent(payload: &[u8]) -> CatalogResult<RuntimeComm
                 proposed_commit_snapshot = Some(ProposedCommitSnapshot::new(CommitAttemptId(
                     parse_u64_field(COMMIT_ATTEMPT, snapshot_id, "commit snapshot id")?.into(),
                 )));
+            }
+            ["recovery_attempt", attempt_id] => {
+                recovery_attempt_id = Some(CommitAttemptId(parse_uuid_u128_field(
+                    COMMIT_ATTEMPT,
+                    attempt_id,
+                    "recovery attempt id",
+                )?));
             }
             ["commit_author", author] => {
                 commit_metadata.author = Some((*author).to_owned());
@@ -121,6 +129,7 @@ pub(crate) fn commit_attempt_intent(payload: &[u8]) -> CatalogResult<RuntimeComm
     Ok(RuntimeCommitAttemptIntent {
         read_snapshot,
         proposed_commit_snapshot,
+        recovery_attempt_id,
         commit_metadata,
         metadata_intents,
         compaction_intents,

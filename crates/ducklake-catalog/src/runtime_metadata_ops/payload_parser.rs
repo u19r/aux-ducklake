@@ -150,20 +150,24 @@ pub(super) fn column_mappings_payload(rows: &[ColumnMappingRow]) -> String {
 }
 
 pub(super) fn optional_payload_u64(payload: &[u8], key: &str) -> CatalogResult<Option<u64>> {
+    Ok(payload_u64_values(payload, key)?.into_iter().next())
+}
+
+pub(super) fn payload_u64_values(payload: &[u8], key: &str) -> CatalogResult<Vec<u64>> {
     let payload = std::str::from_utf8(payload).map_err(|error| {
         crate::CatalogError::Decode(format!("runtime payload is not utf-8: {error}"))
     })?;
     let prefix = format!("{key}=");
+    let mut values = Vec::new();
     for line in payload.lines() {
         let Some(value) = line.strip_prefix(&prefix) else {
             continue;
         };
-        if value.is_empty() {
-            return Ok(None);
+        if !value.is_empty() {
+            values.push(parse_u64(value, key)?);
         }
-        return Ok(Some(parse_u64(value, key)?));
     }
-    Ok(None)
+    Ok(values)
 }
 
 pub(super) fn optional_u64(value: &str, field: &str) -> CatalogResult<Option<u64>> {

@@ -286,16 +286,14 @@ fn reject_column_rename_batch_shape(renames: &[ColumnRename]) -> CatalogResult<T
     let first = renames
         .first()
         .ok_or_else(|| CatalogError::InvalidMutation("empty column rename batch".to_owned()))?;
-    for (index, rename) in renames.iter().enumerate() {
+    let mut unique = BTreeSet::new();
+    for rename in renames {
         if rename.table_id != first.table_id {
             return Err(CatalogError::InvalidMutation(
                 "column rename only supports one table per operation".to_owned(),
             ));
         }
-        if renames[..index]
-            .iter()
-            .any(|previous| previous.column.column_id == rename.column.column_id)
-        {
+        if !unique.insert(rename.column.column_id) {
             return Err(CatalogError::InvalidMutation(format!(
                 "column {} is listed more than once for rename",
                 rename.column.column_id.0
@@ -309,16 +307,14 @@ fn reject_column_drop_batch_shape(drops: &[ColumnDrop]) -> CatalogResult<TableId
     let first = drops
         .first()
         .ok_or_else(|| CatalogError::InvalidMutation("empty column drop batch".to_owned()))?;
-    for (index, drop) in drops.iter().enumerate() {
+    let mut unique = BTreeSet::new();
+    for drop in drops {
         if drop.table_id != first.table_id {
             return Err(CatalogError::InvalidMutation(
                 "column drop only supports one table per operation".to_owned(),
             ));
         }
-        if drops[..index]
-            .iter()
-            .any(|previous| previous.column_id == drop.column_id)
-        {
+        if !unique.insert(drop.column_id) {
             return Err(CatalogError::InvalidMutation(format!(
                 "column {} is listed more than once for drop",
                 drop.column_id.0
@@ -332,16 +328,14 @@ fn reject_column_type_change_batch_shape(changes: &[ColumnTypeChange]) -> Catalo
     let first = changes.first().ok_or_else(|| {
         CatalogError::InvalidMutation("empty column type change batch".to_owned())
     })?;
-    for (index, change) in changes.iter().enumerate() {
+    let mut unique = BTreeSet::new();
+    for change in changes {
         if change.table_id != first.table_id {
             return Err(CatalogError::InvalidMutation(
                 "column type change only supports one table per operation".to_owned(),
             ));
         }
-        if changes[..index]
-            .iter()
-            .any(|previous| previous.column.column_id == change.column.column_id)
-        {
+        if !unique.insert(change.column.column_id) {
             return Err(CatalogError::InvalidMutation(format!(
                 "column {} is listed more than once for type change",
                 change.column.column_id.0

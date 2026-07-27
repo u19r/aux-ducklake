@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    CatalogError, CatalogId, CatalogOrderId, CatalogOrderKind, CatalogResult, DataCommitIntent,
-    DataFileChange, DataFileChangeKind, DataFileId, DataFileRow, DeleteFileId, DeleteFileRow,
-    FdbOrderedCatalogKv, FileColumnStatsRow, InlineFileDeletionRow, MergeAdjacentCompaction,
-    RewriteDeleteCompaction, TableId,
+    CatalogError, CatalogId, CatalogOrderId, CatalogOrderKind, CatalogResult, ColumnId,
+    DataCommitIntent, DataFileChange, DataFileChangeKind, DataFileId, DataFileRow, DeleteFileId,
+    DeleteFileRow, FdbOrderedCatalogKv, FileColumnStatsRow, InlineFileDeletionRow,
+    MergeAdjacentCompaction, RewriteDeleteCompaction, TableId,
     compaction_store::{merge_adjacent_file_column_stats, rewrite_delete_file_column_stats},
     conflict::reject_conflicts_since_base,
     fdb_data_mutations::FdbExpiredDeleteFile,
@@ -214,7 +214,7 @@ impl FdbOrderedCatalogKv {
                 file_column_stats,
                 dropped_data_files: source_context.sources().to_vec(),
                 expired_delete_files: source_deletions.expired_delete_files,
-                table_id: source_context.table_id(),
+                table_ids: vec![source_context.table_id()],
             },
         )?;
         compaction.new_files = commit.data_files;
@@ -277,6 +277,142 @@ impl FdbOrderedCatalogKv {
             compaction,
             source_context,
         )
+    }
+
+    pub(crate) fn commit_merge_adjacent_data_files_batch_versionstamped(
+        &self,
+        catalog: CatalogId,
+        conflict_window: Option<(CatalogOrderId, CatalogOrderId)>,
+        attempt_id: Option<crate::CommitAttemptId>,
+        commit_metadata: crate::SnapshotCommitMetadata,
+        compactions: Vec<MergeAdjacentCompaction>,
+    ) -> CatalogResult<()> {
+        let mut mutation = crate::fdb_data_mutations::FdbCompactionMutation::default();
+        for mut compaction in compactions {
+            reject_merge_shape(&compaction)?;
+            reject_source_delete_files(self, catalog, &compaction.source_file_ids)?;
+            let source_context = MergeSourceContext::load(self, catalog, &compaction)?;
+            if let Some((base_order, through_order)) = conflict_window {
+                reject_conflicts_since_base(
+                    self,
+                    catalog,
+                    source_context.table_id(),
+                    base_order,
+                    through_order,
+                    DataCommitIntent::RewriteOrDeleteFiles,
+                )?;
+            }
+            normalize_merge_replacements(&source_context, &mut compaction)?;
+            let file_column_stats = if compaction.file_column_stats.is_empty() {
+                derive_merge_replacement_stats(
+                    self,
+                    catalog,
+                    &source_context,
+                    &compaction.new_files,
+                    &compaction.partition_values,
+                )?
+            } else {
+                merge_adjacent_file_column_stats(
+                    self,
+                    catalog,
+                    &compaction.source_file_ids,
+                    &compaction.new_files,
+                    &compaction.file_column_stats,
+                )?
+            };
+            mutation.data_files.extend(compaction.new_files);
+            mutation
+                .partition_values
+                .extend(compaction.partition_values);
+            mutation.file_column_stats.extend(file_column_stats);
+            mutation
+                .dropped_data_files
+                .extend(source_context.sources().iter().cloned());
+        }
+        self.commit_compaction_data_mutation_versionstamped(
+            catalog,
+            attempt_id,
+            commit_metadata,
+            mutation,
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn commit_rewrite_delete_data_files_batch_versionstamped(
+        &self,
+        catalog: CatalogId,
+        conflict_window: Option<(CatalogOrderId, CatalogOrderId)>,
+        attempt_id: Option<crate::CommitAttemptId>,
+        commit_metadata: crate::SnapshotCommitMetadata,
+        compactions: Vec<RewriteDeleteCompaction>,
+    ) -> CatalogResult<()> {
+        let mut mutation = crate::fdb_data_mutations::FdbRewriteDeleteMutation::default();
+        for mut compaction in compactions {
+            reject_rewrite_shape(&compaction)?;
+            let source_context = RewriteSourceContext::load(
+                self,
+                catalog,
+                &compaction.source_file_ids,
+                &compaction.new_files,
+            )?;
+            if let Some((base_order, through_order)) = conflict_window {
+                reject_conflicts_since_base(
+                    self,
+                    catalog,
+                    source_context.table_id(),
+                    base_order,
+                    through_order,
+                    DataCommitIntent::RewriteOrDeleteFiles,
+                )?;
+                reject_rewrite_source_delete_conflicts_since_base(
+                    self,
+                    catalog,
+                    source_context.table_id(),
+                    base_order,
+                    through_order,
+                    &compaction.source_file_ids,
+                )?;
+            }
+            let source_deletions = rewrite_source_deletions(
+                self,
+                catalog,
+                source_context.table_id(),
+                source_context.sources(),
+            )?;
+            normalize_rewrite_replacement_row_ids_from_sources(
+                source_context.sources(),
+                &mut compaction.new_files,
+            )?;
+            let file_column_stats = rewrite_delete_file_column_stats(
+                self,
+                catalog,
+                &compaction.source_file_ids,
+                &compaction.new_files,
+                &compaction.file_column_stats,
+            )?;
+            mutation.data_files.extend(compaction.new_files);
+            mutation
+                .partition_values
+                .extend(compaction.partition_values);
+            mutation
+                .inline_file_deletions
+                .extend(source_deletions.inline_file_deletions);
+            mutation.file_column_stats.extend(file_column_stats);
+            mutation
+                .dropped_data_files
+                .extend(source_context.sources().iter().cloned());
+            mutation
+                .expired_delete_files
+                .extend(source_deletions.expired_delete_files);
+            mutation.table_ids.push(source_context.table_id());
+        }
+        self.commit_rewrite_delete_data_mutation_versionstamped(
+            catalog,
+            attempt_id,
+            commit_metadata,
+            mutation,
+        )?;
+        Ok(())
     }
 }
 
@@ -655,20 +791,40 @@ fn derive_merge_replacement_stats(
         .collect::<Vec<_>>();
     let source_stats = list_file_column_stats_for_data_file_ids(kv, catalog, &source_file_ids)?;
     let source_partitions = source_context.partition_values();
+    let source_groups = source_files_by_partition(source_files, source_partitions);
+    let replacement_keys = partition_keys_by_file(partition_values);
+    let stats_by_file = source_stats.iter().fold(
+        BTreeMap::<DataFileId, Vec<&FileColumnStatsRow>>::new(),
+        |mut grouped, row| {
+            grouped.entry(row.data_file_id).or_default().push(row);
+            grouped
+        },
+    );
+    let all_sources = source_files.iter().collect::<Vec<_>>();
     let mut out = Vec::new();
     for new_file in new_files {
-        let new_partition_key = partition_key_for_file(partition_values, new_file.data_file_id);
-        let sources = source_files
+        let sources = if new_files.len() == 1 {
+            all_sources.as_slice()
+        } else {
+            let key = replacement_keys
+                .get(&new_file.data_file_id)
+                .cloned()
+                .unwrap_or_default();
+            source_groups.get(&key).map_or(&[][..], Vec::as_slice)
+        };
+        let scoped_stats = sources
             .iter()
-            .filter(|source_id| {
-                new_files.len() == 1
-                    || partition_key_for_file(source_partitions, source_id.data_file_id)
-                        == new_partition_key
+            .flat_map(|source| {
+                stats_by_file
+                    .get(&source.data_file_id)
+                    .into_iter()
+                    .flat_map(|rows| rows.iter().copied())
             })
+            .cloned()
             .collect::<Vec<_>>();
         out.extend(merge_stats_for_replacement(
-            &source_stats,
-            &sources,
+            &scoped_stats,
+            sources,
             new_file,
         ));
     }
@@ -681,37 +837,27 @@ fn merge_stats_for_replacement(
     new_file: &DataFileRow,
 ) -> Vec<FileColumnStatsRow> {
     let mut rows = Vec::new();
-    let mut column_ids = all_stats
+    let source_record_counts = sources
         .iter()
-        .filter(|row| {
-            sources
-                .iter()
-                .any(|source| source.data_file_id == row.data_file_id)
-        })
-        .map(|row| row.column_id)
-        .collect::<Vec<_>>();
-    column_ids.sort_by_key(|column_id| column_id.0);
-    column_ids.dedup();
-    for column_id in column_ids {
-        let source_stats = all_stats
-            .iter()
-            .filter(|row| {
-                row.column_id == column_id
-                    && sources
-                        .iter()
-                        .any(|source| source.data_file_id == row.data_file_id)
-            })
-            .collect::<Vec<_>>();
-        if source_stats.is_empty() {
-            continue;
+        .map(|source| (source.data_file_id, source.record_count))
+        .collect::<BTreeMap<_, _>>();
+    let mut stats_by_column = BTreeMap::<ColumnId, Vec<&FileColumnStatsRow>>::new();
+    for stat in all_stats {
+        if source_record_counts.contains_key(&stat.data_file_id) {
+            stats_by_column
+                .entry(stat.column_id)
+                .or_default()
+                .push(stat);
         }
+    }
+    for (column_id, source_stats) in stats_by_column {
+        let files_with_stats = source_stats
+            .iter()
+            .map(|row| row.data_file_id)
+            .collect::<BTreeSet<_>>();
         let missing_column_nulls = sources
             .iter()
-            .filter(|source| {
-                !source_stats
-                    .iter()
-                    .any(|row| row.data_file_id == source.data_file_id)
-            })
+            .filter(|source| !files_with_stats.contains(&source.data_file_id))
             .map(|source| source.record_count)
             .sum::<u64>();
         rows.push(FileColumnStatsRow {
@@ -780,20 +926,20 @@ fn derive_partitioned_merge_replacement_row_ids(
     source_partition_values: &[crate::FilePartitionValueRow],
     compaction: &mut MergeAdjacentCompaction,
 ) -> CatalogResult<()> {
+    let source_groups = source_files_by_partition(sources, source_partition_values);
+    let replacement_keys = partition_keys_by_file(&compaction.partition_values);
     for new_file in compaction
         .new_files
         .iter_mut()
         .filter(|file| !file.row_id_start_known)
     {
-        let new_key = partition_key_for_file(&compaction.partition_values, new_file.data_file_id);
-        let matching_sources = sources
-            .iter()
-            .filter(|source| {
-                partition_key_for_file(source_partition_values, source.data_file_id) == new_key
-            })
-            .collect::<Vec<_>>();
+        let new_key = replacement_keys
+            .get(&new_file.data_file_id)
+            .cloned()
+            .unwrap_or_default();
+        let matching_sources = source_groups.get(&new_key).map_or(&[][..], Vec::as_slice);
         if !source_row_ranges_are_contiguous_for_record_count(
-            &matching_sources,
+            matching_sources,
             new_file.record_count,
         ) {
             continue;
@@ -814,17 +960,36 @@ fn derive_partitioned_merge_replacement_row_ids(
     Ok(())
 }
 
-fn partition_key_for_file(
+type FilePartitionKey = Vec<(u32, String)>;
+
+fn partition_keys_by_file(
     partition_values: &[crate::FilePartitionValueRow],
-    data_file_id: DataFileId,
-) -> Vec<(u32, String)> {
-    let mut values = partition_values
-        .iter()
-        .filter(|row| row.data_file_id == data_file_id)
-        .map(|row| (row.partition_key_index.0, row.partition_value.clone()))
-        .collect::<Vec<_>>();
-    values.sort();
-    values
+) -> BTreeMap<DataFileId, FilePartitionKey> {
+    let mut keys = BTreeMap::<DataFileId, FilePartitionKey>::new();
+    for row in partition_values {
+        keys.entry(row.data_file_id)
+            .or_default()
+            .push((row.partition_key_index.0, row.partition_value.clone()));
+    }
+    for key in keys.values_mut() {
+        key.sort();
+    }
+    keys
+}
+
+fn source_files_by_partition<'a>(
+    sources: &'a [DataFileRow],
+    partition_values: &[crate::FilePartitionValueRow],
+) -> BTreeMap<FilePartitionKey, Vec<&'a DataFileRow>> {
+    let keys = partition_keys_by_file(partition_values);
+    let mut grouped = BTreeMap::<FilePartitionKey, Vec<&DataFileRow>>::new();
+    for source in sources {
+        grouped
+            .entry(keys.get(&source.data_file_id).cloned().unwrap_or_default())
+            .or_default()
+            .push(source);
+    }
+    grouped
 }
 
 #[cfg(test)]
@@ -911,49 +1076,36 @@ fn apply_merge_replacement_visibility(
     }
     let all_sources = sources.iter().collect::<Vec<_>>();
     let replacement_count = compaction.new_files.len();
+    let source_groups = source_files_by_partition(sources, source_partition_values);
+    let replacement_keys = partition_keys_by_file(&compaction.partition_values);
     for new_file in &mut compaction.new_files {
         let scoped_sources = if replacement_count == 1 {
-            all_sources.clone()
+            all_sources.as_slice()
         } else {
-            replacement_visibility_sources(
-                &all_sources,
-                source_partition_values,
-                &compaction.partition_values,
-                new_file,
-            )?
+            let key = replacement_keys
+                .get(&new_file.data_file_id)
+                .cloned()
+                .unwrap_or_default();
+            if key.is_empty() {
+                all_sources.as_slice()
+            } else {
+                source_groups
+                    .get(&key)
+                    .map(Vec::as_slice)
+                    .ok_or_else(|| {
+                        CatalogError::InvalidMutation(format!(
+                            "merge-adjacent replacement data file {} has partition values that do not match any source file in table {}",
+                            new_file.data_file_id.0, new_file.table_id.0
+                        ))
+                    })?
+            }
         };
         if has_complete_explicit_merge_visibility(new_file, scoped_sources.len()) {
             continue;
         }
-        apply_merge_visibility_from_sources(&scoped_sources, new_file);
+        apply_merge_visibility_from_sources(scoped_sources, new_file);
     }
     Ok(())
-}
-
-fn replacement_visibility_sources<'a>(
-    all_sources: &[&'a DataFileRow],
-    source_partition_values: &[crate::FilePartitionValueRow],
-    replacement_partition_values: &[crate::FilePartitionValueRow],
-    new_file: &DataFileRow,
-) -> CatalogResult<Vec<&'a DataFileRow>> {
-    let new_key = partition_key_for_file(replacement_partition_values, new_file.data_file_id);
-    if new_key.is_empty() {
-        return Ok(all_sources.to_vec());
-    }
-    let matching_sources = all_sources
-        .iter()
-        .copied()
-        .filter(|source| {
-            partition_key_for_file(source_partition_values, source.data_file_id) == new_key
-        })
-        .collect::<Vec<_>>();
-    if matching_sources.is_empty() {
-        return Err(CatalogError::InvalidMutation(format!(
-            "merge-adjacent replacement data file {} has partition values that do not match any source file in table {}",
-            new_file.data_file_id.0, new_file.table_id.0
-        )));
-    }
-    Ok(matching_sources)
 }
 
 fn apply_merge_visibility_from_sources(sources: &[&DataFileRow], new_file: &mut DataFileRow) {

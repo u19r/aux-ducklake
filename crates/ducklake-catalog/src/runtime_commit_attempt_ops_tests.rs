@@ -6,9 +6,7 @@ mod tests {
 
     use super::super::*;
     #[cfg(feature = "foundationdb")]
-    use crate::runtime_inline_rows::{
-        ReadInlineRowsPayload, read_inline_rows_global_stats_payload,
-    };
+    use crate::runtime_inline_rows::{ReadInlineRowsPayload, read_inline_rows_payload};
     #[cfg(feature = "foundationdb")]
     use crate::runtime_protocol::RuntimeCatalogBackend;
     #[cfg(feature = "foundationdb")]
@@ -16,6 +14,8 @@ mod tests {
     use crate::runtime_snapshot_range::ProposedCommitSnapshot;
     #[cfg(feature = "foundationdb")]
     use crate::runtime_snapshot_range::ReadSnapshot;
+    #[cfg(feature = "foundationdb")]
+    use crate::table_store::load_current_table_row;
     use crate::{
         CatalogId, ColumnId, CommitAttemptId, FakeOrderedCatalogKv, RawSnapshotSequence, SchemaId,
         SchemaRow, TableColumnRow, TableId, TablePartitionFieldRow, TablePartitionRow, TableRow,
@@ -26,14 +26,42 @@ mod tests {
     };
 
     #[test]
+    fn given_latest_snapshot_when_catalog_state_is_loaded_then_its_schema_version_is_resolved_by_order()
+     {
+        let mut kv = FakeOrderedCatalogKv::default();
+        let catalog = CatalogId(1);
+        initialize_catalog_if_absent(&mut kv, catalog).unwrap();
+        commit_create_schema_rows(
+            &mut kv,
+            catalog,
+            vec![SchemaRow::new(
+                SchemaId(1),
+                "main-schema-uuid",
+                "main",
+                "main/",
+                crate::CatalogOrderId::uuid_v7(0),
+            )],
+        )
+        .unwrap();
+
+        let state = current_catalog_state(&kv, catalog).unwrap();
+
+        assert_eq!(state.final_schema_version(false), 1);
+    }
+
+    #[test]
     fn given_commit_attempt_payload_when_parsed_then_snapshots_and_intents_are_typed() {
         let intent = commit_attempt_intent(
-            b"read_snapshot\t7\ncommit_snapshot\t8\nmetadata\tAddColumns\ncolumn\t1\t2\tb\tINTEGER\ttrue\t\t\t\tliteral\nmetadata\tChangeSortKeys\nsort\t1\t4\nsort_field\t1\t4\t0\tb\tduckdb\tASC\tNULLS_LAST\ninline\tRegisterInlineRows\ntable\t1\t0\tducklake_inlined_data_1_0\nrow\t0\ncompaction\tRewriteDeleteFiles\nrewrite\t1\t2\ti:1\ndata_mutation\nfile\t9\t1\tmain/t/file.parquet\t1\t128\t0\n",
+            b"read_snapshot\t7\ncommit_snapshot\t8\nrecovery_attempt\t00112233-4455-6677-8899-aabbccddeeff\nmetadata\tAddColumns\ncolumn\t1\t2\tb\tINTEGER\ttrue\t\t\t\tliteral\nmetadata\tChangeSortKeys\nsort\t1\t4\nsort_field\t1\t4\t0\tb\tduckdb\tASC\tNULLS_LAST\ninline\tRegisterInlineRows\ntable\t1\t0\tducklake_inlined_data_1_0\nrow\t0\ncompaction\tRewriteDeleteFiles\nrewrite\t1\t2\ti:1\ndata_mutation\nfile\t9\t1\tmain/t/file.parquet\t1\t128\t0\n",
         )
         .unwrap();
 
         assert_eq!(intent.read_snapshot, Some(DuckLakeSnapshotId(7)));
         assert_eq!(intent.proposed_commit_snapshot, CommitAttemptId(8));
+        assert_eq!(
+            intent.recovery_attempt_id,
+            Some(CommitAttemptId(0x00112233445566778899aabbccddeeff))
+        );
         assert_eq!(intent.metadata_intents.len(), 2);
         assert_eq!(
             intent.metadata_intents[0].operation,
@@ -68,6 +96,53 @@ mod tests {
         assert_eq!(intent.read_snapshot, Some(DuckLakeSnapshotId(6)));
     }
 
+    #[test]
+    fn given_mixed_storage_commit_when_inline_delete_is_prepared_then_top_level_headers_are_not_forwarded()
+     {
+        let intent = commit_attempt_intent(
+            b"read_snapshot\t7\ncommit_snapshot\t8\ncommit_author\ttest\ninline\tDeleteInlineRows\ndelete\t1\tducklake_inlined_data_1_0\t42\ndata_mutation\nfile\t9\t1\tmain/t/file.parquet\t1\t128\t0\n",
+        )
+        .unwrap();
+
+        let payload = payload_with_commit_header(
+            &intent,
+            "DeleteInlineRows",
+            &intent.inline_payloads[0].payload,
+            false,
+            false,
+        )
+        .unwrap();
+        let delete = crate::runtime_inline_ops::inline_delete_payload(&payload).unwrap();
+
+        assert_eq!(delete.targets[0].row_ids, vec![42]);
+        assert!(
+            !String::from_utf8(payload)
+                .unwrap()
+                .contains("read_snapshot")
+        );
+    }
+
+    #[test]
+    fn given_recovery_attempt_when_storage_header_is_rendered_then_identity_is_forwarded() {
+        let intent = commit_attempt_intent(
+            b"commit_snapshot\t8\nrecovery_attempt\t00112233-4455-6677-8899-aabbccddeeff\ndata_mutation\nfile\t9\t1\tmain/t/file.parquet\t1\t128\t0\n",
+        )
+        .unwrap();
+
+        let payload = payload_with_commit_header(
+            &intent,
+            "CommitDataMutation",
+            &intent.data_mutation_payload,
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert!(String::from_utf8(payload).unwrap().starts_with(
+            "commit_snapshot\t8\nrecovery_attempt\t00112233445566778899aabbccddeeff\n"
+        ));
+    }
+
     fn large_data_mutation_payload(rows: usize) -> Vec<u8> {
         let mut payload = Vec::new();
         payload.extend_from_slice(b"commit_snapshot\t99\nread_snapshot\t98\n");
@@ -86,6 +161,7 @@ mod tests {
         let intent = RuntimeCommitAttemptIntent {
             read_snapshot: Some(DuckLakeSnapshotId(98)),
             proposed_commit_snapshot: ProposedCommitSnapshot::new(CommitAttemptId(99)),
+            recovery_attempt_id: None,
             commit_metadata: SnapshotCommitMetadata::default(),
             metadata_intents: Vec::new(),
             compaction_intents: Vec::new(),
@@ -117,6 +193,7 @@ mod tests {
         let intent = RuntimeCommitAttemptIntent {
             read_snapshot: Some(DuckLakeSnapshotId(98)),
             proposed_commit_snapshot: ProposedCommitSnapshot::new(CommitAttemptId(99)),
+            recovery_attempt_id: None,
             commit_metadata: SnapshotCommitMetadata::default(),
             metadata_intents: Vec::new(),
             compaction_intents: Vec::new(),
@@ -595,6 +672,7 @@ mod tests {
         let intent = RuntimeCommitAttemptIntent {
             read_snapshot: Some(DuckLakeSnapshotId(7)),
             proposed_commit_snapshot: ProposedCommitSnapshot::new(CommitAttemptId(8)),
+            recovery_attempt_id: None,
             commit_metadata: SnapshotCommitMetadata::default(),
             metadata_intents: Vec::new(),
             compaction_intents: Vec::new(),
@@ -621,6 +699,7 @@ mod tests {
         let intent = RuntimeCommitAttemptIntent {
             read_snapshot: Some(DuckLakeSnapshotId(7)),
             proposed_commit_snapshot: ProposedCommitSnapshot::new(CommitAttemptId(8)),
+            recovery_attempt_id: None,
             commit_metadata: SnapshotCommitMetadata {
                 author: Some("ducklake-user".to_owned()),
                 commit_message: Some(String::new()),
@@ -652,6 +731,7 @@ mod tests {
         let intent = RuntimeCommitAttemptIntent {
             read_snapshot: Some(DuckLakeSnapshotId(7)),
             proposed_commit_snapshot: ProposedCommitSnapshot::new(CommitAttemptId(8)),
+            recovery_attempt_id: None,
             commit_metadata: SnapshotCommitMetadata::default(),
             metadata_intents: vec![RuntimeMetadataIntent {
                 operation: RuntimeMetadataOperation::RenameTables,
@@ -719,6 +799,7 @@ mod tests {
         let intent = RuntimeCommitAttemptIntent {
             read_snapshot: Some(DuckLakeSnapshotId(0)),
             proposed_commit_snapshot: ProposedCommitSnapshot::new(CommitAttemptId(1)),
+            recovery_attempt_id: None,
             commit_metadata: SnapshotCommitMetadata {
                 author: Some("ducklake-user".to_owned()),
                 commit_message: Some(String::new()),
@@ -762,6 +843,7 @@ mod tests {
         let intent = RuntimeCommitAttemptIntent {
             read_snapshot: Some(DuckLakeSnapshotId(0)),
             proposed_commit_snapshot: ProposedCommitSnapshot::new(CommitAttemptId(1)),
+            recovery_attempt_id: None,
             commit_metadata: SnapshotCommitMetadata::default(),
             metadata_intents: vec![
                 RuntimeMetadataIntent {
@@ -806,6 +888,7 @@ mod tests {
         let intent = RuntimeCommitAttemptIntent {
             read_snapshot: Some(DuckLakeSnapshotId(1)),
             proposed_commit_snapshot: ProposedCommitSnapshot::new(CommitAttemptId(2)),
+            recovery_attempt_id: None,
             commit_metadata: SnapshotCommitMetadata::default(),
             metadata_intents: vec![
                 RuntimeMetadataIntent {
@@ -851,6 +934,7 @@ mod tests {
         let intent = RuntimeCommitAttemptIntent {
             read_snapshot: Some(DuckLakeSnapshotId(1)),
             proposed_commit_snapshot: ProposedCommitSnapshot::new(CommitAttemptId(2)),
+            recovery_attempt_id: None,
             commit_metadata: SnapshotCommitMetadata::default(),
             metadata_intents: vec![
                 RuntimeMetadataIntent {
@@ -890,6 +974,7 @@ mod tests {
         let intent = RuntimeCommitAttemptIntent {
             read_snapshot: Some(DuckLakeSnapshotId(1)),
             proposed_commit_snapshot: ProposedCommitSnapshot::new(CommitAttemptId(2)),
+            recovery_attempt_id: None,
             commit_metadata: SnapshotCommitMetadata::default(),
             metadata_intents: vec![
                 RuntimeMetadataIntent {
@@ -930,6 +1015,7 @@ mod tests {
         let intent = RuntimeCommitAttemptIntent {
             read_snapshot: Some(DuckLakeSnapshotId(1)),
             proposed_commit_snapshot: ProposedCommitSnapshot::new(CommitAttemptId(2)),
+            recovery_attempt_id: None,
             commit_metadata: SnapshotCommitMetadata::default(),
             metadata_intents: vec![
                 RuntimeMetadataIntent {
@@ -982,6 +1068,7 @@ mod tests {
         let intent = RuntimeCommitAttemptIntent {
             read_snapshot: Some(DuckLakeSnapshotId(2)),
             proposed_commit_snapshot: ProposedCommitSnapshot::new(CommitAttemptId(3)),
+            recovery_attempt_id: None,
             commit_metadata: SnapshotCommitMetadata::default(),
             metadata_intents: vec![RuntimeMetadataIntent {
                 operation: RuntimeMetadataOperation::RenameTables,
@@ -1008,6 +1095,7 @@ mod tests {
         let intent = RuntimeCommitAttemptIntent {
             read_snapshot: Some(DuckLakeSnapshotId(0)),
             proposed_commit_snapshot: ProposedCommitSnapshot::new(CommitAttemptId(1)),
+            recovery_attempt_id: None,
             commit_metadata: SnapshotCommitMetadata::default(),
             metadata_intents: vec![
                 RuntimeMetadataIntent {
@@ -1064,6 +1152,7 @@ mod tests {
         let intent = RuntimeCommitAttemptIntent {
             read_snapshot: Some(DuckLakeSnapshotId(1)),
             proposed_commit_snapshot: ProposedCommitSnapshot::new(CommitAttemptId(2)),
+            recovery_attempt_id: None,
             commit_metadata: SnapshotCommitMetadata::default(),
             metadata_intents: vec![
                 RuntimeMetadataIntent {
@@ -1116,6 +1205,7 @@ mod tests {
         let intent = RuntimeCommitAttemptIntent {
             read_snapshot: Some(DuckLakeSnapshotId(0)),
             proposed_commit_snapshot: ProposedCommitSnapshot::new(CommitAttemptId(1)),
+            recovery_attempt_id: None,
             commit_metadata: SnapshotCommitMetadata::default(),
             metadata_intents: vec![RuntimeMetadataIntent {
                 operation: RuntimeMetadataOperation::CreateTables,
@@ -1197,8 +1287,301 @@ mod tests {
 
     #[cfg(feature = "foundationdb")]
     #[test]
+    fn fdb_live_given_one_commit_inlines_two_tables_when_committed_then_both_are_visible_at_one_snapshot()
+     {
+        let _guard = crate::FDB_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if live_fdb_disabled() {
+            return;
+        }
+
+        let catalog = CatalogId(903);
+        let prefix = unique_prefix("commit-attempt-two-inline-tables");
+        set_env("AUX_DUCKLAKE_FDB_PREFIX", &prefix);
+        let result = (|| -> CatalogResult<()> {
+            let kv = crate::FdbOrderedCatalogKv::open_default_with_prefix(prefix.as_bytes())?;
+            kv.initialize_catalog_if_absent_versionstamped(catalog)?;
+            commit_attempt(
+                RuntimeCatalogBackend::FoundationDb,
+                catalog,
+                b"commit_snapshot\t1\nread_snapshot\t0\nmetadata\tCreateTables\ntable\t1\t0\tusers-uuid\tusers\tmain/users/\t\ncolumn\t1\t1\temail\tVARCHAR\ttrue\t\t\t\tNULL\tliteral\ntable\t2\t0\tcheckpoints-uuid\tcheckpoints\tmain/checkpoints/\t\ncolumn\t2\t1\tposition\tVARCHAR\ttrue\t\t\t\tNULL\tliteral\n",
+            )?;
+
+            commit_attempt(
+                RuntimeCatalogBackend::FoundationDb,
+                catalog,
+                b"commit_snapshot\t2\nread_snapshot\t1\ninline\tRegisterInlineRows\ntable\t1\t0\tducklake_inlined_data_1_0\nrow\t0\ts:75736572406578616d706c652e74657374\ntable\t2\t0\tducklake_inlined_data_2_0\nrow\t0\ts:31\n",
+            )?;
+
+            let latest =
+                latest_snapshot(&kv, catalog)?.ok_or(CatalogError::NotFound("snapshot"))?;
+            assert_eq!(latest.sequence, RawSnapshotSequence(2));
+            for (table_name, expected) in [
+                (
+                    "ducklake_inlined_data_1_0",
+                    "s:75736572406578616d706c652e74657374",
+                ),
+                ("ducklake_inlined_data_2_0", "s:31"),
+            ] {
+                let rows = read_inline_rows_payload(
+                    &kv,
+                    catalog,
+                    ReadInlineRowsPayload {
+                        table_name: table_name.to_owned(),
+                        snapshot: Some(ReadSnapshot::new(DuckLakeSnapshotId(2))),
+                        include_flushed: false,
+                        include_deleted: false,
+                    },
+                )?;
+                let rows = String::from_utf8_lossy(&rows);
+                assert!(rows.contains(expected), "{table_name}: {rows}");
+            }
+            Ok(())
+        })();
+        remove_env("AUX_DUCKLAKE_FDB_PREFIX");
+        result.unwrap();
+    }
+
+    #[cfg(feature = "foundationdb")]
+    #[test]
+    fn fdb_live_given_mixed_metadata_kinds_when_committed_then_storage_adds_one_snapshot_row() {
+        let _guard = crate::FDB_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if live_fdb_disabled() {
+            return;
+        }
+
+        let catalog = CatalogId(909);
+        let prefix = unique_prefix("commit-attempt-mixed-metadata");
+        set_env("AUX_DUCKLAKE_FDB_PREFIX", &prefix);
+        let result = (|| -> CatalogResult<()> {
+            let kv = crate::FdbOrderedCatalogKv::open_default_with_prefix(prefix.as_bytes())?;
+            kv.initialize_catalog_if_absent_versionstamped(catalog)?;
+            let before = crate::list_all_snapshots(&kv, catalog)?.len();
+
+            commit_attempt(
+                RuntimeCatalogBackend::FoundationDb,
+                catalog,
+                b"commit_snapshot\t1\nread_snapshot\t0\nmetadata\tCreateSchemas\nschema\t5\tprobe-schema-uuid\tprobe\tmain/probe/\nmetadata\tCreateTables\ntable\t6\t5\tprobe-table-uuid\titems\tmain/probe/items/\t\ncolumn\t6\t1\tid\tBIGINT\ttrue\t\t\t\tNULL\tliteral\nmetadata\tCreateViews\nview\t31\t5\tprobe-view-uuid\titem_ids\tduckdb\tSELECT 42\t42\t\n",
+            )?;
+
+            let snapshots = crate::list_all_snapshots(&kv, catalog)?;
+            assert_eq!(snapshots.len() - before, 1);
+            let latest = snapshots
+                .last()
+                .ok_or(CatalogError::NotFound("metadata snapshot"))?;
+            assert_eq!(latest.sequence, RawSnapshotSequence(1));
+            assert!(
+                list_schemas_at(&kv, catalog, latest.order)?
+                    .iter()
+                    .any(|schema| schema.schema_id == SchemaId(5))
+            );
+            assert!(
+                list_tables_at(&kv, catalog, latest.order)?
+                    .iter()
+                    .any(|table| table.table_id == TableId(6))
+            );
+            assert!(load_view_at(&kv, catalog, TableId(31), latest.order)?.is_some());
+            Ok(())
+        })();
+        remove_env("AUX_DUCKLAKE_FDB_PREFIX");
+        result.unwrap();
+    }
+
+    #[cfg(feature = "foundationdb")]
+    #[test]
+    fn fdb_live_given_one_compaction_spans_two_tables_when_committed_then_both_replace_at_one_snapshot()
+     {
+        let _guard = crate::FDB_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if live_fdb_disabled() {
+            return;
+        }
+
+        let catalog = CatalogId(908);
+        let prefix = unique_prefix("commit-attempt-two-table-compaction");
+        set_env("AUX_DUCKLAKE_FDB_PREFIX", &prefix);
+        let result = (|| -> CatalogResult<()> {
+            let kv = crate::FdbOrderedCatalogKv::open_default_with_prefix(prefix.as_bytes())?;
+            kv.initialize_catalog_if_absent_versionstamped(catalog)?;
+            commit_attempt(
+                RuntimeCatalogBackend::FoundationDb,
+                catalog,
+                b"commit_snapshot\t1\nread_snapshot\t0\nmetadata\tCreateTables\ntable\t1\t0\tusers-uuid\tusers\tmain/users/\t\ncolumn\t1\t1\tid\tBIGINT\ttrue\t\t\t\tNULL\tliteral\ntable\t2\t0\tgroups-uuid\tgroups\tmain/groups/\t\ncolumn\t2\t1\tid\tBIGINT\ttrue\t\t\t\tNULL\tliteral\n",
+            )?;
+            commit_attempt(
+                RuntimeCatalogBackend::FoundationDb,
+                catalog,
+                b"commit_snapshot\t2\nread_snapshot\t1\ndata_mutation\nfile\t10\t1\tmain/users/source.parquet\t1\t128\t0\nfile\t20\t2\tmain/groups/source.parquet\t1\t128\t0\n",
+            )?;
+
+            commit_attempt(
+                RuntimeCatalogBackend::FoundationDb,
+                catalog,
+                b"commit_snapshot\t3\nread_snapshot\t2\ncompaction\tMergeAdjacentFiles\nsource_file\t1\t10\nsource_file\t2\t20\nfile\t11\t1\tmain/users/merged.parquet\t1\t128\t0\nfile\t21\t2\tmain/groups/merged.parquet\t1\t128\t0\n",
+            )?;
+
+            let latest =
+                latest_snapshot(&kv, catalog)?.ok_or(CatalogError::NotFound("snapshot"))?;
+            assert_eq!(latest.sequence, RawSnapshotSequence(3));
+            for (table_id, expected_file_id) in [(TableId(1), 11), (TableId(2), 21)] {
+                let files = crate::list_data_files_at(&kv, catalog, table_id, latest.order)?;
+                assert_eq!(files.len(), 1);
+                assert_eq!(files[0].data_file_id.0, expected_file_id);
+                assert_eq!(files[0].validity.begin_order, latest.order);
+            }
+            Ok(())
+        })();
+        remove_env("AUX_DUCKLAKE_FDB_PREFIX");
+        result.unwrap();
+    }
+
+    #[cfg(feature = "foundationdb")]
+    #[test]
+    fn fdb_live_given_later_inline_intent_is_invalid_when_commit_fails_then_earlier_rows_are_not_visible()
+     {
+        let _guard = crate::FDB_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if live_fdb_disabled() {
+            return;
+        }
+
+        let catalog = CatalogId(904);
+        let prefix = unique_prefix("commit-attempt-inline-atomic-failure");
+        set_env("AUX_DUCKLAKE_FDB_PREFIX", &prefix);
+        let result = (|| -> CatalogResult<()> {
+            let kv = crate::FdbOrderedCatalogKv::open_default_with_prefix(prefix.as_bytes())?;
+            kv.initialize_catalog_if_absent_versionstamped(catalog)?;
+            commit_attempt(
+                RuntimeCatalogBackend::FoundationDb,
+                catalog,
+                b"commit_snapshot\t1\nread_snapshot\t0\nmetadata\tCreateTables\ntable\t1\t0\tusers-uuid\tusers\tmain/users/\t\ncolumn\t1\t1\temail\tVARCHAR\ttrue\t\t\t\tNULL\tliteral\n",
+            )?;
+
+            commit_attempt(
+                RuntimeCatalogBackend::FoundationDb,
+                catalog,
+                b"commit_snapshot\t2\nread_snapshot\t1\ninline\tRegisterInlineRows\ntable\t1\t0\tducklake_inlined_data_1_0\nrow\t0\ts:75736572406578616d706c652e74657374\ninline\tDeleteInlineRows\ndelete\t999\tducklake_inlined_data_999_0\t0\n",
+            )
+            .unwrap_err();
+
+            let latest =
+                latest_snapshot(&kv, catalog)?.ok_or(CatalogError::NotFound("snapshot"))?;
+            assert_eq!(latest.sequence, RawSnapshotSequence(1));
+            Ok(())
+        })();
+        remove_env("AUX_DUCKLAKE_FDB_PREFIX");
+        result.unwrap();
+    }
+
+    #[cfg(feature = "foundationdb")]
+    #[test]
+    fn fdb_live_given_file_mutation_is_invalid_when_commit_fails_then_inline_checkpoint_is_not_visible()
+     {
+        let _guard = crate::FDB_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if live_fdb_disabled() {
+            return;
+        }
+
+        let catalog = CatalogId(905);
+        let prefix = unique_prefix("commit-attempt-file-inline-atomic-failure");
+        set_env("AUX_DUCKLAKE_FDB_PREFIX", &prefix);
+        let result = (|| -> CatalogResult<()> {
+            let kv = crate::FdbOrderedCatalogKv::open_default_with_prefix(prefix.as_bytes())?;
+            kv.initialize_catalog_if_absent_versionstamped(catalog)?;
+            commit_attempt(
+                RuntimeCatalogBackend::FoundationDb,
+                catalog,
+                b"commit_snapshot\t1\nread_snapshot\t0\nmetadata\tCreateTables\ntable\t1\t0\tcheckpoints-uuid\tcheckpoints\tmain/checkpoints/\t\ncolumn\t1\t1\tposition\tVARCHAR\ttrue\t\t\t\tNULL\tliteral\n",
+            )?;
+
+            commit_attempt(
+                RuntimeCatalogBackend::FoundationDb,
+                catalog,
+                b"commit_snapshot\t2\nread_snapshot\t1\ninline\tRegisterInlineRows\ntable\t1\t0\tducklake_inlined_data_1_0\nrow\t0\ts:31\ndata_mutation\nfile\t9\t999\tmain/missing/file.parquet\t1\t128\t0\n",
+            )
+            .unwrap_err();
+
+            let latest =
+                latest_snapshot(&kv, catalog)?.ok_or(CatalogError::NotFound("snapshot"))?;
+            assert_eq!(latest.sequence, RawSnapshotSequence(1));
+            Ok(())
+        })();
+        remove_env("AUX_DUCKLAKE_FDB_PREFIX");
+        result.unwrap();
+    }
+
+    #[cfg(feature = "foundationdb")]
+    #[test]
+    fn fdb_live_given_file_and_inline_checkpoint_when_committed_then_both_share_one_snapshot_order()
+    {
+        let _guard = crate::FDB_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if live_fdb_disabled() {
+            return;
+        }
+
+        let catalog = CatalogId(906);
+        let prefix = unique_prefix("commit-attempt-file-inline-one-order");
+        set_env("AUX_DUCKLAKE_FDB_PREFIX", &prefix);
+        let result = (|| -> CatalogResult<()> {
+            let kv = crate::FdbOrderedCatalogKv::open_default_with_prefix(prefix.as_bytes())?;
+            kv.initialize_catalog_if_absent_versionstamped(catalog)?;
+            commit_attempt(
+                RuntimeCatalogBackend::FoundationDb,
+                catalog,
+                b"commit_snapshot\t1\nread_snapshot\t0\nmetadata\tCreateTables\ntable\t1\t0\tusers-uuid\tusers\tmain/users/\t\ncolumn\t1\t1\temail\tVARCHAR\ttrue\t\t\t\tNULL\tliteral\ntable\t2\t0\tcheckpoints-uuid\tcheckpoints\tmain/checkpoints/\t\ncolumn\t2\t1\tposition\tVARCHAR\ttrue\t\t\t\tNULL\tliteral\n",
+            )?;
+
+            commit_attempt(
+                RuntimeCatalogBackend::FoundationDb,
+                catalog,
+                b"commit_snapshot\t2\nread_snapshot\t1\ninline\tRegisterInlineRows\ntable\t2\t0\tducklake_inlined_data_2_0\nrow\t0\ts:31\ndata_mutation\nfile\t9\t1\tmain/users/file.parquet\t1\t128\t0\n",
+            )
+            .map_err(|error| {
+                CatalogError::Decode(format!("mixed file and inline commit failed: {error}"))
+            })?;
+
+            let latest =
+                latest_snapshot(&kv, catalog)?.ok_or(CatalogError::NotFound("snapshot"))?;
+            assert_eq!(latest.sequence, RawSnapshotSequence(2));
+            let files = crate::list_data_files_at(&kv, catalog, TableId(1), latest.order)?;
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].validity.begin_order, latest.order);
+            let checkpoint = load_current_table_row(&kv, catalog, TableId(2))?
+                .ok_or(CatalogError::NotFound("checkpoint table"))?;
+            assert_eq!(checkpoint.validity.begin_order, latest.order);
+            let rows = read_inline_rows_payload(
+                &kv,
+                catalog,
+                ReadInlineRowsPayload {
+                    table_name: "ducklake_inlined_data_2_0".to_owned(),
+                    snapshot: Some(ReadSnapshot::new(DuckLakeSnapshotId(2))),
+                    include_flushed: false,
+                    include_deleted: false,
+                },
+            )?;
+            assert!(String::from_utf8_lossy(&rows).contains("s:31"));
+            Ok(())
+        })();
+        remove_env("AUX_DUCKLAKE_FDB_PREFIX");
+        result.unwrap();
+    }
+
+    #[cfg(feature = "foundationdb")]
+    #[test]
     fn fdb_live_given_stale_created_table_id_remapped_when_inline_rows_committed_then_remapped_inline_table_is_readable()
      {
+        let _guard = crate::FDB_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if live_fdb_disabled() {
             return;
         }
@@ -1233,7 +1616,7 @@ mod tests {
                     .any(|inline| inline.table_name == "ducklake_inlined_data_2_1"),
                 "remapped table did not persist its remapped inline table: {test2:?}"
             );
-            let inline_rows = read_inline_rows_global_stats_payload(
+            let inline_rows = read_inline_rows_payload(
                 &kv,
                 catalog,
                 ReadInlineRowsPayload {
@@ -1245,7 +1628,10 @@ mod tests {
             )?;
             let inline_rows = String::from_utf8(inline_rows)
                 .map_err(|error| CatalogError::Decode(error.to_string()))?;
-            assert!(inline_rows.contains("row_change\t1\t\t0\ts:68656c6c6f"));
+            assert!(
+                inline_rows.contains("row_change\t1\t\t0\ts:68656c6c6f"),
+                "{inline_rows}"
+            );
             Ok(())
         })();
         remove_env("AUX_DUCKLAKE_FDB_PREFIX");
@@ -1269,6 +1655,7 @@ mod tests {
         let intent = RuntimeCommitAttemptIntent {
             read_snapshot: Some(DuckLakeSnapshotId(2)),
             proposed_commit_snapshot: ProposedCommitSnapshot::new(CommitAttemptId(3)),
+            recovery_attempt_id: None,
             commit_metadata: SnapshotCommitMetadata::default(),
             metadata_intents: vec![RuntimeMetadataIntent {
                 operation: RuntimeMetadataOperation::ChangePartitionKeys,
@@ -1322,6 +1709,7 @@ mod tests {
         let intent = RuntimeCommitAttemptIntent {
             read_snapshot: Some(DuckLakeSnapshotId(1)),
             proposed_commit_snapshot: ProposedCommitSnapshot::new(CommitAttemptId(2)),
+            recovery_attempt_id: None,
             commit_metadata: SnapshotCommitMetadata::default(),
             metadata_intents: vec![RuntimeMetadataIntent {
                 operation: RuntimeMetadataOperation::ChangePartitionKeys,
@@ -1352,6 +1740,7 @@ mod tests {
         let first = RuntimeCommitAttemptIntent {
             read_snapshot: Some(DuckLakeSnapshotId(1)),
             proposed_commit_snapshot: ProposedCommitSnapshot::new(CommitAttemptId(2)),
+            recovery_attempt_id: None,
             commit_metadata: SnapshotCommitMetadata::default(),
             metadata_intents: vec![RuntimeMetadataIntent {
                 operation: RuntimeMetadataOperation::ChangePartitionKeys,
@@ -1365,6 +1754,7 @@ mod tests {
         let second = RuntimeCommitAttemptIntent {
             read_snapshot: Some(DuckLakeSnapshotId(1)),
             proposed_commit_snapshot: ProposedCommitSnapshot::new(CommitAttemptId(3)),
+            recovery_attempt_id: None,
             commit_metadata: SnapshotCommitMetadata::default(),
             metadata_intents: vec![RuntimeMetadataIntent {
                 operation: RuntimeMetadataOperation::ChangePartitionKeys,
@@ -1394,6 +1784,7 @@ mod tests {
         let intent = RuntimeCommitAttemptIntent {
             read_snapshot: Some(DuckLakeSnapshotId(1)),
             proposed_commit_snapshot: ProposedCommitSnapshot::new(CommitAttemptId(2)),
+            recovery_attempt_id: None,
             commit_metadata: SnapshotCommitMetadata::default(),
             metadata_intents: vec![RuntimeMetadataIntent {
                 operation: RuntimeMetadataOperation::ChangePartitionKeys,
@@ -1435,6 +1826,7 @@ mod tests {
         let intent = RuntimeCommitAttemptIntent {
             read_snapshot: Some(DuckLakeSnapshotId(1)),
             proposed_commit_snapshot: ProposedCommitSnapshot::new(CommitAttemptId(2)),
+            recovery_attempt_id: None,
             commit_metadata: SnapshotCommitMetadata::default(),
             metadata_intents: vec![
                 RuntimeMetadataIntent {
@@ -1478,6 +1870,9 @@ mod tests {
     #[test]
     fn fdb_live_given_created_table_renamed_into_existing_table_name_when_committed_then_storage_returns_final_table_identities()
      {
+        let _guard = crate::FDB_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if live_fdb_disabled() {
             return;
         }
@@ -1508,6 +1903,7 @@ mod tests {
         let intent = RuntimeCommitAttemptIntent {
             read_snapshot: Some(DuckLakeSnapshotId(1)),
             proposed_commit_snapshot: ProposedCommitSnapshot::new(CommitAttemptId(2)),
+            recovery_attempt_id: None,
             commit_metadata: SnapshotCommitMetadata::default(),
             metadata_intents: vec![
                 RuntimeMetadataIntent {
@@ -1556,6 +1952,7 @@ mod tests {
         let intent = RuntimeCommitAttemptIntent {
             read_snapshot: Some(DuckLakeSnapshotId(1)),
             proposed_commit_snapshot: ProposedCommitSnapshot::new(CommitAttemptId(2)),
+            recovery_attempt_id: None,
             commit_metadata: SnapshotCommitMetadata::default(),
             metadata_intents: vec![
                 RuntimeMetadataIntent {
@@ -1604,6 +2001,7 @@ mod tests {
         let intent = RuntimeCommitAttemptIntent {
             read_snapshot: Some(DuckLakeSnapshotId(0)),
             proposed_commit_snapshot: ProposedCommitSnapshot::new(CommitAttemptId(1)),
+            recovery_attempt_id: None,
             commit_metadata: SnapshotCommitMetadata::default(),
             metadata_intents: vec![RuntimeMetadataIntent {
                 operation: RuntimeMetadataOperation::CreateTables,

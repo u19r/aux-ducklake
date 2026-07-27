@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 #[cfg(not(test))]
 use std::sync::OnceLock;
 
@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 use crate::CatalogCacheNamespace;
 #[cfg(not(test))]
 use crate::bounded_cache::{BoundedCache, static_bounded_cache};
+use crate::runtime_metrics::RuntimeMetricStage;
 #[cfg(feature = "runtime-metrics")]
 use crate::runtime_metrics::record_runtime_method_elapsed;
 use crate::{
@@ -16,16 +17,13 @@ use crate::{
     keys::{KeyFamily, family_prefix},
     latest_snapshot,
     macro_store::list_macro_rows,
-    public_snapshot_sequence_for_order,
     runtime_read_context::{
         CatalogInlineDeletionReadContext, CatalogSnapshotReadContext, CatalogSnapshotRequestContext,
     },
     runtime_snapshot_range::{SnapshotDataChangeOrder, SnapshotWatermarkCutoffOrder},
-    runtime_snapshots::{
-        public_snapshot_sequences_by_order_shared, snapshot_schema_versions_by_order_shared,
-    },
+    runtime_snapshots::public_snapshot_sequences_by_order_shared,
     schema_store::list_schema_rows,
-    schema_version_state::load_current_schema_version,
+    schema_version_state::{load_current_schema_version, load_schema_version_at},
     table_store::list_table_rows,
     view_store::list_view_rows,
 };
@@ -45,7 +43,7 @@ static CONFLICT_SNAPSHOT_PAYLOAD_CACHE: OnceLock<
 struct CatalogSnapshotPayloadCacheKey {
     namespace: CatalogCacheNamespace,
     catalog: CatalogId,
-    order: CatalogOrderId,
+    snapshot_id: DuckLakeSnapshotId,
     kind: CatalogSnapshotIdKind,
 }
 
@@ -164,11 +162,7 @@ fn snapshot_schema_version_at(
     order: CatalogOrderId,
 ) -> CatalogResult<u64> {
     let stage_started = RuntimeMetricStage::start();
-    Ok(snapshot_schema_versions_by_order_shared(kv, catalog)?
-        .get(&order)
-        .copied()
-        .unwrap_or(0))
-    .inspect(|_| {
+    load_schema_version_at(kv, catalog, order).inspect(|_| {
         record_runtime_stage(
             "method.runtime_catalog_snapshot.snapshot_schema_version_at",
             stage_started,
@@ -222,26 +216,33 @@ pub(crate) fn catalog_snapshot_payload_with_kind(
     snapshot_id: DuckLakeSnapshotId,
     kind: CatalogSnapshotIdKind,
 ) -> CatalogResult<Vec<u8>> {
-    let mut request = CatalogSnapshotRequestContext::for_current_catalog(kv, catalog)?;
-    let requested = request.resolve_snapshot(kv, catalog, snapshot_id, kind)?;
     #[cfg(not(test))]
-    {
+    if crate::store::runtime_read_context_enabled() {
         let key = CatalogSnapshotPayloadCacheKey {
             namespace: kv.catalog_cache_namespace(),
             catalog,
-            order: requested.order,
+            snapshot_id,
             kind,
         };
         let cache = static_bounded_cache(&CATALOG_SNAPSHOT_PAYLOAD_CACHE, 1024);
         if let Some(payload) = cache.get(key) {
             return Ok(payload);
         }
+        let mut request = CatalogSnapshotRequestContext::for_current_catalog(kv, catalog)?;
+        let requested = request.resolve_snapshot(kv, catalog, snapshot_id, kind)?;
         let catalog_context = request.snapshot_context_for(kv, catalog, requested)?;
         let payload = render_catalog_snapshot_payload(catalog_context);
         cache.insert(key, payload.clone());
-        Ok(payload)
+        return Ok(payload);
     }
+    let mut request = CatalogSnapshotRequestContext::for_current_catalog(kv, catalog)?;
+    let requested = request.resolve_snapshot(kv, catalog, snapshot_id, kind)?;
     #[cfg(test)]
+    {
+        let catalog_context = request.snapshot_context_for(kv, catalog, requested)?;
+        Ok(render_catalog_snapshot_payload(catalog_context))
+    }
+    #[cfg(not(test))]
     {
         let catalog_context = request.snapshot_context_for(kv, catalog, requested)?;
         Ok(render_catalog_snapshot_payload(catalog_context))
@@ -366,19 +367,32 @@ fn render_catalog_snapshot_payload(context: CatalogSnapshotReadContext) -> Vec<u
 }
 
 fn columns_parent_before_children(columns: &[crate::TableColumnRow]) -> Vec<crate::TableColumnRow> {
-    let mut remaining = columns.to_vec();
-    let mut ordered = Vec::with_capacity(remaining.len());
-    while !remaining.is_empty() {
-        let next_index = remaining
-            .iter()
-            .position(|column| {
-                column.parent_id.is_none()
-                    || ordered.iter().any(|parent: &crate::TableColumnRow| {
-                        Some(parent.column_id) == column.parent_id
-                    })
-            })
-            .unwrap_or(0);
-        ordered.push(remaining.remove(next_index));
+    let mut children = BTreeMap::<crate::ColumnId, Vec<usize>>::new();
+    let mut ready = BTreeSet::new();
+    let mut remaining = (0..columns.len()).collect::<BTreeSet<_>>();
+    for (index, column) in columns.iter().enumerate() {
+        if let Some(parent_id) = column.parent_id {
+            children.entry(parent_id).or_default().push(index);
+        } else {
+            ready.insert(index);
+        }
+    }
+
+    let mut ordered = Vec::with_capacity(columns.len());
+    while let Some(index) = ready.pop_first().or_else(|| remaining.first().copied()) {
+        if !remaining.remove(&index) {
+            continue;
+        }
+        let column = &columns[index];
+        ordered.push(column.clone());
+        if let Some(child_indexes) = children.get(&column.column_id) {
+            ready.extend(
+                child_indexes
+                    .iter()
+                    .copied()
+                    .filter(|child| remaining.contains(child)),
+            );
+        }
     }
     ordered
 }
@@ -468,34 +482,7 @@ pub(crate) fn snapshot_watermarks(
     catalog: CatalogId,
     order: CatalogOrderId,
 ) -> CatalogResult<SnapshotWatermarks> {
-    let max_file_id = kv
-        .scan_prefix(
-            &family_prefix(catalog, KeyFamily::DataFile),
-            RangeDirection::Forward,
-            usize::MAX,
-        )?
-        .into_iter()
-        .map(|item| DataFileRow::decode(&item.value).map(|row| row.data_file_id.0))
-        .try_fold(None, max_decoded_id)?;
-    let max_delete_file_id = kv
-        .scan_prefix(
-            &family_prefix(catalog, KeyFamily::DeleteFile),
-            RangeDirection::Forward,
-            usize::MAX,
-        )?
-        .into_iter()
-        .map(|item| DeleteFileRow::decode(&item.value).map(|row| row.delete_file_id.0))
-        .try_fold(None, max_decoded_id)?;
-    let next_file_id = max_file_id
-        .into_iter()
-        .chain(max_delete_file_id)
-        .chain(inline_data_change_watermark(kv, catalog, order)?)
-        .max()
-        .map_or(0, |id| id.saturating_add(1));
-    Ok(SnapshotWatermarks {
-        next_catalog_id: next_historical_catalog_id(kv, catalog)?,
-        next_file_id,
-    })
+    conflict_snapshot_watermarks(kv, catalog, order)
 }
 
 fn max_decoded_id(current: Option<u64>, decoded: CatalogResult<u64>) -> CatalogResult<Option<u64>> {
@@ -607,33 +594,8 @@ fn raw_inline_data_change_watermark(
 }
 
 #[cfg(feature = "runtime-metrics")]
-#[derive(Clone, Copy)]
-struct RuntimeMetricStage(std::time::Instant);
-
-#[cfg(not(feature = "runtime-metrics"))]
-#[derive(Clone, Copy)]
-struct RuntimeMetricStage;
-
-impl RuntimeMetricStage {
-    #[inline]
-    fn start() -> Self {
-        #[cfg(feature = "runtime-metrics")]
-        {
-            Self(std::time::Instant::now())
-        }
-        #[cfg(not(feature = "runtime-metrics"))]
-        {
-            Self
-        }
-    }
-}
-
-#[cfg(feature = "runtime-metrics")]
 fn record_runtime_stage(operation: &str, started: RuntimeMetricStage) {
-    record_runtime_method_elapsed(
-        operation,
-        u64::try_from(started.0.elapsed().as_micros()).unwrap_or(u64::MAX),
-    );
+    record_runtime_method_elapsed(operation, started.elapsed_micros());
 }
 
 #[cfg(not(feature = "runtime-metrics"))]
@@ -655,67 +617,6 @@ fn update_raw_data_change_watermark(
         return;
     };
     *watermark = Some(watermark.map_or(*sequence, |value| value.max(*sequence)));
-}
-
-fn inline_data_change_watermark(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    order: CatalogOrderId,
-) -> CatalogResult<Option<u64>> {
-    let mut watermark = None;
-    for item in kv.scan_prefix(
-        &family_prefix(catalog, KeyFamily::InlineTable),
-        RangeDirection::Forward,
-        usize::MAX,
-    )? {
-        let row = decode_inline_table_item(catalog, &item.key, &item.value)?;
-        update_data_change_watermark(
-            kv,
-            catalog,
-            SnapshotWatermarkCutoffOrder::new(order),
-            SnapshotDataChangeOrder::new(row.validity.begin_order),
-            &mut watermark,
-        )?;
-        if let Some(end_order) = row.validity.end_order {
-            update_data_change_watermark(
-                kv,
-                catalog,
-                SnapshotWatermarkCutoffOrder::new(order),
-                SnapshotDataChangeOrder::new(end_order),
-                &mut watermark,
-            )?;
-        }
-    }
-    for row in CatalogInlineDeletionReadContext::for_catalog(kv, catalog)?.rows() {
-        update_data_change_watermark(
-            kv,
-            catalog,
-            SnapshotWatermarkCutoffOrder::new(order),
-            SnapshotDataChangeOrder::new(row.validity.begin_order),
-            &mut watermark,
-        )?;
-    }
-    Ok(watermark)
-}
-
-fn update_data_change_watermark(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    snapshot_order: SnapshotWatermarkCutoffOrder,
-    change_order: SnapshotDataChangeOrder,
-    watermark: &mut Option<u64>,
-) -> CatalogResult<()> {
-    let snapshot_order = snapshot_order.catalog_order();
-    let change_order = change_order.catalog_order();
-    if change_order > snapshot_order {
-        return Ok(());
-    }
-    let Some(public_sequence) = public_snapshot_sequence_for_order(kv, catalog, change_order)?
-    else {
-        return Ok(());
-    };
-    *watermark = Some(watermark.map_or(public_sequence.0, |value| value.max(public_sequence.0)));
-    Ok(())
 }
 
 #[cfg(test)]

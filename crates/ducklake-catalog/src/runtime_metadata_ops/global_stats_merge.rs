@@ -6,56 +6,6 @@ use crate::{CatalogResult, DataFileId, TableId, runtime_payload::optional_payloa
 use crate::runtime_metadata_ops::*;
 
 #[cfg(feature = "foundationdb")]
-pub(super) fn global_stats_file_rows_from_payload(
-    payload: &[u8],
-) -> CatalogResult<Vec<GlobalStatsFileRow>> {
-    let payload = std::str::from_utf8(payload).map_err(|error| {
-        crate::CatalogError::Decode(format!("global stats file payload is not utf-8: {error}"))
-    })?;
-    let mut rows = Vec::new();
-    for line in payload.lines() {
-        let fields = line.split('\t').collect::<Vec<_>>();
-        if fields.first().copied() != Some("file") {
-            continue;
-        }
-        let data_file_id = fields
-            .get(1)
-            .ok_or_else(|| crate::CatalogError::Decode(format!("invalid file row: {line}")))
-            .and_then(|value| parse_global_stats_u64(value, "data file id"))
-            .map(DataFileId)?;
-        let table_id = fields
-            .get(2)
-            .ok_or_else(|| crate::CatalogError::Decode(format!("invalid file row: {line}")))
-            .and_then(|value| parse_global_stats_u64(value, "file table id"))
-            .map(TableId)?;
-        let record_count = fields
-            .get(4)
-            .ok_or_else(|| crate::CatalogError::Decode(format!("invalid file row: {line}")))
-            .and_then(|value| parse_global_stats_u64(value, "file record count"))?;
-        let file_size_bytes = fields
-            .get(5)
-            .ok_or_else(|| crate::CatalogError::Decode(format!("invalid file row: {line}")))
-            .and_then(|value| parse_global_stats_u64(value, "file size bytes"))?;
-        let row_id_start = fields
-            .get(6)
-            .filter(|value| !value.is_empty())
-            .map(|value| parse_global_stats_u64(value, "row id start"))
-            .transpose()?;
-        let has_deletions = fields.get(8).is_some_and(|value| !value.is_empty())
-            || fields.get(13).is_some_and(|value| !value.is_empty());
-        rows.push(GlobalStatsFileRow {
-            data_file_id,
-            table_id,
-            record_count,
-            file_size_bytes,
-            row_id_start,
-            has_deletions,
-        });
-    }
-    Ok(rows)
-}
-
-#[cfg(feature = "foundationdb")]
 pub(super) fn can_recompute_exact_inline_stats(
     is_rewrite_snapshot: bool,
     rows: &[GlobalStatsFileRow],

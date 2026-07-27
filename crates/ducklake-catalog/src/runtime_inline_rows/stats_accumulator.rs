@@ -70,6 +70,33 @@ impl InlineCatalogStats {
         self.next_row_id = self.next_row_id.max(row_id + 1);
     }
 
+    pub(super) fn observe_next_row_id(&mut self, next_row_id: u64) {
+        self.next_row_id = self.next_row_id.max(next_row_id);
+    }
+
+    pub(super) fn accumulate_current_row_payload(
+        &mut self,
+        expected_row_id: u64,
+        payload: &[u8],
+    ) -> CatalogResult<()> {
+        let line = std::str::from_utf8(payload).map_err(|error| {
+            crate::CatalogError::Decode(format!("inline current-row payload is not utf8: {error}"))
+        })?;
+        let fields = inline_row_fields(line)?;
+        let row_id = fields[1].parse::<u64>().map_err(|error| {
+            crate::CatalogError::Decode(format!(
+                "inline current-row id {} is invalid: {error}",
+                fields[1]
+            ))
+        })?;
+        if row_id != expected_row_id {
+            return Err(crate::CatalogError::Decode(format!(
+                "inline current-row key id {expected_row_id} does not match payload id {row_id}"
+            )));
+        }
+        self.accumulate_visible_row(row_id, &fields[2..])
+    }
+
     pub(super) fn accumulate_visible_row(
         &mut self,
         row_id: u64,

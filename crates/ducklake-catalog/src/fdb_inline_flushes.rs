@@ -11,10 +11,16 @@ use crate::{
     fdb_versionstamp::{incomplete_order, versionstamped_value},
     inline_data::{
         flush_inline_table_payload_rows_at_snapshot_order, inline_table_chunk_key,
-        list_inline_file_deletion_rows_for_table_at,
+        list_inline_current_rows, list_inline_file_deletion_rows_for_table_at,
     },
-    keys::{KeyFamily, family_prefix, inline_file_deletion_key, inline_table_end_key, prefix_end},
+    keys::{
+        KeyFamily, family_prefix, inline_current_row_key, inline_current_row_prefix,
+        inline_file_deletion_key, inline_table_end_key, prefix_end,
+    },
     object_keys::conflict_fence_key,
+    snapshot_operations::{
+        SnapshotOperationKind, snapshot_operation_key, snapshot_operation_order_offset,
+    },
     store::snapshot_by_raw_sequence,
 };
 
@@ -62,6 +68,38 @@ pub(crate) fn stage_prepared_inline_flush_versionstamped(
             );
         }
     }
+    let current_prefix = kv.namespaced_key(&inline_current_row_prefix(
+        catalog,
+        prepared.flush.table_id,
+        prepared.flush.schema_id,
+    ));
+    trx.add_conflict_range(
+        &current_prefix,
+        &prefix_end(&current_prefix),
+        ConflictRangeType::Read,
+    )
+    .map_err(map_fdb_error)?;
+    for row_id in &prepared.current_row_ids {
+        trx.clear(&kv.namespaced_key(&inline_current_row_key(
+            catalog,
+            prepared.flush.table_id,
+            prepared.flush.schema_id,
+            *row_id,
+        )));
+    }
+    trx.atomic_op(
+        &kv.versionstamped_key(
+            &snapshot_operation_key(
+                catalog,
+                crate::fdb_versionstamp::incomplete_order(),
+                SnapshotOperationKind::InlineFlush,
+                prepared.flush.table_id,
+            ),
+            snapshot_operation_order_offset(catalog),
+        )?,
+        &[],
+        MutationType::SetVersionstampedKey,
+    );
     stage_fdb_max_file_id_watermark(kv, trx, catalog, prepared.flush.flush_snapshot_sequence.0);
     Ok(StagedInlineFlush {
         table_chunk_count: prepared.table_rows.len(),
@@ -74,6 +112,7 @@ pub(crate) struct PreparedInlineFlush {
     flush: InlineTableFlush,
     inline_file_deletions: Vec<InlineFileDeletionRow>,
     table_rows: Vec<InlineTableChunkRow>,
+    current_row_ids: Vec<u64>,
 }
 
 pub(crate) fn prepare_inline_flushes(
@@ -113,10 +152,15 @@ fn prepare_inline_flush(
         flush_snapshot.order,
         incomplete_order(),
     )?;
+    let current_row_ids = list_inline_current_rows(kv, catalog, flush.table_id, flush.schema_id)?
+        .into_iter()
+        .filter_map(|(row_id, row)| (row.begin_order <= flush_snapshot.order).then_some(row_id))
+        .collect();
     Ok(PreparedInlineFlush {
         flush,
         inline_file_deletions,
         table_rows,
+        current_row_ids,
     })
 }
 
@@ -193,42 +237,6 @@ fn stage_inline_chunk_conflicts(
     )
     .map_err(map_fdb_error)?;
     Ok(())
-}
-
-pub(crate) fn estimate_prepared_inline_flush_bytes(
-    catalog: CatalogId,
-    prepared_flushes: &[PreparedInlineFlush],
-) -> usize {
-    let mut bytes = 0usize;
-    for prepared in prepared_flushes {
-        for row in &prepared.inline_file_deletions {
-            bytes = bytes.saturating_add(
-                inline_file_deletion_key(
-                    catalog,
-                    row.table_id,
-                    row.data_file_id,
-                    row.validity.begin_order,
-                    row.row_id,
-                )
-                .len(),
-            );
-        }
-        for row in &prepared.table_rows {
-            if row.chunk_index == 0 {
-                bytes = bytes.saturating_add(
-                    inline_table_end_key(
-                        catalog,
-                        prepared.flush.table_id,
-                        incomplete_order(),
-                        prepared.flush.schema_id,
-                        row.validity.begin_order,
-                    )
-                    .len(),
-                );
-            }
-        }
-    }
-    bytes
 }
 
 fn inline_table_end_key_order_offset(catalog: CatalogId) -> usize {

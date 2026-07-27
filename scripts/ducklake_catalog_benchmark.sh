@@ -8,13 +8,68 @@ BUILD_PROFILE="${AUX_DUCKLAKE_BENCHMARK_BUILD_PROFILE:-release}"
 DUCKDB_BIN="$DUCKLAKE_DIR/build/$BUILD_PROFILE/duckdb"
 POSTGRES_SCANNER_EXTENSION="$DUCKLAKE_DIR/build/$BUILD_PROFILE/extension/postgres_scanner/postgres_scanner.duckdb_extension"
 BENCHMARK_BACKEND="${AUX_DUCKLAKE_BENCHMARK_BACKEND:-both}"
+BENCHMARK_MEMORY_LIMIT="${AUX_DUCKLAKE_BENCHMARK_MEMORY_LIMIT:-1024MiB}"
+RUNTIME_METRICS_PATH_OVERRIDE="${AUX_DUCKLAKE_BENCHMARK_RUNTIME_METRICS_PATH:-}"
+RUNTIME_EXTRA_FEATURES="${AUX_DUCKLAKE_BENCHMARK_RUNTIME_EXTRA_FEATURES:-}"
 . "$ROOT_DIR/scripts/ducklake_build_common.sh"
 . "$ROOT_DIR/scripts/ducklake-catalog-benchmark-fixtures.sh"
 
+write_failure_artifact() {
+    local message="$1"
+    local backend_label="${backend:-$BENCHMARK_BACKEND}"
+    local profile_label="${profile:-startup}"
+    local phase_label="${batch_name:-${benchmark_phase:-unknown}}"
+    local diagnostic="${benchmark_failure_output:-${duckdb_output:-}}"
+    local artifact="$OUT_DIR/${backend_label}-${profile_label}-failure-latest.json"
+    mkdir -p "$OUT_DIR"
+    python3 - "$artifact" "$backend_label" "$profile_label" "$phase_label" "$message" "$diagnostic" <<'PY'
+import json
+import re
+import sys
+import time
+
+artifact, backend, profile, phase, message, diagnostic = sys.argv[1:7]
+redacted = re.sub(
+    r"(postgres(?:ql)?://[^:/\\s]+:)[^@\\s]+(@)",
+    r"\\1<redacted>\\2",
+    diagnostic,
+    flags=re.IGNORECASE,
+)
+redacted = re.sub(
+    r"(?i)(password\\s*=\\s*)('[^']*'|\"[^\"]*\"|[^\\s;]+)",
+    r"\\1<redacted>",
+    redacted,
+)
+with open(artifact, "w", encoding="utf-8") as handle:
+    json.dump(
+        {
+            "artifact": "ducklake-catalog-benchmark-failure",
+            "backend": backend,
+            "profile": profile,
+            "phase": phase,
+            "status": "failed",
+            "generated_at_micros": time.time_ns() // 1000,
+            "message": message,
+            "diagnostic": redacted,
+        },
+        handle,
+        indent=2,
+        sort_keys=True,
+    )
+    handle.write("\n")
+PY
+    echo "ducklake_catalog_benchmark_failure_artifact=$artifact" >&2
+}
+
 fail() {
-    echo "ducklake catalog benchmark failure: $*" >&2
+    local message="$*"
+    write_failure_artifact "$message" || true
+    echo "ducklake catalog benchmark failure: $message" >&2
     exit 1
 }
+
+[[ "$BENCHMARK_MEMORY_LIMIT" =~ ^[1-9][0-9]*(KiB|MiB|GiB)$ ]] ||
+    fail "AUX_DUCKLAKE_BENCHMARK_MEMORY_LIMIT must be a positive KiB, MiB, or GiB value"
 
 sql_literal() {
     local value="$1"
@@ -42,6 +97,22 @@ copy_metric_snapshot() {
     else
         : > "$target"
     fi
+}
+
+configure_fdb_runtime_metrics() {
+    local tmp_dir="$1"
+    if [[ -z "$RUNTIME_METRICS_PATH_OVERRIDE" &&
+        ",$RUNTIME_EXTRA_FEATURES," != *",runtime-metrics,"* ]]; then
+        unset AUX_DUCKLAKE_BENCHMARK_RUNTIME_METRICS_PATH || true
+        return
+    fi
+    if [[ -n "$RUNTIME_METRICS_PATH_OVERRIDE" ]]; then
+        export AUX_DUCKLAKE_BENCHMARK_RUNTIME_METRICS_PATH="$RUNTIME_METRICS_PATH_OVERRIDE"
+    else
+        export AUX_DUCKLAKE_BENCHMARK_RUNTIME_METRICS_PATH="$tmp_dir/runtime-metrics.prom"
+    fi
+    mkdir -p "$(dirname "$AUX_DUCKLAKE_BENCHMARK_RUNTIME_METRICS_PATH")"
+    rm -f "$AUX_DUCKLAKE_BENCHMARK_RUNTIME_METRICS_PATH"
 }
 
 write_metric_accounting() {
@@ -102,27 +173,60 @@ runtime_kv_us = 0.0
 runtime_calls = 0.0
 runtime_kv_rows = 0.0
 runtime_kv_bytes = 0.0
+operations = defaultdict(lambda: {
+    "calls": 0.0,
+    "elapsed_micros": 0.0,
+    "items": 0.0,
+    "bytes": 0.0,
+})
 for (name, labels_tuple), value in runtime.items():
     labels = labels_dict(labels_tuple)
     if labels.get("scope", "unscoped") != scope:
         continue
     family = labels.get("family", "")
     operation = labels.get("operation", "")
+    operation_key = (family, operation, labels.get("status", ""))
     if name == "aux_ducklake_runtime_request_elapsed_micros_total":
+        operations[operation_key]["elapsed_micros"] += value
         if family == "kv":
             runtime_kv_us += value
-        elif family in {"method", "measure"} or ":" in operation:
+        elif family in {"method", "measure", "unknown"} or ":" in operation:
             runtime_nested_us += value
         else:
             runtime_top_level_us += value
     elif name == "aux_ducklake_runtime_requests_total":
         runtime_calls += value
+        operations[operation_key]["calls"] += value
     elif name == "aux_ducklake_runtime_kv_items_total":
         runtime_kv_rows += value
+        operations[operation_key]["items"] += value
     elif name == "aux_ducklake_runtime_kv_bytes_total":
         runtime_kv_bytes += value
+        operations[operation_key]["bytes"] += value
+
+
+def operation_cost_rows(micro):
+    rows = []
+    for (family, operation, status), values in operations.items():
+        is_micro = family in {"kv", "method", "measure", "unknown"} or ":" in operation
+        if is_micro != micro:
+            continue
+        calls = int(values["calls"])
+        elapsed_ms = values["elapsed_micros"] / 1000.0
+        rows.append({
+            "family": family,
+            "operation": operation,
+            "status": status,
+            "calls": calls,
+            "elapsed_ms": elapsed_ms,
+            "mean_elapsed_ms": elapsed_ms / calls if calls else 0.0,
+            "items": int(values["items"]),
+            "bytes": int(values["bytes"]),
+        })
+    return sorted(rows, key=lambda row: (-row["elapsed_ms"], row["family"], row["operation"]))
 
 inside_rust_storage_ms = runtime_top_level_us / 1000.0
+outside_storage_ms = max(0.0, duration_ms - inside_rust_storage_ms)
 accounting = {
     "scope": scope,
     "scenario_wall_ms": duration_ms,
@@ -133,11 +237,13 @@ accounting = {
     "inside_rust_fdb_kv_ms": runtime_kv_us / 1000.0,
     "measured_storage_wall_ms": inside_rust_storage_ms,
     "measured_storage_call_ms": runtime_top_level_us / 1000.0,
-    "duckdb_extension_outside_storage_ms": duration_ms - inside_rust_storage_ms,
-    "unaccounted_wall_ms": duration_ms - inside_rust_storage_ms,
+    "duckdb_extension_outside_storage_ms": outside_storage_ms,
+    "unaccounted_wall_ms": outside_storage_ms,
     "runtime_metric_calls": int(runtime_calls),
     "fdb_rows_read": int(runtime_kv_rows),
     "fdb_bytes_read": int(runtime_kv_bytes),
+    "macro_operation_costs": operation_cost_rows(False),
+    "micro_operation_costs": operation_cost_rows(True),
 }
 
 with open(output, "w", encoding="utf-8") as handle:
@@ -179,10 +285,24 @@ benchmark_runtime_scope_restore() {
 
 run_duckdb_sql() {
     local sql="$1"
+    local output_file pid rss_kib
+    output_file="$(mktemp)"
+    duckdb_peak_rss_kib=0
     set +e
-    duckdb_output="$("$DUCKDB_BIN" -unsigned -csv -batch 2>&1 <<<"$sql")"
+    "$DUCKDB_BIN" -unsigned -csv -batch >"$output_file" 2>&1 <<<"$sql" &
+    pid=$!
+    while kill -0 "$pid" 2>/dev/null; do
+        rss_kib="$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+        if [[ "$rss_kib" =~ ^[0-9]+$ ]] && ((rss_kib > duckdb_peak_rss_kib)); then
+            duckdb_peak_rss_kib="$rss_kib"
+        fi
+        sleep 0.05
+    done
+    wait "$pid"
     duckdb_status=$?
     set -e
+    duckdb_output="$(<"$output_file")"
+    rm -f "$output_file"
 }
 
 extract_label_from_output() {
@@ -246,6 +366,30 @@ case "$profile" in
         table_count=2
         target_data_bytes=0
         ;;
+    operational)
+        scan_rows=0
+        parallel_workers=1
+        table_count=3
+        target_data_bytes=0
+        production_commit_iterations="${AUX_DUCKLAKE_OPERATIONAL_COMMIT_ITERATIONS:-10}"
+        operational_trials="${AUX_DUCKLAKE_OPERATIONAL_TRIALS:-4}"
+        operational_validation="each"
+        [[ "$operational_trials" =~ ^[0-9]+$ ]] &&
+            ((operational_trials >= 2 && operational_trials % 2 == 0)) ||
+            fail "AUX_DUCKLAKE_OPERATIONAL_TRIALS must be an even integer of at least 2"
+        ;;
+    operational-growth)
+        scan_rows=0
+        parallel_workers=1
+        table_count=3
+        target_data_bytes=0
+        production_commit_iterations="${AUX_DUCKLAKE_OPERATIONAL_GROWTH_COMMIT_ITERATIONS:-100}"
+        operational_trials="${AUX_DUCKLAKE_OPERATIONAL_GROWTH_TRIALS:-2}"
+        operational_validation="final"
+        [[ "$operational_trials" =~ ^[0-9]+$ ]] &&
+            ((operational_trials >= 2 && operational_trials % 2 == 0)) ||
+            fail "AUX_DUCKLAKE_OPERATIONAL_TRIALS must be an even integer of at least 2"
+        ;;
     realistic)
         table_count="${AUX_DUCKLAKE_REALISTIC_TABLES:-50}"
         target_data_bytes="${AUX_DUCKLAKE_REALISTIC_TARGET_BYTES:-2147483648}"
@@ -264,10 +408,12 @@ case "$profile" in
         preload_batch_rows="${AUX_DUCKLAKE_VARIED_PRELOAD_BATCH_ROWS:-4096}"
         preload_workers="${AUX_DUCKLAKE_VARIED_PRELOAD_WORKERS:-4}"
         varied_churn_rounds="${AUX_DUCKLAKE_VARIED_CHURN_ROUNDS:-4}"
+        varied_tables_per_transaction="${AUX_DUCKLAKE_VARIED_TABLES_PER_TRANSACTION:-$(default_varied_tables_per_transaction "$table_count")}"
+        varied_churn_mode="${AUX_DUCKLAKE_VARIED_CHURN_MODE:-all}"
         varied_schema="${AUX_DUCKLAKE_VARIED_SCHEMA:-legacy}"
         varied_concurrent_writers="${AUX_DUCKLAKE_VARIED_CONCURRENT_WRITERS:-0}"
         ;;
-    *) fail "usage: $0 scan10|smoke|profile [scan_rows]|realistic|varied|inline" ;;
+    *) fail "usage: $0 scan10|smoke|profile [scan_rows]|realistic|varied|inline|operational|operational-growth" ;;
 esac
 
 case "${inline_flush_interval:-end}" in
@@ -280,7 +426,25 @@ case "${varied_schema:-legacy}" in
     *) fail "AUX_DUCKLAKE_VARIED_SCHEMA must be legacy, mixed, narrow, or wide" ;;
 esac
 
+case "${varied_churn_mode:-all}" in
+    all | mutate | insert | update | delete | latest | time_travel | join | join_time_travel) ;;
+    *)
+        fail \
+            "AUX_DUCKLAKE_VARIED_CHURN_MODE must be all, mutate, insert, update, delete, latest, time_travel, join, or join_time_travel"
+        ;;
+esac
+
+if [[ "$profile" == "varied" ]]; then
+    [[ "$varied_tables_per_transaction" =~ ^[1-9][0-9]*$ ]] ||
+        fail "AUX_DUCKLAKE_VARIED_TABLES_PER_TRANSACTION must be a positive integer"
+    ((varied_tables_per_transaction <= table_count)) ||
+        fail "AUX_DUCKLAKE_VARIED_TABLES_PER_TRANSACTION must not exceed table count"
+fi
+
 [[ -x "$DUCKDB_BIN" ]] || fail "missing $BUILD_PROFILE DuckDB binary: $DUCKDB_BIN"
+newer_ducklake_source="$(find "$DUCKLAKE_DIR/src" -type f -newer "$DUCKDB_BIN" -print -quit)"
+[[ -z "$newer_ducklake_source" ]] ||
+    fail "stale $BUILD_PROFILE DuckDB binary; run just ducklake-build-${BUILD_PROFILE}"
 if [[ "$BENCHMARK_BACKEND" != "fdb" ]]; then
     [[ -f "$POSTGRES_SCANNER_EXTENSION" ]] || fail "missing $BUILD_PROFILE postgres_scanner helper extension: $POSTGRES_SCANNER_EXTENSION"
 fi
@@ -289,8 +453,12 @@ mkdir -p "$OUT_DIR"
 
 build_fdb_runtime() {
     local features="foundationdb"
-    if [[ -n "${AUX_DUCKLAKE_BENCHMARK_RUNTIME_EXTRA_FEATURES:-}" ]]; then
-        features="$features,${AUX_DUCKLAKE_BENCHMARK_RUNTIME_EXTRA_FEATURES}"
+    if [[ -n "$RUNTIME_METRICS_PATH_OVERRIDE" &&
+        ",$RUNTIME_EXTRA_FEATURES," != *",runtime-metrics,"* ]]; then
+        features="$features,runtime-metrics"
+    fi
+    if [[ -n "$RUNTIME_EXTRA_FEATURES" ]]; then
+        features="$features,$RUNTIME_EXTRA_FEATURES"
     fi
     AUX_DUCKLAKE_FDB_LIVE=1 "$ROOT_DIR/scripts/cargo_with_sccache.sh" build -q --release \
         -p ducklake-catalog --no-default-features --features "$features"
@@ -316,6 +484,7 @@ postgres_session_sql() {
 LOAD ducklake;
 LOAD $(sql_literal "$POSTGRES_SCANNER_EXTENSION");
 SET ducklake_max_retry_count = $retry_count;
+SET memory_limit = $(sql_literal "$BENCHMARK_MEMORY_LIMIT");
 SQL
 }
 
@@ -344,6 +513,7 @@ fdb_prepare_sql() {
     cat <<SQL
 LOAD ducklake;
 SET ducklake_max_retry_count = $retry_count;
+SET memory_limit = $(sql_literal "$BENCHMARK_MEMORY_LIMIT");
 SQL
 }
 
@@ -486,6 +656,98 @@ SELECT 'inline_after_flush=' || count(*) || ',' || coalesce(sum(id), 0) FROM dl.
 SQL
 }
 
+production_commit_schema_sql() {
+    cat <<'SQL'
+SET VARIABLE before_operational_create = (SELECT id FROM ducklake_current_snapshot('dl'));
+SET VARIABLE before_operational_create_rows = (SELECT count(*) FROM ducklake_snapshots('dl'));
+SET VARIABLE operational_create_started_micros = epoch_us(current_localtimestamp());
+BEGIN TRANSACTION;
+CREATE TABLE dl.main.production_events(
+    id BIGINT,
+    tenant_id VARCHAR,
+    payload VARCHAR
+);
+CREATE TABLE dl.main.production_checkpoint(
+    source VARCHAR,
+    sequence BIGINT
+);
+CREATE TABLE dl.main.production_memberships(
+    event_id BIGINT,
+    role VARCHAR,
+    sequence BIGINT
+);
+INSERT INTO dl.main.production_checkpoint VALUES ('global', 0);
+COMMIT;
+SET VARIABLE operational_create_ended_micros = epoch_us(current_localtimestamp());
+SELECT 'operational_create=' ||
+       (SELECT count(*) FROM duckdb_tables() WHERE database_name = 'dl' AND schema_name = 'main' AND table_name LIKE 'production_%') || ',' ||
+       (SELECT count(*) FROM dl.main.production_checkpoint) || ',' ||
+       ((SELECT id FROM ducklake_current_snapshot('dl')) -
+        getvariable('before_operational_create')::BIGINT) || ',' ||
+       ((SELECT count(*) FROM ducklake_snapshots('dl')) -
+        getvariable('before_operational_create_rows')::BIGINT);
+SELECT 'operational_create_latency_micros=' ||
+       (getvariable('operational_create_ended_micros')::BIGINT -
+        getvariable('operational_create_started_micros')::BIGINT);
+SQL
+}
+
+production_commit_sql() {
+    local iteration="$1"
+    local result_label="${2:-production_commit}"
+    local validation="${3:-each}"
+    local first_id=$(((iteration - 1) * 101 + 1))
+    local end_id=$((first_id + 101))
+    local prior_mutations=""
+    if [[ "$iteration" -gt 1 ]]; then
+        local previous_first_id=$((first_id - 101))
+        prior_mutations="
+UPDATE dl.main.production_events
+SET payload = repeat('u', 800)
+WHERE id >= $previous_first_id AND id < $first_id;
+DELETE FROM dl.main.production_events WHERE id = $previous_first_id;
+DELETE FROM dl.main.production_memberships WHERE sequence = $((iteration - 1));"
+    fi
+    if [[ "$validation" == "each" ]]; then
+        cat <<SQL
+SET VARIABLE before_production_commit = (SELECT id FROM ducklake_current_snapshot('dl'));
+SET VARIABLE before_production_commit_rows = (SELECT count(*) FROM ducklake_snapshots('dl'));
+SQL
+    fi
+    cat <<SQL
+SET VARIABLE production_commit_started_micros = epoch_us(current_localtimestamp());
+BEGIN TRANSACTION;
+$prior_mutations
+INSERT INTO dl.main.production_events
+SELECT i, 'tenant_' || (i % 20)::VARCHAR, repeat('x', 800)
+FROM range($first_id, $end_id) rows(i);
+INSERT INTO dl.main.production_memberships
+SELECT i, CASE WHEN i % 2 = 0 THEN 'member' ELSE 'admin' END, $iteration
+FROM range($first_id, $((first_id + 50))) rows(i);
+DELETE FROM dl.main.production_checkpoint WHERE source = 'global';
+INSERT INTO dl.main.production_checkpoint VALUES ('global', $iteration);
+COMMIT;
+SET VARIABLE production_commit_ended_micros = epoch_us(current_localtimestamp());
+SELECT 'production_commit_latency_micros_$iteration=' ||
+       (getvariable('production_commit_ended_micros')::BIGINT -
+        getvariable('production_commit_started_micros')::BIGINT);
+SQL
+    if [[ "$validation" == "each" ]]; then
+        cat <<SQL
+SELECT '$result_label=' || count(*) || ',' ||
+       coalesce(sum(id), 0) || ',' ||
+       (SELECT count(*) FROM dl.main.production_memberships) || ',' ||
+       (SELECT coalesce(sum(event_id), 0) FROM dl.main.production_memberships) || ',' ||
+       (SELECT sequence FROM dl.main.production_checkpoint WHERE source = 'global') || ',' ||
+       ((SELECT id FROM ducklake_current_snapshot('dl')) -
+        getvariable('before_production_commit')::BIGINT) || ',' ||
+       ((SELECT count(*) FROM ducklake_snapshots('dl')) -
+        getvariable('before_production_commit_rows')::BIGINT)
+FROM dl.main.production_events;
+SQL
+    fi
+}
+
 parallel_worker_sql() {
     cat <<'SQL'
 SELECT count(*), coalesce(sum(id), 0) FROM dl.main.file_fact;
@@ -537,6 +799,407 @@ backend_artifact() {
 JSON
 }
 
+operational_artifact() {
+    local backend="$1" output="$2" generated="$3" elapsed="$4"
+    local expected="$5" latency_json="$6" trial="$7" order_position="$8"
+    local create_latency_ms="$9" accounting_file="${10}"
+    local accounting_json
+    accounting_json="$(cat "$accounting_file")"
+    cat > "$output" <<JSON
+{
+  "artifact": "ducklake-operational-commit-benchmark",
+  "profile": "$profile",
+  "generated_at_micros": $generated,
+  "elapsed_ms": $elapsed,
+  "trial": $trial,
+  "order_position": $order_position,
+  "fixture": {
+    "backend": "$backend",
+    "duckdb_build_profile": "$BUILD_PROFILE",
+    "commit_iterations": $production_commit_iterations,
+    "user_rows_per_commit": 101,
+    "membership_rows_per_commit": 50,
+    "payload_bytes": 800,
+    "data_inlining_row_limit": 100,
+    "validation": "$operational_validation",
+    "operations": [
+      "create_tables",
+      "insert_file_backed_rows",
+      "update_file_backed_rows",
+      "delete_file_backed_rows",
+      "insert_inline_rows",
+      "delete_inline_rows",
+      "replace_inline_checkpoint"
+    ]
+  },
+  "result": "$expected",
+  "create_transaction_wall_ms": $create_latency_ms,
+  "transaction_wall_ms": $latency_json,
+  "session_command_wall_ms": $elapsed,
+  "accounting": $accounting_json
+}
+JSON
+}
+
+latency_summary_json() {
+    local samples_file="$1"
+    python3 - "$samples_file" <<'PY'
+import json
+import math
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    observations = [
+        {"iteration": int(iteration), "value_ms": float(value)}
+        for line in handle
+        if line.strip()
+        for iteration, value in [line.split()]
+    ]
+samples = sorted(observation["value_ms"] for observation in observations)
+
+
+def percentile(fraction):
+    return samples[max(0, math.ceil(len(samples) * fraction) - 1)]
+
+
+print(json.dumps({
+    "samples": len(samples),
+    "p50": percentile(0.50),
+    "p90": percentile(0.90),
+    "p99": percentile(0.99),
+    "max": samples[-1],
+    "values_ms": samples,
+    "iterations": observations,
+}))
+PY
+}
+
+combine_operational_artifacts() {
+    local backend="$1" output="$2"
+    shift 2
+    python3 - "$backend" "$output" "$@" <<'PY'
+import json
+import math
+import sys
+
+backend, output, *paths = sys.argv[1:]
+trials = []
+values = []
+for path in paths:
+    with open(path, encoding="utf-8") as handle:
+        trial = json.load(handle)
+    trials.append({
+        "trial": trial["trial"],
+        "order_position": trial["order_position"],
+        "session_command_wall_ms": trial["session_command_wall_ms"],
+        "create_transaction_wall_ms": trial["create_transaction_wall_ms"],
+        "transaction_wall_ms": trial["transaction_wall_ms"],
+        "accounting": trial["accounting"],
+    })
+    values.extend(trial["transaction_wall_ms"]["values_ms"])
+values.sort()
+
+
+def percentile_value(samples, fraction):
+    return samples[max(0, math.ceil(len(samples) * fraction) - 1)]
+
+
+def percentile(fraction):
+    return percentile_value(values, fraction)
+
+
+def chronological_growth(trial):
+    observations = trial["transaction_wall_ms"]["iterations"]
+    window = max(1, len(observations) // 10)
+    first = observations[:window]
+    last = observations[-window:]
+    first_mean = sum(item["value_ms"] for item in first) / len(first)
+    last_mean = sum(item["value_ms"] for item in last) / len(last)
+    return {
+        "trial": trial["trial"],
+        "window_samples": window,
+        "first_decile_mean_ms": first_mean,
+        "last_decile_mean_ms": last_mean,
+        "last_first_ratio": last_mean / first_mean,
+    }
+
+
+growth = [chronological_growth(trial) for trial in trials]
+latest = json.load(open(paths[-1], encoding="utf-8"))
+latest["generated_at_micros"] = max(
+    json.load(open(path, encoding="utf-8"))["generated_at_micros"]
+    for path in paths
+)
+latest["elapsed_ms"] = sum(trial["session_command_wall_ms"] for trial in trials)
+latest["trial"] = None
+latest["order_position"] = None
+latest["transaction_wall_ms"] = {
+    "samples": len(values),
+    "p50": percentile(0.50),
+    "p90": percentile(0.90),
+    "p99": percentile(0.99),
+    "max": values[-1],
+    "values_ms": values,
+}
+latest["create_transaction_wall_ms"] = {
+    "samples": len(trials),
+    "p50": percentile_value(
+        sorted(trial["create_transaction_wall_ms"] for trial in trials), 0.50
+    ),
+    "p90": percentile_value(
+        sorted(trial["create_transaction_wall_ms"] for trial in trials), 0.90
+    ),
+    "p99": percentile_value(
+        sorted(trial["create_transaction_wall_ms"] for trial in trials), 0.99
+    ),
+    "max": max(trial["create_transaction_wall_ms"] for trial in trials),
+    "values_ms": sorted(trial["create_transaction_wall_ms"] for trial in trials),
+}
+latest["trials"] = trials
+latest["comparison_method"] = {
+    "isolated_catalog_per_trial": True,
+    "alternating_backend_order": len({trial["order_position"] for trial in trials}) > 1,
+}
+latest["chronological_growth"] = {
+    "method": "last decile mean divided by first decile mean within each isolated trial",
+    "trials": growth,
+    "max_last_first_ratio": max(item["last_first_ratio"] for item in growth),
+}
+
+
+def aggregate_operation_costs(field):
+    costs = {}
+    for trial in trials:
+        for row in trial["accounting"][field]:
+            key = (row["family"], row["operation"], row["status"])
+            total = costs.setdefault(key, {
+                "family": row["family"],
+                "operation": row["operation"],
+                "status": row["status"],
+                "calls": 0,
+                "elapsed_ms": 0.0,
+                "items": 0,
+                "bytes": 0,
+            })
+            for name in ("calls", "elapsed_ms", "items", "bytes"):
+                total[name] += row[name]
+    for row in costs.values():
+        row["mean_elapsed_ms"] = (
+            row["elapsed_ms"] / row["calls"] if row["calls"] else 0.0
+        )
+    return sorted(
+        costs.values(),
+        key=lambda row: (-row["elapsed_ms"], row["family"], row["operation"]),
+    )
+
+
+accounting_fields = [
+    "scenario_wall_ms",
+    "inside_rust_storage_ms",
+    "inside_rust_storage_call_ms",
+    "rust_runtime_reported_storage_ms",
+    "inside_rust_nested_measurements_ms",
+    "inside_rust_fdb_kv_ms",
+    "measured_storage_wall_ms",
+    "measured_storage_call_ms",
+    "duckdb_extension_outside_storage_ms",
+    "unaccounted_wall_ms",
+    "runtime_metric_calls",
+    "fdb_rows_read",
+    "fdb_bytes_read",
+]
+latest["accounting"] = {
+    field: sum(trial["accounting"][field] for trial in trials)
+    for field in accounting_fields
+}
+latest["accounting"]["scope"] = "all_operational_trials"
+latest["accounting"]["macro_operation_costs"] = aggregate_operation_costs(
+    "macro_operation_costs"
+)
+latest["accounting"]["micro_operation_costs"] = aggregate_operation_costs(
+    "micro_operation_costs"
+)
+with open(output, "w", encoding="utf-8") as handle:
+    json.dump(latest, handle, indent=2)
+    handle.write("\n")
+PY
+}
+
+assert_operational_growth() {
+    local backend="$1" artifact="$2"
+    local maximum_ratio="${AUX_DUCKLAKE_OPERATIONAL_GROWTH_MAX_DECILE_RATIO:-1.5}"
+    python3 - "$backend" "$artifact" "$maximum_ratio" <<'PY'
+import json
+import sys
+
+backend, artifact, maximum_ratio = sys.argv[1:4]
+with open(artifact, encoding="utf-8") as handle:
+    result = json.load(handle)
+trials = result["chronological_growth"]["trials"]
+if not trials or min(trial["window_samples"] for trial in trials) < 2:
+    raise SystemExit(0)
+actual = max(trial["last_first_ratio"] for trial in trials)
+maximum = float(maximum_ratio)
+if actual > maximum:
+    raise SystemExit(
+        f"{backend} operational commit growth exceeded {maximum:.3f}: "
+        f"last/first decile ratio {actual:.3f}"
+    )
+PY
+}
+
+assert_production_commit_latency() {
+    local backend="$1" summary_json="$2"
+    local default_maximum_ms=2000
+    if [[ "$profile" == "operational" || "$profile" == "operational-growth" ]]; then
+        default_maximum_ms=5000
+    fi
+    local maximum_ms="${AUX_DUCKLAKE_PRODUCTION_COMMIT_MAX_MS:-$default_maximum_ms}"
+    python3 - "$backend" "$summary_json" "$maximum_ms" <<'PY'
+import json
+import sys
+
+backend, summary_json, maximum_ms = sys.argv[1:4]
+actual = json.loads(summary_json)["max"]
+maximum = float(maximum_ms)
+if actual > maximum:
+    raise SystemExit(
+        f"{backend} production-shaped commit exceeded {maximum:.3f} ms: {actual:.3f} ms"
+    )
+PY
+}
+
+run_operational_backend() {
+    local backend="$1" output="$2" tmp_dir="$3" trial="$4" order_position="$5"
+    local data_dir="$tmp_dir/data"
+    mkdir -p "$data_dir"
+
+    local prepare session_prepare attach cleanup
+    if [[ "$backend" == "postgres" ]]; then
+        local dsn="${AUX_DUCKLAKE_POSTGRES_DSN:-dbname=postgres}"
+        local schema="ducklake_operational_$(date +%s)_$$_${RANDOM}"
+        unset AUX_DUCKLAKE_RUNTIME_CATALOG_IDENTITY || true
+        prepare="$(postgres_prepare_sql "$dsn" "$schema")"
+        session_prepare="$(postgres_session_sql)"
+        attach="$(postgres_attach_sql "$dsn" "$schema" "$data_dir" 100)"
+        cleanup="$(postgres_cleanup_sql "$dsn" "$schema")"
+    else
+        local fdb_prefix="aux-ducklake-benchmark/operational/$(date +%s)/$$/${backend}/${RANDOM}/"
+        export AUX_DUCKLAKE_CATALOG_BACKEND=fdb
+        export AUX_DUCKLAKE_FDB_PREFIX="$fdb_prefix"
+        export AUX_DUCKLAKE_RUNTIME_LIBRARY="$FDB_RUNTIME_LIBRARY"
+        export AUX_DUCKLAKE_RUNTIME_CATALOG_IDENTITY="$fdb_prefix"
+        configure_fdb_runtime_metrics "$tmp_dir"
+        prepare="$(fdb_prepare_sql)"
+        session_prepare="$prepare"
+        attach="$(fdb_attach_sql "$tmp_dir/metadata.duckdb" "$data_dir" 100)"
+        cleanup=""
+    fi
+
+    local started ended elapsed workload_sql
+    local runtime_before="$tmp_dir/runtime-before.prom"
+    local runtime_after="$tmp_dir/runtime-after.prom"
+    local accounting_file="$tmp_dir/runtime-accounting.json"
+    local runtime_scope="operational_trial_$trial"
+    copy_metric_snapshot "${AUX_DUCKLAKE_BENCHMARK_RUNTIME_METRICS_PATH:-}" "$runtime_before"
+    benchmark_runtime_scope_enter "$runtime_scope"
+    workload_sql="$prepare
+$attach
+$(production_commit_schema_sql)"
+    if [[ "$operational_validation" == "final" ]]; then
+        workload_sql+="
+SET VARIABLE before_operational_growth = (SELECT id FROM ducklake_current_snapshot('dl'));
+SET VARIABLE before_operational_growth_rows = (SELECT count(*) FROM ducklake_snapshots('dl'));"
+    fi
+    local iteration
+    for ((iteration = 1; iteration <= production_commit_iterations; iteration++)); do
+        workload_sql+="
+$(production_commit_sql "$iteration" "production_commit_$iteration" "$operational_validation")"
+    done
+    if [[ "$operational_validation" == "final" ]]; then
+        workload_sql+="
+SELECT 'operational_growth_final=' || count(*) || ',' ||
+       coalesce(sum(id), 0) || ',' ||
+       (SELECT count(*) FROM dl.main.production_memberships) || ',' ||
+       (SELECT coalesce(sum(event_id), 0) FROM dl.main.production_memberships) || ',' ||
+       (SELECT sequence FROM dl.main.production_checkpoint WHERE source = 'global') || ',' ||
+       ((SELECT id FROM ducklake_current_snapshot('dl')) -
+        getvariable('before_operational_growth')::BIGINT) || ',' ||
+       ((SELECT count(*) FROM ducklake_snapshots('dl')) -
+        getvariable('before_operational_growth_rows')::BIGINT)
+FROM dl.main.production_events;"
+    fi
+    workload_sql+="
+DETACH dl;"
+
+    started="$(now_micros)"
+    run_duckdb_sql "$workload_sql"
+    ended="$(now_micros)"
+    elapsed="$(elapsed_ms "$started" "$ended")"
+    copy_metric_snapshot "${AUX_DUCKLAKE_BENCHMARK_RUNTIME_METRICS_PATH:-}" "$runtime_after"
+    benchmark_runtime_scope_restore
+    write_metric_accounting \
+        "$accounting_file" "$runtime_scope" "$elapsed" "$runtime_before" "$runtime_after"
+    [[ "$duckdb_status" -eq 0 ]] || {
+        printf '%s\n' "$duckdb_output" >&2
+        fail "$backend operational workload failed"
+    }
+    assert_label "$duckdb_output" "operational_create" "3,1,1,1"
+    local create_elapsed_micros create_elapsed_ms
+    create_elapsed_micros="$(
+        extract_label_from_output "$duckdb_output" "operational_create_latency_micros"
+    )"
+    [[ "$create_elapsed_micros" =~ ^[0-9]+$ ]] ||
+        fail "$backend operational create has no transaction timing"
+    create_elapsed_ms="$(python3 - "$create_elapsed_micros" <<'PY'
+import sys
+print(f"{int(sys.argv[1]) / 1000:.3f}")
+PY
+)"
+
+    local samples_file="$tmp_dir/operational-commit-latencies"
+    : > "$samples_file"
+    local commit_elapsed_micros
+    local expected_count expected_sum deleted_sum membership_sum expected result_label
+    for ((iteration = 1; iteration <= production_commit_iterations; iteration++)); do
+        expected_count=$((iteration * 101 - iteration + 1))
+        deleted_sum=$(((iteration - 1) + 101 * (iteration - 2) * (iteration - 1) / 2))
+        expected_sum=$((iteration * 101 * (iteration * 101 + 1) / 2 - deleted_sum))
+        membership_sum=$((25 * (2 * ((iteration - 1) * 101 + 1) + 49)))
+        expected="$expected_count,$expected_sum,50,$membership_sum,$iteration,1,1"
+        if [[ "$operational_validation" == "each" ]]; then
+            result_label="production_commit_$iteration"
+            assert_label "$duckdb_output" "$result_label" "$expected"
+        fi
+        commit_elapsed_micros="$(
+            extract_label_from_output "$duckdb_output" "production_commit_latency_micros_$iteration"
+        )"
+        [[ "$commit_elapsed_micros" =~ ^[0-9]+$ ]] ||
+            fail "$backend operational commit $iteration has no transaction timing"
+        python3 - "$iteration" "$commit_elapsed_micros" >> "$samples_file" <<'PY'
+import sys
+print(f"{sys.argv[1]} {int(sys.argv[2]) / 1000:.3f}")
+PY
+    done
+    if [[ "$operational_validation" == "final" ]]; then
+        assert_label \
+            "$duckdb_output" \
+            "operational_growth_final" \
+            "${expected%,1,1},$production_commit_iterations,$production_commit_iterations"
+    fi
+
+    local latency_json
+    latency_json="$(latency_summary_json "$samples_file")"
+    assert_production_commit_latency "$backend" "$latency_json"
+    if [[ -n "$cleanup" ]]; then
+        run_duckdb_sql "$session_prepare
+$cleanup"
+    fi
+    operational_artifact \
+        "$backend" "$output" "$ended" "$elapsed" "$expected" "$latency_json" "$trial" \
+        "$order_position" "$create_elapsed_ms" "$accounting_file"
+}
+
 run_backend() {
     local backend="$1" output="$2" tmp_dir="$3"
     local data_dir="$tmp_dir/data"
@@ -558,9 +1221,7 @@ run_backend() {
         export AUX_DUCKLAKE_FDB_PREFIX="$fdb_prefix"
         export AUX_DUCKLAKE_RUNTIME_LIBRARY="$FDB_RUNTIME_LIBRARY"
         export AUX_DUCKLAKE_RUNTIME_CATALOG_IDENTITY="$fdb_prefix"
-        if [[ -z "${AUX_DUCKLAKE_BENCHMARK_RUNTIME_METRICS_PATH:-}" ]]; then
-            unset AUX_DUCKLAKE_BENCHMARK_RUNTIME_METRICS_PATH || true
-        fi
+        configure_fdb_runtime_metrics "$tmp_dir"
         prepare="$(fdb_prepare_sql)"
         session_prepare="$prepare"
         attach_file="$(fdb_attach_sql "$tmp_dir/metadata.duckdb" "$data_dir" 0)"
@@ -606,6 +1267,7 @@ DETACH dl;
     done
     for index in "${!worker_pids[@]}"; do
         if ! wait "${worker_pids[$index]}"; then
+            benchmark_failure_output="$(<"${worker_outputs[$index]}")"
             cat "${worker_outputs[$index]}" >&2
             fail "$backend parallel worker $index failed"
         fi
@@ -680,6 +1342,8 @@ batch = {
     "duration_ms": float(duration),
     "labels": labels,
 }
+if "benchmark_peak_rss_kib" in labels:
+    batch["peak_rss_kib"] = int(labels.pop("benchmark_peak_rss_kib"))
 if accounting_file:
     try:
         with open(accounting_file, "r", encoding="utf-8") as handle:
@@ -696,22 +1360,25 @@ realistic_artifact() {
     local backend="$1" output="$2" generated="$3" elapsed="$4" batches_file="$5"
     local schema_columns
     schema_columns="$(realistic_schema_column_count)"
-    python3 - "$backend" "$output" "$generated" "$elapsed" "$batches_file" "$profile" "$BUILD_PROFILE" "$scan_rows" "$parallel_workers" "$table_count" "$target_data_bytes" "${preload_batch_rows:-0}" "${preload_workers:-0}" "${varied_schema:-legacy}" "${realistic_row_bytes:-4096}" "${varied_concurrent_writers:-0}" "$schema_columns" <<'PY'
+    python3 - "$backend" "$output" "$generated" "$elapsed" "$batches_file" "$profile" "$BUILD_PROFILE" "$scan_rows" "$parallel_workers" "$table_count" "$target_data_bytes" "${preload_batch_rows:-0}" "${preload_workers:-0}" "${varied_schema:-legacy}" "${realistic_row_bytes:-4096}" "${varied_concurrent_writers:-0}" "$schema_columns" "${varied_churn_mode:-all}" "$BENCHMARK_MEMORY_LIMIT" "${varied_churn_rounds:-0}" "${varied_tables_per_transaction:-0}" <<'PY'
 import json
 import sys
 
-backend, output, generated, elapsed, batches_file, profile, build_profile, rows, workers, tables, target_bytes, preload_batch_rows, preload_workers, schema_shape, payload_bytes, concurrent_writers, schema_columns = sys.argv[1:18]
+backend, output, generated, elapsed, batches_file, profile, build_profile, rows, workers, tables, target_bytes, preload_batch_rows, preload_workers, schema_shape, payload_bytes, concurrent_writers, schema_columns, churn_mode, memory_limit, churn_rounds, tables_per_transaction = sys.argv[1:22]
 with open(batches_file, "r", encoding="utf-8") as handle:
     batches = [json.loads(line) for line in handle if line.strip()]
 component_batches = [batch["name"] for batch in batches]
+peak_rss_kib = max((batch.get("peak_rss_kib", 0) for batch in batches), default=0)
 artifact = {
     "artifact": "ducklake-fdb-feature-parity-realistic-component-benchmark",
     "profile": profile,
     "generated_at_micros": int(generated),
     "elapsed_ms": float(elapsed),
+    "peak_rss_kib": peak_rss_kib,
     "fixture": {
         "backend": backend,
         "duckdb_build_profile": build_profile,
+        "duckdb_memory_limit": memory_limit,
         "same_sql_for_backends": True,
         "table_count": int(tables),
         "rows_per_table": int(rows),
@@ -724,6 +1391,10 @@ artifact = {
         "schema_shape": schema_shape,
         "payload_bytes": int(payload_bytes),
         "concurrent_writers": int(concurrent_writers),
+        "churn_mode": churn_mode,
+        "churn_rounds": int(churn_rounds),
+        "mutation_tables_per_transaction": int(tables_per_transaction),
+        "mutation_transaction_scope": "table_batch",
         "component_batches": component_batches,
     },
     "batches": batches,
@@ -731,6 +1402,25 @@ artifact = {
 with open(output, "w", encoding="utf-8") as handle:
     json.dump(artifact, handle, indent=2, sort_keys=True)
     handle.write("\n")
+PY
+}
+
+assert_realistic_peak_rss() {
+    local backend="$1" artifact="$2"
+    [[ "$profile" == "varied" ]] || return 0
+    local maximum="${AUX_DUCKLAKE_VARIED_MAX_PEAK_RSS_KIB:-2097152}"
+    python3 - "$backend" "$artifact" "$maximum" <<'PY'
+import json
+import sys
+
+backend, artifact_path, maximum = sys.argv[1], sys.argv[2], int(sys.argv[3])
+with open(artifact_path, "r", encoding="utf-8") as handle:
+    artifact = json.load(handle)
+observed = int(artifact["peak_rss_kib"])
+if observed > maximum:
+    raise SystemExit(
+        f"{backend} varied peak RSS {observed} KiB exceeds guardrail {maximum} KiB"
+    )
 PY
 }
 
@@ -800,7 +1490,7 @@ DETACH dl;
     ended="$(now_micros)"
     elapsed="$(elapsed_ms "$started" "$ended")"
     write_metric_accounting "$accounting_file" "$batch_name" "$elapsed" "$runtime_before" "$runtime_after"
-    printf '%s\n' "$duckdb_output" > "$output_file"
+    printf '%s\nbenchmark_peak_rss_kib=%s\n' "$duckdb_output" "$duckdb_peak_rss_kib" > "$output_file"
     [[ "$duckdb_status" -eq 0 ]] || {
         printf '%s\n' "$duckdb_output" >&2
         fail "$backend realistic batch $batch_name failed"
@@ -831,9 +1521,7 @@ run_inline_micro_backend() {
         export AUX_DUCKLAKE_FDB_PREFIX="$fdb_prefix"
         export AUX_DUCKLAKE_RUNTIME_LIBRARY="$FDB_RUNTIME_LIBRARY"
         export AUX_DUCKLAKE_RUNTIME_CATALOG_IDENTITY="$fdb_prefix"
-        if [[ -z "${AUX_DUCKLAKE_BENCHMARK_RUNTIME_METRICS_PATH:-}" ]]; then
-            unset AUX_DUCKLAKE_BENCHMARK_RUNTIME_METRICS_PATH || true
-        fi
+        configure_fdb_runtime_metrics "$tmp_dir"
         prepare="$(fdb_prepare_sql)"
         session_prepare="$prepare"
         attach_file="$(fdb_attach_sql "$tmp_dir/metadata.duckdb" "$data_dir" 0)"
@@ -880,6 +1568,7 @@ run_realistic_preload() {
     local runtime_before runtime_after accounting_file
     local worker_pids=()
     local worker_outputs=()
+    local preload_peak_rss_kib=0
 
     benchmark_runtime_scope_enter preload
     runtime_before="$(mktemp)"
@@ -898,6 +1587,7 @@ DETACH dl;
     }
     schema_out="$tmp_dir/preload-schema.out"
     printf '%s\n' "$duckdb_output" > "$schema_out"
+    preload_peak_rss_kib="$duckdb_peak_rss_kib"
 
     : > "$output_file"
     cat "$schema_out" >> "$output_file"
@@ -918,8 +1608,27 @@ DETACH dl;
         worker_pids+=("$!")
         worker_outputs+=("$worker_out")
     done
+    local alive aggregate_rss_kib worker_rss_kib
+    while true; do
+        alive=0
+        aggregate_rss_kib=0
+        for pid in "${worker_pids[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                alive=1
+                worker_rss_kib="$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+                if [[ "$worker_rss_kib" =~ ^[0-9]+$ ]]; then
+                    aggregate_rss_kib=$((aggregate_rss_kib + worker_rss_kib))
+                fi
+            fi
+        done
+        ((aggregate_rss_kib > preload_peak_rss_kib)) &&
+            preload_peak_rss_kib="$aggregate_rss_kib"
+        ((alive == 1)) || break
+        sleep 0.05
+    done
     for index in "${!worker_pids[@]}"; do
         if ! wait "${worker_pids[$index]}"; then
+            benchmark_failure_output="$(<"${worker_outputs[$index]}")"
             cat "${worker_outputs[$index]}" >&2
             fail "$backend realistic preload worker $index failed"
         fi
@@ -928,6 +1637,7 @@ DETACH dl;
     printf 'realistic_preload=%s,%s,%s,%s\n' "$table_count" "$scan_rows" "$((table_count * scan_rows))" "$((table_count * scan_rows * realistic_row_bytes))" >> "$output_file"
     printf 'realistic_preload_parallelism=%s\n' "$preload_workers" >> "$output_file"
     printf 'realistic_preload_batch_rows=%s\n' "$preload_batch_rows" >> "$output_file"
+    printf 'benchmark_peak_rss_kib=%s\n' "$preload_peak_rss_kib" >> "$output_file"
     copy_metric_snapshot "${AUX_DUCKLAKE_BENCHMARK_RUNTIME_METRICS_PATH:-}" "$runtime_after"
     benchmark_runtime_scope_restore
     ended="$(now_micros)"
@@ -976,6 +1686,7 @@ await_concurrent_workers() {
     local backend="$1" output_file="$2" index
     for index in "${!worker_pids[@]}"; do
         if ! wait "${worker_pids[$index]}"; then
+            benchmark_failure_output="$(<"${worker_outputs[$index]}")"
             cat "${worker_outputs[$index]}" >&2
             fail "$backend concurrent read/write worker $index failed"
         fi
@@ -1046,9 +1757,7 @@ run_realistic_backend() {
         export AUX_DUCKLAKE_FDB_PREFIX="$fdb_prefix"
         export AUX_DUCKLAKE_RUNTIME_LIBRARY="$FDB_RUNTIME_LIBRARY"
         export AUX_DUCKLAKE_RUNTIME_CATALOG_IDENTITY="$fdb_prefix"
-        if [[ -z "${AUX_DUCKLAKE_BENCHMARK_RUNTIME_METRICS_PATH:-}" ]]; then
-            unset AUX_DUCKLAKE_BENCHMARK_RUNTIME_METRICS_PATH || true
-        fi
+        configure_fdb_runtime_metrics "$tmp_dir"
         prepare="$(fdb_prepare_sql)"
         session_prepare="$prepare"
         attach_file="$(fdb_attach_sql "$tmp_dir/metadata.duckdb" "$data_dir" 0)"
@@ -1069,7 +1778,7 @@ run_realistic_backend() {
         : > "$batches_file"
         started="$(now_micros)"
         batch_out="$tmp_dir/mutation_churn.out"
-        run_realistic_batch "$backend" "mutation_churn" "$batch_out" "$(varied_churn_sql "$table_count" "$scan_rows" "$varied_churn_rounds")" "$session_prepare" "$attach_file"
+        run_realistic_batch "$backend" "mutation_churn" "$batch_out" "$(varied_churn_sql "$table_count" "$scan_rows" "$varied_churn_rounds" "$varied_churn_mode" "$varied_tables_per_transaction")" "$session_prepare" "$attach_file"
         append_realistic_batch_artifact "$batches_file" "mutation_churn" "$REALISTIC_LAST_BATCH_MS" "$batch_out" "$REALISTIC_LAST_ACCOUNTING_FILE"
 
         if [[ -n "$cleanup" ]]; then
@@ -1107,7 +1816,7 @@ $(varied_join_query_sql "$table_count" "varied_join_snapshot")" "$session_prepar
         append_realistic_batch_artifact "$batches_file" "join_queries" "$REALISTIC_LAST_BATCH_MS" "$batch_out" "$REALISTIC_LAST_ACCOUNTING_FILE"
 
         batch_out="$tmp_dir/mutation_churn.out"
-        run_realistic_batch "$backend" "mutation_churn" "$batch_out" "$(varied_churn_sql "$table_count" "$scan_rows" "$varied_churn_rounds")" "$session_prepare" "$attach_file"
+        run_realistic_batch "$backend" "mutation_churn" "$batch_out" "$(varied_churn_sql "$table_count" "$scan_rows" "$varied_churn_rounds" "$varied_churn_mode" "$varied_tables_per_transaction")" "$session_prepare" "$attach_file"
         append_realistic_batch_artifact "$batches_file" "mutation_churn" "$REALISTIC_LAST_BATCH_MS" "$batch_out" "$REALISTIC_LAST_ACCOUNTING_FILE"
 
         if [[ "$varied_concurrent_writers" -gt 0 ]]; then
@@ -1157,6 +1866,7 @@ DETACH dl;
     done
     for index in "${!worker_pids[@]}"; do
         if ! wait "${worker_pids[$index]}"; then
+            benchmark_failure_output="$(<"${worker_outputs[$index]}")"
             cat "${worker_outputs[$index]}" >&2
             fail "$backend realistic parallel worker $index failed"
         fi
@@ -1178,6 +1888,7 @@ $cleanup"
     ended="$(now_micros)"
     elapsed="$(elapsed_ms "$started" "$ended")"
     realistic_artifact "$backend" "$output" "$ended" "$elapsed" "$batches_file"
+    assert_realistic_peak_rss "$backend" "$output"
     echo "ducklake_fdb_feature_parity_${backend}_realistic_benchmark_artifact=$output"
 }
 
@@ -1217,9 +1928,57 @@ case "$profile" in
         fdb_output="$OUT_DIR/fdb-inline-latest.json"
         postgres_output="$OUT_DIR/postgres-inline-latest.json"
         ;;
+    operational)
+        fdb_output="$OUT_DIR/fdb-operational-latest.json"
+        postgres_output="$OUT_DIR/postgres-operational-latest.json"
+        ;;
+    operational-growth)
+        fdb_output="$OUT_DIR/fdb-operational-growth-latest.json"
+        postgres_output="$OUT_DIR/postgres-operational-growth-latest.json"
+        ;;
 esac
 
-if [[ "$profile" == "inline" ]]; then
+if [[ "$profile" == "operational" || "$profile" == "operational-growth" ]]; then
+    fdb_trials=()
+    postgres_trials=()
+    for ((trial = 1; trial <= operational_trials; trial++)); do
+        if ((trial % 2 == 1)); then
+            backend_order=(fdb postgres)
+        else
+            backend_order=(postgres fdb)
+        fi
+        for order_index in "${!backend_order[@]}"; do
+            backend="${backend_order[$order_index]}"
+            if [[ "$BENCHMARK_BACKEND" == "fdb" && "$backend" == "postgres" ]] ||
+                [[ "$BENCHMARK_BACKEND" == "postgres" && "$backend" == "fdb" ]]; then
+                continue
+            fi
+            trial_output="$tmp_root/${backend}-operational-trial-${trial}.json"
+            run_operational_backend \
+                "$backend" "$trial_output" "$tmp_root/${backend}-${trial}" \
+                "$trial" "$((order_index + 1))"
+            if [[ "$backend" == "fdb" ]]; then
+                fdb_trials+=("$trial_output")
+            else
+                postgres_trials+=("$trial_output")
+            fi
+        done
+    done
+    if ((${#fdb_trials[@]})); then
+        combine_operational_artifacts "fdb" "$fdb_output" "${fdb_trials[@]}"
+        if [[ "$profile" == "operational-growth" ]]; then
+            assert_operational_growth "fdb" "$fdb_output"
+        fi
+        echo "ducklake_fdb_operational_benchmark_artifact=$fdb_output"
+    fi
+    if ((${#postgres_trials[@]})); then
+        combine_operational_artifacts "postgres" "$postgres_output" "${postgres_trials[@]}"
+        if [[ "$profile" == "operational-growth" ]]; then
+            assert_operational_growth "postgres" "$postgres_output"
+        fi
+        echo "ducklake_postgres_operational_benchmark_artifact=$postgres_output"
+    fi
+elif [[ "$profile" == "inline" ]]; then
     if [[ "$BENCHMARK_BACKEND" != "postgres" ]]; then
         run_inline_micro_backend "fdb" "$fdb_output" "$tmp_root/fdb"
     fi

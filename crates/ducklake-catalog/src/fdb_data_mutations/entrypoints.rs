@@ -28,9 +28,13 @@ impl FdbOrderedCatalogKv {
     ) -> CatalogResult<DataMutationCommit> {
         self.commit_data_mutation_versionstamped_with_inline_file_deletions_and_stats(
             catalog,
-            attempt_id,
+            FdbMutationAttempt {
+                proposed_snapshot: attempt_id,
+                recovery: None,
+            },
             commit_metadata,
             mutation,
+            FdbMutationReadContext::default(),
         )
     }
 
@@ -42,40 +46,47 @@ impl FdbOrderedCatalogKv {
     ) -> CatalogResult<DataMutationCommit> {
         self.commit_data_mutation_versionstamped_with_inline_file_deletions_and_stats(
             catalog,
-            attempt_id,
+            FdbMutationAttempt {
+                proposed_snapshot: attempt_id,
+                recovery: None,
+            },
             crate::SnapshotCommitMetadata::default(),
             mutation,
+            FdbMutationReadContext::default(),
         )
     }
 
     pub(crate) fn commit_data_mutation_versionstamped_with_inline_file_deletions_and_stats(
         &self,
         catalog: crate::CatalogId,
-        attempt_id: Option<CommitAttemptId>,
+        attempt: FdbMutationAttempt,
         commit_metadata: crate::SnapshotCommitMetadata,
         mutation: FdbDataMutation,
+        read_context: FdbMutationReadContext,
     ) -> CatalogResult<DataMutationCommit> {
         self.commit_data_mutation_versionstamped_with_expired_delete_files(
             catalog,
-            attempt_id,
+            attempt,
             commit_metadata,
             mutation,
             Vec::new(),
+            read_context,
         )
     }
 
     pub(crate) fn commit_data_mutation_versionstamped_with_expired_delete_files(
         &self,
         catalog: crate::CatalogId,
-        attempt_id: Option<CommitAttemptId>,
+        attempt: FdbMutationAttempt,
         commit_metadata: crate::SnapshotCommitMetadata,
         mutation: FdbDataMutation,
         expired_delete_files: Vec<FdbExpiredDeleteFile>,
+        read_context: FdbMutationReadContext,
     ) -> CatalogResult<DataMutationCommit> {
         self.commit_planned_data_mutation(
             catalog,
             FdbMutationPlan {
-                attempt_id,
+                attempt,
                 commit_metadata,
                 mutation,
                 expired_delete_files,
@@ -84,7 +95,35 @@ impl FdbOrderedCatalogKv {
                 expired_object_cleanup_policy: ExpiredObjectCleanupPolicy::Schedule(
                     ScheduledDataFileCleanupKind::UnreachableOnly,
                 ),
-                preloaded_data_files: Vec::new(),
+                read_context,
+                inline_mutation: FdbInlineMutation::default(),
+            },
+        )
+    }
+
+    pub(crate) fn commit_data_and_inline_mutation_versionstamped(
+        &self,
+        catalog: crate::CatalogId,
+        attempt: FdbMutationAttempt,
+        commit_metadata: crate::SnapshotCommitMetadata,
+        mutation: FdbDataMutation,
+        inline_mutation: FdbInlineMutation,
+        read_context: FdbMutationReadContext,
+    ) -> CatalogResult<DataMutationCommit> {
+        self.commit_planned_data_mutation(
+            catalog,
+            FdbMutationPlan {
+                attempt,
+                commit_metadata,
+                mutation,
+                expired_delete_files: Vec::new(),
+                snapshot_operations: Vec::new(),
+                row_id_overlap_policy: RowIdOverlapPolicy::RejectCurrentOverlaps,
+                expired_object_cleanup_policy: ExpiredObjectCleanupPolicy::Schedule(
+                    ScheduledDataFileCleanupKind::UnreachableOnly,
+                ),
+                read_context,
+                inline_mutation,
             },
         )
     }
@@ -104,7 +143,10 @@ impl FdbOrderedCatalogKv {
         self.commit_planned_data_mutation(
             catalog,
             FdbMutationPlan {
-                attempt_id,
+                attempt: FdbMutationAttempt {
+                    proposed_snapshot: attempt_id,
+                    recovery: None,
+                },
                 commit_metadata,
                 mutation: FdbDataMutation {
                     data_files: compaction.data_files,
@@ -119,7 +161,11 @@ impl FdbOrderedCatalogKv {
                 expired_object_cleanup_policy: ExpiredObjectCleanupPolicy::Schedule(
                     ScheduledDataFileCleanupKind::CompactionReplacement,
                 ),
-                preloaded_data_files: compaction.dropped_data_files,
+                read_context: FdbMutationReadContext {
+                    data_files: compaction.dropped_data_files,
+                    ..FdbMutationReadContext::default()
+                },
+                inline_mutation: FdbInlineMutation::default(),
             },
         )
     }
@@ -139,7 +185,10 @@ impl FdbOrderedCatalogKv {
         self.commit_planned_data_mutation(
             catalog,
             FdbMutationPlan {
-                attempt_id,
+                attempt: FdbMutationAttempt {
+                    proposed_snapshot: attempt_id,
+                    recovery: None,
+                },
                 commit_metadata,
                 mutation: FdbDataMutation {
                     data_files: rewrite.data_files,
@@ -150,10 +199,18 @@ impl FdbOrderedCatalogKv {
                     ..FdbDataMutation::default()
                 },
                 expired_delete_files: rewrite.expired_delete_files,
-                snapshot_operations: vec![(SnapshotOperationKind::RewriteDelete, rewrite.table_id)],
+                snapshot_operations: rewrite
+                    .table_ids
+                    .into_iter()
+                    .map(|table_id| (SnapshotOperationKind::RewriteDelete, table_id))
+                    .collect(),
                 row_id_overlap_policy: RowIdOverlapPolicy::TrustCompactionReplacementRows,
                 expired_object_cleanup_policy: ExpiredObjectCleanupPolicy::Preserve,
-                preloaded_data_files: rewrite.dropped_data_files,
+                read_context: FdbMutationReadContext {
+                    data_files: rewrite.dropped_data_files,
+                    ..FdbMutationReadContext::default()
+                },
+                inline_mutation: FdbInlineMutation::default(),
             },
         )
     }

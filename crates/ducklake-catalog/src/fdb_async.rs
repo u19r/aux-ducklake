@@ -7,13 +7,16 @@ use crate::{
     CommitAttemptRow, DataFileId, DataFileRow, DataMutationCommit, FdbOrderedCatalogKv,
     FoundationDbErrorClass, RangeDirection, SnapshotRow, ValidityWindow,
     conflict::commit_attempt_key,
-    fdb_data_mutation_staging::{stage_data_file, stage_expired_data_file, stage_snapshot},
+    fdb_data_mutation_staging::{
+        stage_data_file, stage_expired_data_file_after_partition_lookup_cleanup,
+        stage_partition_value_lookup_clears, stage_snapshot,
+    },
     fdb_runtime::{classify_fdb_error, map_fdb_commit_error, map_fdb_error},
     fdb_versionstamp::{
         committed_order, estimate_versionstamped_expire_bytes, incomplete_order,
         versionstamped_value,
     },
-    keys::{data_file_key, snapshot_prefix},
+    keys::{data_file_key, file_partition_value_prefix, snapshot_prefix},
 };
 
 pub(crate) const MAX_ASYNC_FDB_RETRIES: usize = 8;
@@ -23,13 +26,33 @@ impl FdbOrderedCatalogKv {
         &self,
         catalog: CatalogId,
     ) -> CatalogResult<SnapshotRow> {
-        match self.latest_snapshot_async(catalog).await? {
-            Some(row) => Ok(row),
-            None => {
-                self.initialize_empty_catalog_versionstamped_async(catalog)
-                    .await
+        let mut last_retry_error = None;
+        for _ in 0..=MAX_ASYNC_FDB_RETRIES {
+            match self.latest_snapshot_async(catalog).await {
+                Ok(Some(row)) => return Ok(row),
+                Ok(None) => {}
+                Err(error) if is_retryable_async_catalog_error(&error) => {
+                    last_retry_error = Some(error);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+            match self
+                .initialize_empty_catalog_versionstamped_async(catalog)
+                .await
+            {
+                Ok(row) => return Ok(row),
+                Err(error) if is_retryable_async_catalog_error(&error) => {
+                    last_retry_error = Some(error);
+                }
+                Err(error) => return Err(error),
             }
         }
+        Err(last_retry_error.unwrap_or_else(|| {
+            CatalogError::InvalidMutation(
+                "foundationdb async catalog initialization retry loop did not run".to_owned(),
+            )
+        }))
     }
 
     pub async fn commit_data_files_versionstamped_async(
@@ -171,8 +194,16 @@ impl FdbOrderedCatalogKv {
             )));
         }
 
+        let partition_values = self
+            .scan_prefix_async(
+                &file_partition_value_prefix(catalog, data_file_id),
+                RangeDirection::Forward,
+                usize::MAX,
+            )
+            .await?;
         let trx = self.create_transaction()?;
-        stage_expired_data_file(self, &trx, catalog, &row)?;
+        stage_partition_value_lookup_clears(self, &trx, catalog, &partition_values)?;
+        stage_expired_data_file_after_partition_lookup_cleanup(self, &trx, catalog, &row)?;
         let versionstamp = trx.get_versionstamp();
         if let Err(error) = trx.commit().await {
             if is_retryable_async_commit_error(&error) {
@@ -248,6 +279,18 @@ fn is_retryable_async_commit_error(error: &foundationdb::TransactionCommitError)
     }
 }
 
+pub(crate) fn is_retryable_async_catalog_error(error: &CatalogError) -> bool {
+    match error {
+        CatalogError::FoundationDb { class, .. } => matches!(
+            class,
+            FoundationDbErrorClass::MaybeCommitted
+                | FoundationDbErrorClass::RetryableNotCommitted
+                | FoundationDbErrorClass::Retryable
+        ),
+        _ => false,
+    }
+}
+
 fn decode_snapshot_item(
     catalog: CatalogId,
     key: &[u8],
@@ -283,3 +326,7 @@ fn snapshot_order_from_key(
     };
     Ok(CatalogOrderId::from_bytes(kind, bytes))
 }
+
+#[cfg(test)]
+#[path = "fdb_async_tests.rs"]
+mod fdb_async_tests;

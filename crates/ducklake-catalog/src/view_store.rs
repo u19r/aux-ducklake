@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 #[cfg(not(test))]
 use std::sync::OnceLock;
 
@@ -84,7 +86,7 @@ pub fn commit_create_view_row(
     view.validity = ValidityWindow::new(order, None);
     let mut batch = KvBatch::new();
     stage_snapshot(&mut batch, catalog, &snapshot);
-    stage_next_schema_version(kv, &mut batch, catalog)?;
+    stage_next_schema_version(kv, &mut batch, catalog, &snapshot)?;
     batch.put(view_object_key(catalog, view.view_id, order), view.encode());
     stage_max_catalog_id_watermark(kv, &mut batch, catalog, view.view_id.0)?;
     kv.commit(batch)?;
@@ -132,7 +134,7 @@ pub fn commit_change_view_comment(
 
     let mut batch = KvBatch::new();
     stage_snapshot(&mut batch, catalog, &snapshot);
-    stage_next_schema_version(kv, &mut batch, catalog)?;
+    stage_next_schema_version(kv, &mut batch, catalog, &snapshot)?;
     batch.put(
         view_object_key(catalog, change.view_id, previous.validity.begin_order),
         previous.encode(),
@@ -167,7 +169,7 @@ pub fn commit_rename_views(
     let mut batch = KvBatch::new();
     let mut renamed = Vec::with_capacity(renames.len());
     stage_snapshot(&mut batch, catalog, &snapshot);
-    stage_next_schema_version(kv, &mut batch, catalog)?;
+    stage_next_schema_version(kv, &mut batch, catalog, &snapshot)?;
 
     for rename in renames {
         let mut previous = current_views
@@ -214,7 +216,7 @@ pub fn commit_drop_views(
     let mut batch = KvBatch::new();
     let mut dropped = Vec::with_capacity(view_ids.len());
     stage_snapshot(&mut batch, catalog, &snapshot);
-    stage_next_schema_version(kv, &mut batch, catalog)?;
+    stage_next_schema_version(kv, &mut batch, catalog, &snapshot)?;
 
     for view_id in view_ids {
         let mut view = load_view_at(kv, catalog, *view_id, latest.order)?
@@ -236,18 +238,12 @@ pub fn list_views_at(
     catalog: CatalogId,
     snapshot_order: CatalogOrderId,
 ) -> CatalogResult<Vec<ViewRow>> {
-    let mut views = Vec::new();
-    for item in kv.scan_prefix(
-        &view_object_scan_prefix(catalog),
-        RangeDirection::Forward,
-        usize::MAX,
-    )? {
-        let row = decode_view_item(catalog, &item.key, &item.value)?;
-        if row.validity.is_visible_at(snapshot_order) {
-            views.push(row);
-        }
-    }
-    Ok(views)
+    Ok(
+        list_view_rows_for_snapshot_cache(kv, catalog, snapshot_order)?
+            .into_iter()
+            .filter(|row| row.validity.is_visible_at(snapshot_order))
+            .collect(),
+    )
 }
 
 pub(crate) fn list_view_rows(
@@ -368,11 +364,9 @@ fn view_order_from_key(
 }
 
 fn reject_duplicate_renames(renames: &[ViewRename]) -> CatalogResult<()> {
-    for (index, rename) in renames.iter().enumerate() {
-        if renames[..index]
-            .iter()
-            .any(|prior| prior.view_id == rename.view_id)
-        {
+    let mut unique = BTreeSet::new();
+    for rename in renames {
+        if !unique.insert(rename.view_id) {
             return Err(CatalogError::InvalidMutation(format!(
                 "view {} is listed more than once for rename",
                 rename.view_id.0
@@ -383,8 +377,9 @@ fn reject_duplicate_renames(renames: &[ViewRename]) -> CatalogResult<()> {
 }
 
 fn reject_duplicate_view_ids(view_ids: &[TableId]) -> CatalogResult<()> {
-    for (index, view_id) in view_ids.iter().enumerate() {
-        if view_ids[..index].iter().any(|prior| prior == view_id) {
+    let mut unique = BTreeSet::new();
+    for view_id in view_ids {
+        if !unique.insert(*view_id) {
             return Err(CatalogError::InvalidMutation(format!(
                 "view {} is listed more than once for drop",
                 view_id.0

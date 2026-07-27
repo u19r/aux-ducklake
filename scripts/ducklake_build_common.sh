@@ -131,6 +131,15 @@ ducklake_postgres_cmake_args() {
     local pg_config_bin pg_include_dir pg_library_dir pg_library
 
     pg_config_bin="${PG_CONFIG:-$(command -v pg_config || true)}"
+    if [[ -z "$pg_config_bin" && "$(uname -s)" == "Darwin" ]]; then
+        local candidate
+        for candidate in /opt/homebrew/opt/libpq/bin/pg_config /usr/local/opt/libpq/bin/pg_config; do
+            if [[ -x "$candidate" ]]; then
+                pg_config_bin="$candidate"
+                break
+            fi
+        done
+    fi
     if [[ -z "$pg_config_bin" || ! -x "$pg_config_bin" ]]; then
         [[ "$mode" == "optional" ]] && return 0
         echo "pg_config is required to build postgres_scanner" >&2

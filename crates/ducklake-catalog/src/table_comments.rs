@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use crate::{
     CatalogError, CatalogId, CatalogResult, MutableCatalogKv, TableId,
     ids::{CatalogOrderId, ColumnId},
@@ -105,12 +107,10 @@ fn validate_comment_batch(
     for comment in table_comments {
         reject_cross_table(expected_table_id, comment.table_id)?;
     }
-    for (index, comment) in column_comments.iter().enumerate() {
+    let mut unique = BTreeSet::new();
+    for comment in column_comments {
         reject_cross_table(expected_table_id, comment.table_id)?;
-        if column_comments[..index]
-            .iter()
-            .any(|previous| previous.column_id == comment.column_id)
-        {
+        if !unique.insert(comment.column_id) {
             return Err(CatalogError::InvalidMutation(format!(
                 "column {} is listed more than once for comment change",
                 comment.column_id.0

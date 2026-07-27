@@ -1,6 +1,8 @@
+use std::collections::BTreeSet;
+
 use crate::{
     CatalogError, CatalogId, CatalogResult, MutableCatalogKv, TableColumnRow, TableId,
-    ids::{CatalogOrderId, ColumnId},
+    ids::CatalogOrderId,
     store::latest_snapshot,
     table_columns::{commit_column_version, same_default_metadata},
     table_store::{load_current_table_row, reject_table_conflicts_since_base},
@@ -98,40 +100,21 @@ fn reject_column_default_change_batch_shape(
     let first = changes.first().ok_or_else(|| {
         CatalogError::InvalidMutation("empty column default change batch".to_owned())
     })?;
-    for (index, change) in changes.iter().enumerate() {
-        reject_duplicate_or_cross_table_column(
-            changes[..index]
-                .iter()
-                .map(|previous| previous.column.column_id),
-            first.table_id,
-            change.table_id,
-            change.column.column_id,
-        )?;
+    let mut unique = BTreeSet::new();
+    for change in changes {
+        if change.table_id != first.table_id {
+            return Err(CatalogError::InvalidMutation(
+                "column default change only supports one table per operation".to_owned(),
+            ));
+        }
+        if !unique.insert(change.column.column_id) {
+            return Err(CatalogError::InvalidMutation(format!(
+                "column {} is listed more than once for default change",
+                change.column.column_id.0
+            )));
+        }
     }
     Ok(first.table_id)
-}
-
-fn reject_duplicate_or_cross_table_column(
-    previous_column_ids: impl Iterator<Item = ColumnId>,
-    expected_table_id: TableId,
-    table_id: TableId,
-    column_id: ColumnId,
-) -> CatalogResult<()> {
-    if table_id != expected_table_id {
-        return Err(CatalogError::InvalidMutation(
-            "column default change only supports one table per operation".to_owned(),
-        ));
-    }
-    if previous_column_ids
-        .into_iter()
-        .any(|previous| previous == column_id)
-    {
-        return Err(CatalogError::InvalidMutation(format!(
-            "column {} is listed more than once for default change",
-            column_id.0
-        )));
-    }
-    Ok(())
 }
 
 fn reject_non_default_column_change(

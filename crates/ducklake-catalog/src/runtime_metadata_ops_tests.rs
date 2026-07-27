@@ -6,46 +6,73 @@ mod tests {
         CatalogId, CatalogOrderId, ColumnId, ColumnTypeChange, DataFileId, DataFileRow,
         DeleteFileId, DeleteFileRow, FakeOrderedCatalogKv, FileColumnStatsRow,
         FilePartitionValueRow, InlinedTableRow, KvBatch, MutableCatalogKv, PartitionKeyIndex,
-        RangeDirection, RangeItem, SnapshotRow, TableColumnRow, TableId, TableRow,
-        TableVersionReplacement, commit_append_data_files, commit_change_table_column_types,
-        commit_create_table_row, commit_register_delete_files, expire_data_file, expire_snapshots,
-        initialize_catalog_if_absent, latest_snapshot, list_data_files, list_file_column_stats,
-        list_file_partition_values, list_snapshots, load_table_at,
-        public_snapshot_sequence_for_order, register_file_column_stats,
+        RangeDirection, RangeItem, SnapshotRow, TableColumnRow, TableId, TablePartitionRow,
+        TableRow, TableVersionReplacement, commit_append_data_files,
+        commit_change_table_column_types, commit_create_table_row, commit_register_delete_files,
+        expire_data_file, expire_snapshots, initialize_catalog_if_absent, latest_snapshot,
+        list_data_files, list_file_column_stats, list_file_partition_values, list_snapshots,
+        load_table_at, public_snapshot_sequence_for_order, register_file_column_stats,
         register_file_partition_value, store::stage_snapshot,
     };
 
+    use super::super::file_stats::bounded_partition_info_mirror_sql;
     use super::super::{
-        GlobalColumnStats, append_table_inline_stats, begin_snapshot_for_schema_version,
-        collect_data_file_ids_from_payload, current_metadata_data_file_rows,
-        current_metadata_file_column_stats, current_metadata_file_partition_values,
-        data_file_mirror_sql, data_file_rows_payload, delete_file_mirror_sql,
-        delete_file_rows_payload, file_column_stats_mirror_sql, file_partition_values_mirror_sql,
-        initialization_metadata_settings, json_number_or_null,
-        list_current_data_files_for_data_file_ids, list_delete_files_for_delete_file_ids,
-        list_file_column_stats_for_data_file_ids, optional_metadata_payload_bool,
-        scheduled_cleanup_mirror_sql, semantic_delete_begin_orders_for_rows,
+        GlobalColumnStats, append_data_file_mirror_inserts, append_delete_file_mirror_inserts,
+        append_file_column_stats_mirror_inserts, append_file_partition_values_mirror_inserts,
+        append_table_inline_stats, begin_snapshot_for_schema_version, bounded_append_mirror_sql,
+        bounded_delete_file_mirror_payload_values, bounded_delete_file_mirror_sql,
+        bounded_scheduled_cleanup_mirror_sql_for_catalog, collect_data_file_ids_from_payload,
+        current_metadata_data_file_rows, current_metadata_file_column_stats,
+        data_file_rows_payload, delete_file_rows_payload, initialization_metadata_settings,
+        json_number_or_null, list_current_data_files_for_data_file_ids,
+        list_data_files_for_data_file_ids, list_delete_files_for_data_file_ids,
+        list_delete_files_for_delete_file_ids, list_file_column_stats_for_data_file_ids,
+        optional_metadata_payload_bool, partition_value_request, payload_u64_values,
+        scheduled_cleanup_delta_sql, semantic_delete_begin_orders_for_rows,
         stats_snapshot_for_request,
     };
 
     #[cfg(feature = "foundationdb")]
-    use super::super::{can_recompute_exact_inline_stats, global_stats_file_rows_from_payload};
+    use super::super::{GlobalStatsFileRow, GlobalTableStats, can_recompute_exact_inline_stats};
 
     #[test]
     #[cfg(feature = "foundationdb")]
     fn given_rewrite_snapshot_when_selecting_exact_inline_stats_then_requires_delete_free_files() {
-        let delete_free = global_stats_file_rows_from_payload(
-            b"file\t1\t2\tmain/t.parquet\t10\t100\t0\t\t\t\t\t\t\t\t1\t\t\t\t\t\t\t\t\n",
-        )
-        .unwrap();
-        let with_delete = global_stats_file_rows_from_payload(
-            b"file\t1\t2\tmain/t.parquet\t10\t100\t0\t\t9\tmain/d.parquet\t1\t10\t2\t\t1\t\t\t\t\t\t\t\t\n",
-        )
-        .unwrap();
+        let delete_free = vec![GlobalStatsFileRow {
+            data_file_id: DataFileId(1),
+            record_count: 10,
+            file_size_bytes: 100,
+            row_id_start: Some(0),
+            has_deletions: false,
+        }];
+        let with_delete = vec![GlobalStatsFileRow {
+            has_deletions: true,
+            ..delete_free[0]
+        }];
 
         assert!(can_recompute_exact_inline_stats(true, &delete_free));
         assert!(!can_recompute_exact_inline_stats(false, &delete_free));
         assert!(!can_recompute_exact_inline_stats(true, &with_delete));
+    }
+
+    #[test]
+    #[cfg(feature = "foundationdb")]
+    fn given_compaction_removes_high_row_ids_when_rendering_stats_then_allocator_does_not_regress()
+    {
+        let table = TableRow::new(TableId(1), "events", CatalogOrderId::uuid_v7(1));
+        let mut stats = GlobalTableStats::new(&table, 21);
+        stats.accumulate_file(&GlobalStatsFileRow {
+            data_file_id: DataFileId(1),
+            record_count: 15,
+            file_size_bytes: 1_024,
+            row_id_start: Some(2),
+            has_deletions: false,
+        });
+        let mut output = String::new();
+
+        stats.append_to(&mut output).unwrap();
+
+        assert_eq!(output, "global_table_stats\t1\t15\t21\t1024\n");
     }
 
     #[test]
@@ -144,6 +171,33 @@ mod tests {
     }
 
     #[test]
+    fn given_partition_value_request_when_parsed_then_file_ids_and_keys_are_typed_and_deduplicated()
+    {
+        let (files, keys) = partition_value_request(
+            b"data_file_id\t9\npartition_key_index\t1\ndata_file_id\t9\npartition_key_index\t1\npartition_key_index\t0\n",
+        )
+        .unwrap();
+
+        assert_eq!(files, [DataFileId(9)].into_iter().collect());
+        assert_eq!(
+            keys,
+            [PartitionKeyIndex(0), PartitionKeyIndex(1)]
+                .into_iter()
+                .collect()
+        );
+        assert!(partition_value_request(b"unknown\t1\n").is_err());
+        assert!(partition_value_request(b"partition_key_index\t4294967296\n").is_err());
+    }
+
+    #[test]
+    fn given_repeated_u64_fields_when_parsing_then_all_values_are_retained() {
+        assert_eq!(
+            payload_u64_values(b"table_id=7\ntable_id=11\ntable_id=13\n", "table_id").unwrap(),
+            vec![7, 11, 13]
+        );
+    }
+
+    #[test]
     fn given_future_stats_snapshot_when_resolving_then_latest_committed_snapshot_is_used() {
         let catalog = CatalogId(1);
         let table_id = TableId(10);
@@ -234,43 +288,52 @@ mod tests {
         data_file.mapping_id = Some(99);
         data_file.row_id_start = 42;
         data_file.row_id_start_known = true;
-        let data_sql = data_file_mirror_sql(&[data_file], &snapshots);
+        let mut data_sql = String::new();
+        append_data_file_mirror_inserts(&mut data_sql, &[data_file], &snapshots);
         assert!(data_sql.contains("'main/table/a''b.parquet'"), "{data_sql}");
         assert!(data_sql.contains(", 10, 11, 7,"), "{data_sql}");
         assert!(data_sql.contains(", 128, 42,"), "{data_sql}");
         assert!(data_sql.contains(", 'AQIDBA==', 99,"), "{data_sql}");
         assert!(data_sql.contains(", 99, 12, NULL);"), "{data_sql}");
 
-        let partition_sql = file_partition_values_mirror_sql(vec![
-            FilePartitionValueRow::new(
-                DataFileId(7),
-                TableId(4),
-                PartitionKeyIndex(0),
-                "north'west",
-            ),
-            FilePartitionValueRow::new(
-                DataFileId(8),
-                TableId(4),
-                PartitionKeyIndex(1),
-                "__HIVE_DEFAULT_PARTITION__",
-            ),
-        ]);
+        let mut partition_sql = String::new();
+        append_file_partition_values_mirror_inserts(
+            &mut partition_sql,
+            vec![
+                FilePartitionValueRow::new(
+                    DataFileId(7),
+                    TableId(4),
+                    PartitionKeyIndex(0),
+                    "north'west",
+                ),
+                FilePartitionValueRow::new(
+                    DataFileId(8),
+                    TableId(4),
+                    PartitionKeyIndex(1),
+                    "__HIVE_DEFAULT_PARTITION__",
+                ),
+            ],
+        );
         assert!(partition_sql.contains("'north''west'"), "{partition_sql}");
         assert!(
             partition_sql.contains("VALUES (8, 4, 1, NULL);"),
             "{partition_sql}"
         );
 
-        let stats_sql = file_column_stats_mirror_sql(vec![FileColumnStatsRow {
-            data_file_id: DataFileId(7),
-            table_id: TableId(4),
-            column_id: ColumnId(2),
-            value_count: None,
-            null_count: 3,
-            min_value: Some("a'b".to_owned()),
-            max_value: None,
-            extra_stats: Some("x'y".to_owned()),
-        }]);
+        let mut stats_sql = String::new();
+        append_file_column_stats_mirror_inserts(
+            &mut stats_sql,
+            vec![FileColumnStatsRow {
+                data_file_id: DataFileId(7),
+                table_id: TableId(4),
+                column_id: ColumnId(2),
+                value_count: None,
+                null_count: 3,
+                min_value: Some("a'b".to_owned()),
+                max_value: None,
+                extra_stats: Some("x'y".to_owned()),
+            }],
+        );
         assert!(
             stats_sql.contains("VALUES (7, 4, 2, NULL, NULL, 3, 'a''b', NULL, NULL, 'x''y');"),
             "{stats_sql}"
@@ -287,7 +350,13 @@ mod tests {
         .with_encryption_key("BQYHCA==");
         delete_file.validity.end_order = Some(end_order);
         let delete_rows = vec![delete_file];
-        let delete_sql = delete_file_mirror_sql(&delete_rows, &snapshots);
+        let mut delete_sql = String::new();
+        append_delete_file_mirror_inserts(
+            &mut delete_sql,
+            &delete_rows,
+            &super::super::semantic_delete_begin_orders_from_rows(&delete_rows),
+            &snapshots,
+        );
         assert!(delete_sql.contains("'delete''a.parquet'"), "{delete_sql}");
         assert!(delete_sql.contains(", 10, 11, 7,"), "{delete_sql}");
         assert!(
@@ -295,11 +364,198 @@ mod tests {
             "{delete_sql}"
         );
 
-        let cleanup_sql = scheduled_cleanup_mirror_sql(&delete_rows, &snapshots);
+        let cleanup_sql = scheduled_cleanup_delta_sql(
+            &[DataFileId(6)],
+            &[DeleteFileId(5)],
+            &[crate::maintenance::ScheduledDataFileCleanupRow {
+                data_file: DataFileRow::new(
+                    DataFileId(6),
+                    TableId(1),
+                    "data'a.parquet",
+                    1,
+                    256,
+                    begin_order,
+                ),
+                schedule_start_micros: 1_234_567,
+                cleanup_kind:
+                    crate::maintenance::ScheduledDataFileCleanupKind::CompactionReplacement,
+            }],
+            &[crate::maintenance::ScheduledDeleteFileCleanupRow {
+                delete_file: delete_rows[0].clone(),
+                table_id: TableId(1),
+                schedule_start_micros: 2_345_678,
+            }],
+        );
         assert!(
-            cleanup_sql.contains("VALUES (5, 'delete''a.parquet', false, NOW());"),
+            cleanup_sql
+                .contains("VALUES (6, 'data''a.parquet', false, make_timestamptz(1234567));"),
             "{cleanup_sql}"
         );
+        assert!(
+            cleanup_sql
+                .contains("VALUES (5, 'delete''a.parquet', false, make_timestamptz(2345678));"),
+            "{cleanup_sql}"
+        );
+    }
+
+    #[test]
+    fn bounded_partition_mirror_replaces_only_requested_tables() {
+        let mut partitioned = TableRow::new(TableId(4), "partitioned", CatalogOrderId::uuid_v7(1));
+        partitioned.partition = Some(TablePartitionRow::new(17, Vec::new()));
+
+        let sql = bounded_partition_info_mirror_sql(&[TableId(4), TableId(9)], &[partitioned]);
+
+        assert!(
+            sql.starts_with(
+                "DELETE FROM {METADATA_CATALOG}.ducklake_partition_info WHERE table_id IN (4, 9);"
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(
+                "INSERT INTO {METADATA_CATALOG}.ducklake_partition_info VALUES (17, 4, NULL, NULL);"
+            ),
+            "{sql}"
+        );
+        assert!(!sql.contains("VALUES (17, 9"), "{sql}");
+        assert!(!sql.contains("DELETE FROM {METADATA_CATALOG}.ducklake_partition_info;"));
+    }
+
+    #[test]
+    fn given_scheduled_cleanup_when_rendering_bounded_mirror_then_only_requested_history_is_read() {
+        let catalog = CatalogId(1);
+        let begin_order = CatalogOrderId::uuid_v7(1);
+        let data_file = DataFileRow::new(
+            DataFileId(6),
+            TableId(1),
+            "data.parquet",
+            1,
+            256,
+            begin_order,
+        );
+        let delete_file = DeleteFileRow::new(
+            DeleteFileId(5),
+            data_file.data_file_id,
+            "delete.parquet",
+            1,
+            128,
+            begin_order,
+        );
+        let mut inner = FakeOrderedCatalogKv::new();
+        let mut batch = KvBatch::new();
+        batch.put(
+            crate::keys::data_file_key(catalog, data_file.data_file_id),
+            data_file.encode(),
+        );
+        batch.put(
+            crate::keys::delete_file_key(catalog, delete_file.delete_file_id),
+            delete_file.encode(),
+        );
+        batch.put(
+            crate::keys::scheduled_data_file_cleanup_key(catalog, data_file.data_file_id),
+            crate::maintenance::encode_scheduled_data_cleanup_value(
+                crate::maintenance::ScheduledDataFileCleanupKind::CompactionReplacement,
+                1_234_567,
+            ),
+        );
+        batch.put(
+            crate::keys::scheduled_delete_file_cleanup_key(catalog, delete_file.delete_file_id),
+            crate::maintenance::encode_scheduled_delete_cleanup_value(TableId(1), 2_345_678),
+        );
+        batch.put(
+            crate::keys::delete_file_timeline_key(
+                catalog,
+                data_file.data_file_id,
+                begin_order,
+                delete_file.delete_file_id,
+            ),
+            delete_file.encode(),
+        );
+        inner.commit(batch).unwrap();
+        let kv = CleanupMirrorScanRecordingKv::new(inner, catalog);
+
+        let sql = bounded_scheduled_cleanup_mirror_sql_for_catalog(
+            &kv,
+            catalog,
+            &[data_file.data_file_id],
+        )
+        .unwrap();
+
+        assert!(sql.contains("'data.parquet'"), "{sql}");
+        assert!(sql.contains("'delete.parquet'"), "{sql}");
+        assert_eq!(kv.history_scans(), 0);
+        assert_eq!(kv.batch_gets(), 2);
+        assert_eq!(kv.direct_gets(), 0);
+    }
+
+    #[test]
+    fn given_changed_file_when_rendering_cleanup_delta_then_pending_queue_is_not_scanned() {
+        let catalog = CatalogId(1);
+        let begin_order = CatalogOrderId::uuid_v7(1);
+        let data_file = DataFileRow::new(
+            DataFileId(6),
+            TableId(1),
+            "data.parquet",
+            1,
+            256,
+            begin_order,
+        );
+        let delete_file = DeleteFileRow::new(
+            DeleteFileId(5),
+            data_file.data_file_id,
+            "delete.parquet",
+            1,
+            128,
+            begin_order,
+        );
+        let mut inner = FakeOrderedCatalogKv::new();
+        let mut batch = KvBatch::new();
+        batch.put(
+            crate::keys::data_file_key(catalog, data_file.data_file_id),
+            data_file.encode(),
+        );
+        batch.put(
+            crate::keys::delete_file_key(catalog, delete_file.delete_file_id),
+            delete_file.encode(),
+        );
+        batch.put(
+            crate::keys::scheduled_data_file_cleanup_key(catalog, data_file.data_file_id),
+            crate::maintenance::encode_scheduled_data_cleanup_value(
+                crate::maintenance::ScheduledDataFileCleanupKind::CompactionReplacement,
+                1_234_567,
+            ),
+        );
+        batch.put(
+            crate::keys::scheduled_delete_file_cleanup_key(catalog, delete_file.delete_file_id),
+            crate::maintenance::encode_scheduled_delete_cleanup_value(TableId(1), 2_345_678),
+        );
+        batch.put(
+            crate::keys::delete_file_timeline_key(
+                catalog,
+                data_file.data_file_id,
+                begin_order,
+                delete_file.delete_file_id,
+            ),
+            delete_file.encode(),
+        );
+        inner.commit(batch).unwrap();
+        let kv = CleanupMirrorScanRecordingKv::new(inner, catalog);
+
+        let sql = bounded_scheduled_cleanup_mirror_sql_for_catalog(
+            &kv,
+            catalog,
+            &[data_file.data_file_id],
+        )
+        .unwrap();
+
+        assert!(sql.starts_with(
+            "DELETE FROM {METADATA_CATALOG}.ducklake_files_scheduled_for_deletion WHERE data_file_id IN (5, 6);"
+        ));
+        assert!(sql.contains("'data.parquet'"), "{sql}");
+        assert!(sql.contains("'delete.parquet'"), "{sql}");
+        assert_eq!(kv.scheduled_cleanup_scans(), 0);
+        assert_eq!(kv.batch_gets(), 2);
+        assert_eq!(kv.direct_gets(), 0);
     }
 
     #[test]
@@ -365,6 +621,47 @@ mod tests {
             begin_snapshot_for_schema_version(&kv, catalog, table_id, 2).unwrap(),
             expected
         );
+    }
+
+    #[test]
+    fn given_maintained_schema_begin_when_lookup_repeats_then_snapshot_history_is_not_scanned() {
+        let catalog = CatalogId(1);
+        let table_id = TableId(10);
+        let mut kv = FakeOrderedCatalogKv::new();
+        initialize_catalog_if_absent(&mut kv, catalog).unwrap();
+        commit_create_table_row(
+            &mut kv,
+            catalog,
+            TableRow::with_catalog_metadata(
+                table_id,
+                crate::SchemaId(0),
+                "orders-uuid",
+                "orders",
+                "main/orders/",
+                vec![TableColumnRow::new(
+                    ColumnId(1),
+                    "order_id",
+                    "INTEGER",
+                    false,
+                    None,
+                )],
+                CatalogOrderId::uuid_v7(0),
+            ),
+        )
+        .unwrap();
+        let expected = latest_snapshot(&kv, catalog).unwrap().unwrap().sequence.0;
+        let kv = CleanupMirrorScanRecordingKv::new(kv, catalog);
+
+        for _ in 0..3 {
+            assert_eq!(
+                begin_snapshot_for_schema_version(&kv, catalog, table_id, 1)
+                    .unwrap()
+                    .0,
+                expected
+            );
+        }
+
+        assert_eq!(kv.history_scans(), 0);
     }
 
     #[test]
@@ -490,35 +787,12 @@ mod tests {
         assert_eq!(list_file_column_stats(&kv, catalog).unwrap().len(), 2);
 
         assert_eq!(
-            current_metadata_file_partition_values(&kv, catalog)
-                .unwrap()
-                .into_iter()
-                .map(|row| row.data_file_id)
-                .collect::<Vec<_>>(),
-            vec![DataFileId(11)]
-        );
-        assert_eq!(
             current_metadata_file_column_stats(&kv, catalog)
                 .unwrap()
                 .into_iter()
                 .map(|row| row.data_file_id)
                 .collect::<Vec<_>>(),
             vec![DataFileId(11)]
-        );
-
-        let kv = PartitionValueScanRecordingKv::new(kv, catalog);
-        assert_eq!(
-            current_metadata_file_partition_values(&kv, catalog)
-                .unwrap()
-                .into_iter()
-                .map(|row| row.data_file_id)
-                .collect::<Vec<_>>(),
-            vec![DataFileId(11)]
-        );
-        assert_eq!(
-            kv.broad_file_partition_value_scans(),
-            0,
-            "current metadata partition mirror rows should not scan the full FilePartitionValue family"
         );
     }
 
@@ -875,6 +1149,63 @@ mod tests {
     }
 
     #[test]
+    fn given_expired_changed_file_when_listing_bounded_metadata_then_table_identity_is_retained() {
+        let catalog = CatalogId(1);
+        let table_id = TableId(7);
+        let mut kv = FakeOrderedCatalogKv::new();
+        initialize_catalog_if_absent(&mut kv, catalog).unwrap();
+        commit_append_data_files(
+            &mut kv,
+            catalog,
+            vec![data_file(DataFileId(1), table_id, 0)],
+        )
+        .unwrap();
+        expire_data_file(&mut kv, catalog, DataFileId(1), CatalogOrderId::uuid_v7(99)).unwrap();
+
+        let rows = list_data_files_for_data_file_ids(&kv, catalog, &[DataFileId(1)]).unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].table_id, table_id);
+        assert!(rows[0].validity.end_order.is_some());
+    }
+
+    #[test]
+    fn given_one_affected_table_when_rendering_append_delta_then_table_stats_refresh_is_bounded() {
+        let data_file = data_file(DataFileId(1), TableId(7), 0);
+        let stats = FileColumnStatsRow::new(
+            DataFileId(1),
+            TableId(7),
+            ColumnId(1),
+            0,
+            Some("1".to_owned()),
+            Some("9".to_owned()),
+        );
+        let snapshots = vec![SnapshotRow::new(
+            data_file.validity.begin_order,
+            crate::RawSnapshotSequence(1),
+        )];
+
+        let sql = bounded_append_mirror_sql(
+            &[DataFileId(1)],
+            &[TableId(7)],
+            Vec::new(),
+            &[data_file],
+            &[stats],
+            &snapshots,
+        );
+
+        assert!(
+            sql.contains("ducklake_table_column_stats WHERE table_id IN (7);"),
+            "{sql}"
+        );
+        assert!(sql.contains("stats.table_id IN (7)"), "{sql}");
+        assert!(
+            !sql.contains("DELETE FROM {METADATA_CATALOG}.ducklake_table_column_stats;\n"),
+            "{sql}"
+        );
+    }
+
+    #[test]
     fn given_changed_delete_file_ids_when_listing_bounded_delete_files_then_only_requested_delete_files_are_returned()
      {
         let catalog = CatalogId(1);
@@ -906,6 +1237,78 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].delete_file_id, DeleteFileId(11));
         assert_eq!(rows[0].data_file_id, DataFileId(2));
+    }
+
+    #[test]
+    fn given_mixed_delete_mirror_ids_when_parsing_payload_then_ids_are_typed_and_deduplicated() {
+        let (delete_file_ids, data_file_ids) = bounded_delete_file_mirror_payload_values(
+            b"data_file_id\t2\ndelete_file_id\t11\ndata_file_id\t1\ndelete_file_id\t11\n",
+        )
+        .unwrap();
+
+        assert_eq!(delete_file_ids, vec![DeleteFileId(11)]);
+        assert_eq!(data_file_ids, vec![DataFileId(1), DataFileId(2)]);
+    }
+
+    #[test]
+    fn given_one_affected_data_file_when_listing_delete_mirror_delta_then_unrelated_histories_are_not_scanned()
+     {
+        let catalog = CatalogId(1);
+        let table_id = TableId(1);
+        let mut inner = FakeOrderedCatalogKv::new();
+        initialize_catalog_if_absent(&mut inner, catalog).unwrap();
+        commit_append_data_files(
+            &mut inner,
+            catalog,
+            (1..=100)
+                .map(|id| data_file(DataFileId(id), table_id, id))
+                .collect(),
+        )
+        .unwrap();
+        commit_register_delete_files(
+            &mut inner,
+            catalog,
+            (1..=100)
+                .map(|id| delete_file(DeleteFileId(id + 100), DataFileId(id)))
+                .collect(),
+        )
+        .unwrap();
+        let kv = DeleteTimelineScanCountingKv::new(inner, catalog);
+
+        let rows = list_delete_files_for_data_file_ids(&kv, catalog, &[DataFileId(42)]).unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].delete_file_id, DeleteFileId(142));
+        assert_eq!(kv.timeline_scans(), 1);
+        assert_eq!(kv.broad_history_scans(), 0);
+    }
+
+    #[test]
+    fn given_affected_data_file_when_rendering_delete_mirror_delta_then_all_siblings_are_replaced()
+    {
+        let rows = vec![
+            delete_file(DeleteFileId(10), DataFileId(1)),
+            delete_file(DeleteFileId(11), DataFileId(1)),
+        ];
+        let semantic_begin_orders = super::super::semantic_delete_begin_orders_from_rows(&rows);
+        let snapshots = vec![SnapshotRow::new(
+            CatalogOrderId::uuid_v7(2),
+            crate::RawSnapshotSequence(3),
+        )];
+
+        let sql = bounded_delete_file_mirror_sql(
+            &[DeleteFileId(10), DeleteFileId(11)],
+            &[DataFileId(1)],
+            &rows,
+            &semantic_begin_orders,
+            &snapshots,
+        );
+
+        assert!(
+            sql.contains("WHERE delete_file_id IN (10, 11) OR data_file_id IN (1);"),
+            "{sql}"
+        );
+        assert_eq!(sql.matches("INSERT INTO").count(), 2, "{sql}");
     }
 
     #[test]
@@ -1136,6 +1539,82 @@ mod tests {
         batch_get_key_count: Cell<usize>,
     }
 
+    struct DeleteTimelineScanCountingKv {
+        inner: FakeOrderedCatalogKv,
+        delete_file_family_prefix: Vec<u8>,
+        delete_file_timeline_family_prefix: Vec<u8>,
+        timeline_scans: Cell<usize>,
+        broad_history_scans: Cell<usize>,
+    }
+
+    impl DeleteTimelineScanCountingKv {
+        fn new(inner: FakeOrderedCatalogKv, catalog: CatalogId) -> Self {
+            Self {
+                inner,
+                delete_file_family_prefix: crate::keys::family_prefix(
+                    catalog,
+                    crate::keys::KeyFamily::DeleteFile,
+                ),
+                delete_file_timeline_family_prefix: crate::keys::family_prefix(
+                    catalog,
+                    crate::keys::KeyFamily::DeleteFileTimeline,
+                ),
+                timeline_scans: Cell::new(0),
+                broad_history_scans: Cell::new(0),
+            }
+        }
+
+        fn timeline_scans(&self) -> usize {
+            self.timeline_scans.get()
+        }
+
+        fn broad_history_scans(&self) -> usize {
+            self.broad_history_scans.get()
+        }
+    }
+
+    impl crate::OrderedCatalogKv for DeleteTimelineScanCountingKv {
+        fn get(&self, key: &[u8]) -> crate::CatalogResult<Option<Vec<u8>>> {
+            crate::OrderedCatalogKv::get(&self.inner, key)
+        }
+
+        fn batch_get(&self, keys: &[Vec<u8>]) -> crate::CatalogResult<Vec<Option<Vec<u8>>>> {
+            crate::OrderedCatalogKv::batch_get(&self.inner, keys)
+        }
+
+        fn scan_prefix(
+            &self,
+            prefix: &[u8],
+            direction: RangeDirection,
+            limit: usize,
+        ) -> crate::CatalogResult<Vec<RangeItem>> {
+            if prefix == self.delete_file_family_prefix
+                || prefix == self.delete_file_timeline_family_prefix
+            {
+                self.broad_history_scans
+                    .set(self.broad_history_scans.get().saturating_add(1));
+            } else if prefix.starts_with(&self.delete_file_timeline_family_prefix) {
+                self.timeline_scans
+                    .set(self.timeline_scans.get().saturating_add(1));
+            }
+            crate::OrderedCatalogKv::scan_prefix(&self.inner, prefix, direction, limit)
+        }
+
+        fn scan_range(
+            &self,
+            start: &[u8],
+            end: &[u8],
+            direction: RangeDirection,
+            limit: usize,
+        ) -> crate::CatalogResult<Vec<RangeItem>> {
+            crate::OrderedCatalogKv::scan_range(&self.inner, start, end, direction, limit)
+        }
+
+        fn read_conflict_fence(&self, key: &[u8]) -> crate::CatalogResult<Option<Vec<u8>>> {
+            crate::OrderedCatalogKv::read_conflict_fence(&self.inner, key)
+        }
+    }
+
     impl BatchGetCountingKv {
         fn new(inner: FakeOrderedCatalogKv) -> Self {
             Self {
@@ -1184,32 +1663,64 @@ mod tests {
         }
     }
 
-    struct PartitionValueScanRecordingKv {
+    struct CleanupMirrorScanRecordingKv {
         inner: FakeOrderedCatalogKv,
-        catalog: CatalogId,
-        broad_file_partition_value_scans: Cell<usize>,
+        history_prefixes: Vec<Vec<u8>>,
+        scheduled_cleanup_prefix: Vec<u8>,
+        history_scans: Cell<usize>,
+        scheduled_cleanup_scans: Cell<usize>,
+        direct_gets: Cell<usize>,
+        batch_gets: Cell<usize>,
     }
 
-    impl PartitionValueScanRecordingKv {
+    impl CleanupMirrorScanRecordingKv {
         fn new(inner: FakeOrderedCatalogKv, catalog: CatalogId) -> Self {
             Self {
                 inner,
-                catalog,
-                broad_file_partition_value_scans: Cell::new(0),
+                history_prefixes: [
+                    crate::keys::KeyFamily::DeleteFile,
+                    crate::keys::KeyFamily::Snapshot,
+                    crate::keys::KeyFamily::SnapshotByTimestamp,
+                ]
+                .map(|family| crate::keys::family_prefix(catalog, family))
+                .to_vec(),
+                scheduled_cleanup_prefix: crate::keys::family_prefix(
+                    catalog,
+                    crate::keys::KeyFamily::ScheduledCleanup,
+                ),
+                history_scans: Cell::new(0),
+                scheduled_cleanup_scans: Cell::new(0),
+                direct_gets: Cell::new(0),
+                batch_gets: Cell::new(0),
             }
         }
 
-        fn broad_file_partition_value_scans(&self) -> usize {
-            self.broad_file_partition_value_scans.get()
+        fn history_scans(&self) -> usize {
+            self.history_scans.get()
+        }
+
+        fn scheduled_cleanup_scans(&self) -> usize {
+            self.scheduled_cleanup_scans.get()
+        }
+
+        fn direct_gets(&self) -> usize {
+            self.direct_gets.get()
+        }
+
+        fn batch_gets(&self) -> usize {
+            self.batch_gets.get()
         }
     }
 
-    impl crate::OrderedCatalogKv for PartitionValueScanRecordingKv {
+    impl crate::OrderedCatalogKv for CleanupMirrorScanRecordingKv {
         fn get(&self, key: &[u8]) -> crate::CatalogResult<Option<Vec<u8>>> {
+            self.direct_gets
+                .set(self.direct_gets.get().saturating_add(1));
             crate::OrderedCatalogKv::get(&self.inner, key)
         }
 
         fn batch_get(&self, keys: &[Vec<u8>]) -> crate::CatalogResult<Vec<Option<Vec<u8>>>> {
+            self.batch_gets.set(self.batch_gets.get().saturating_add(1));
             crate::OrderedCatalogKv::batch_get(&self.inner, keys)
         }
 
@@ -1219,17 +1730,17 @@ mod tests {
             direction: RangeDirection,
             limit: usize,
         ) -> crate::CatalogResult<Vec<RangeItem>> {
-            if prefix
-                == crate::keys::family_prefix(
-                    self.catalog,
-                    crate::keys::KeyFamily::FilePartitionValue,
-                )
+            if self
+                .history_prefixes
+                .iter()
+                .any(|history_prefix| history_prefix == prefix)
             {
-                self.broad_file_partition_value_scans.set(
-                    self.broad_file_partition_value_scans
-                        .get()
-                        .saturating_add(1),
-                );
+                self.history_scans
+                    .set(self.history_scans.get().saturating_add(1));
+            }
+            if prefix.starts_with(&self.scheduled_cleanup_prefix) {
+                self.scheduled_cleanup_scans
+                    .set(self.scheduled_cleanup_scans.get().saturating_add(1));
             }
             crate::OrderedCatalogKv::scan_prefix(&self.inner, prefix, direction, limit)
         }

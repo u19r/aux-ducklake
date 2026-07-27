@@ -128,6 +128,24 @@ pub(crate) fn parse_u64_field(
     })
 }
 
+pub(crate) fn parse_uuid_u128_field(
+    operation: &'static str,
+    value: &str,
+    field: &str,
+) -> CatalogResult<u128> {
+    let compact = value.replace('-', "");
+    if compact.len() != 32 || !compact.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(CatalogError::Decode(format!(
+            "{operation} payload has invalid {field} {value}"
+        )));
+    }
+    u128::from_str_radix(&compact, 16).map_err(|error| {
+        CatalogError::Decode(format!(
+            "{operation} payload has invalid {field} {value}: {error}"
+        ))
+    })
+}
+
 pub(crate) fn parse_u32_field(
     operation: &'static str,
     value: &str,

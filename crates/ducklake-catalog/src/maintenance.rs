@@ -119,7 +119,7 @@ pub fn list_old_delete_files_for_cleanup(
         if row.delete_file.validity.end_order.is_none() {
             continue;
         }
-        if !delete_file_is_cleanup_candidate(kv, catalog, &row.delete_file, &snapshots)? {
+        if !delete_file_cleanup_is_allowed(kv, catalog, &row.delete_file, &snapshots)? {
             continue;
         }
         seen.insert(row.delete_file.delete_file_id.0);
@@ -148,7 +148,7 @@ pub fn list_old_delete_files_for_cleanup(
         };
         let row = DeleteFileRow::decode(&value)?;
         if row.validity.end_order.is_some()
-            && delete_file_is_cleanup_candidate(kv, catalog, &row, &snapshots)?
+            && delete_file_cleanup_is_allowed(kv, catalog, &row, &snapshots)?
         {
             rows.push(DeleteFileCleanupRow {
                 delete_file: row,
@@ -247,10 +247,14 @@ pub fn remove_old_delete_files(
     let cleanup_rows = list_old_delete_files_for_cleanup(kv, catalog)?;
     let snapshots = list_snapshots(kv, catalog)?;
     let requested: BTreeSet<u64> = delete_file_ids.iter().map(|id| id.0).collect();
-    let rows: Vec<_> = cleanup_rows
-        .into_iter()
-        .filter(|row| requested.contains(&row.delete_file.delete_file_id.0))
-        .collect();
+    let mut rows = Vec::new();
+    for row in cleanup_rows {
+        if requested.contains(&row.delete_file.delete_file_id.0)
+            && delete_file_cleanup_is_allowed(kv, catalog, &row.delete_file, &snapshots)?
+        {
+            rows.push(row);
+        }
+    }
     let affected_tables = rows.iter().map(|row| row.table_id).collect::<BTreeSet<_>>();
     let mut batch = KvBatch::new();
     for row in &rows {
@@ -260,9 +264,7 @@ pub fn remove_old_delete_files(
                 row.delete_file.delete_file_id,
             ));
         }
-        if delete_file_cleanup_is_allowed(kv, catalog, &row.delete_file, &snapshots)? {
-            stage_remove_delete_file_metadata(&mut batch, catalog, row);
-        }
+        stage_remove_delete_file_metadata(&mut batch, catalog, row);
     }
     for table_id in affected_tables {
         stage_remove_unreachable_table_metadata(kv, &mut batch, catalog, table_id, &snapshots)?;
@@ -349,14 +351,24 @@ pub(crate) fn list_scheduled_data_file_cleanup_rows(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
 ) -> CatalogResult<Vec<ScheduledDataFileCleanupRow>> {
-    let mut rows = Vec::new();
-    for item in kv.scan_prefix(
+    let scheduled = kv.scan_prefix(
         &scheduled_data_file_cleanup_prefix(catalog),
         RangeDirection::Forward,
         usize::MAX,
-    )? {
-        let data_file_id = DataFileId(decode_cleanup_id(&item.key)?);
-        if let Some(value) = kv.get(&data_file_key(catalog, data_file_id))? {
+    )?;
+    let data_file_ids = scheduled
+        .iter()
+        .map(|item| decode_cleanup_id(&item.key).map(DataFileId))
+        .collect::<CatalogResult<Vec<_>>>()?;
+    let values = kv.batch_get(
+        &data_file_ids
+            .iter()
+            .map(|data_file_id| data_file_key(catalog, *data_file_id))
+            .collect::<Vec<_>>(),
+    )?;
+    let mut rows = Vec::new();
+    for (item, value) in scheduled.iter().zip(values) {
+        if let Some(value) = value {
             let (cleanup_kind, schedule_start_micros) =
                 decode_scheduled_data_cleanup_value(&item.value)?;
             rows.push(ScheduledDataFileCleanupRow {
@@ -369,18 +381,65 @@ pub(crate) fn list_scheduled_data_file_cleanup_rows(
     Ok(rows)
 }
 
+pub(crate) fn load_scheduled_data_file_cleanup_rows(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    data_file_ids: &[DataFileId],
+) -> CatalogResult<Vec<ScheduledDataFileCleanupRow>> {
+    let values = kv.batch_get(
+        &data_file_ids
+            .iter()
+            .flat_map(|data_file_id| {
+                [
+                    scheduled_data_file_cleanup_key(catalog, *data_file_id),
+                    data_file_key(catalog, *data_file_id),
+                ]
+            })
+            .collect::<Vec<_>>(),
+    )?;
+    let mut rows = Vec::new();
+    for (data_file_id, pair) in data_file_ids.iter().zip(values.chunks_exact(2)) {
+        let [Some(scheduled), Some(data_file)] = pair else {
+            continue;
+        };
+        let (cleanup_kind, schedule_start_micros) = decode_scheduled_data_cleanup_value(scheduled)?;
+        let data_file = DataFileRow::decode(data_file)?;
+        if data_file.data_file_id != *data_file_id {
+            return Err(crate::CatalogError::Decode(
+                "scheduled cleanup data file id does not match requested id".to_owned(),
+            ));
+        }
+        rows.push(ScheduledDataFileCleanupRow {
+            data_file,
+            schedule_start_micros,
+            cleanup_kind,
+        });
+    }
+    Ok(rows)
+}
+
 pub(crate) fn list_scheduled_delete_file_cleanup_rows(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
 ) -> CatalogResult<Vec<ScheduledDeleteFileCleanupRow>> {
-    let mut rows = Vec::new();
-    for item in kv.scan_prefix(
+    let scheduled = kv.scan_prefix(
         &scheduled_delete_file_cleanup_prefix(catalog),
         RangeDirection::Forward,
         usize::MAX,
-    )? {
-        let delete_file_id = DeleteFileId(decode_cleanup_id(&item.key)?);
-        if let Some(value) = kv.get(&delete_file_key(catalog, delete_file_id))? {
+    )?;
+    let delete_file_ids = scheduled
+        .iter()
+        .map(|item| decode_cleanup_id(&item.key).map(DeleteFileId))
+        .collect::<CatalogResult<Vec<_>>>()?;
+    let values = kv.batch_get(
+        &delete_file_ids
+            .iter()
+            .map(|delete_file_id| delete_file_key(catalog, *delete_file_id))
+            .collect::<Vec<_>>(),
+    )?;
+    let mut rows = Vec::new();
+    for (item, value) in scheduled.iter().zip(values) {
+        if let Some(value) = value {
             let delete_file = DeleteFileRow::decode(&value)?;
             let (table_id, schedule_start_micros) =
                 decode_scheduled_delete_cleanup_value(kv, catalog, &item.value, &delete_file)?;
@@ -390,6 +449,44 @@ pub(crate) fn list_scheduled_delete_file_cleanup_rows(
                 delete_file,
             });
         }
+    }
+    Ok(rows)
+}
+
+pub(crate) fn load_scheduled_delete_file_cleanup_rows(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    delete_file_ids: &[DeleteFileId],
+) -> CatalogResult<Vec<ScheduledDeleteFileCleanupRow>> {
+    let values = kv.batch_get(
+        &delete_file_ids
+            .iter()
+            .flat_map(|delete_file_id| {
+                [
+                    scheduled_delete_file_cleanup_key(catalog, *delete_file_id),
+                    delete_file_key(catalog, *delete_file_id),
+                ]
+            })
+            .collect::<Vec<_>>(),
+    )?;
+    let mut rows = Vec::new();
+    for (delete_file_id, pair) in delete_file_ids.iter().zip(values.chunks_exact(2)) {
+        let [Some(scheduled), Some(delete_file)] = pair else {
+            continue;
+        };
+        let delete_file = DeleteFileRow::decode(delete_file)?;
+        if delete_file.delete_file_id != *delete_file_id {
+            return Err(crate::CatalogError::Decode(
+                "scheduled cleanup delete file id does not match requested id".to_owned(),
+            ));
+        }
+        let (table_id, schedule_start_micros) =
+            decode_scheduled_delete_cleanup_value(kv, catalog, scheduled, &delete_file)?;
+        rows.push(ScheduledDeleteFileCleanupRow {
+            delete_file,
+            table_id,
+            schedule_start_micros,
+        });
     }
     Ok(rows)
 }
@@ -724,46 +821,7 @@ pub(crate) fn delete_file_physical_cleanup_decision(
     Ok(DeleteFilePhysicalCleanupDecision::SafeToRemove)
 }
 
-fn delete_file_is_cleanup_candidate(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    row: &DeleteFileRow,
-    snapshots: &[SnapshotRow],
-) -> CatalogResult<bool> {
-    if row.validity.end_order.is_none() {
-        return Ok(false);
-    }
-    Ok(delete_file_is_unreachable(row, snapshots)
-        || source_data_file_is_current(kv, catalog, row)?
-        || source_data_file_has_compaction_replacement_cleanup(kv, catalog, row.data_file_id)?)
-}
-
-fn delete_file_is_unreachable(row: &DeleteFileRow, snapshots: &[SnapshotRow]) -> bool {
-    row.validity.end_order.is_some()
-        && !snapshots
-            .iter()
-            .any(|snapshot| row.validity.is_visible_at(snapshot.order))
-}
-
-fn source_data_file_is_current(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    row: &DeleteFileRow,
-) -> CatalogResult<bool> {
-    let Some(value) = kv.get(&data_file_key(catalog, row.data_file_id))? else {
-        return Ok(false);
-    };
-    let data_file = DataFileRow::decode(&value)?;
-    Ok(kv
-        .get(&current_data_file_key(
-            catalog,
-            data_file.table_id,
-            row.data_file_id,
-        ))?
-        .is_some())
-}
-
-fn delete_file_cleanup_is_allowed(
+pub(crate) fn delete_file_cleanup_is_allowed(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
     row: &DeleteFileRow,

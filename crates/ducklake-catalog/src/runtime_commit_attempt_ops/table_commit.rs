@@ -3,9 +3,8 @@ use std::collections::BTreeMap;
 use crate::{
     CatalogError, CatalogId, CatalogResult, MutableCatalogKv, OrderedCatalogKv,
     RawSnapshotSequence, SchemaId, SchemaRow, SnapshotCommitMetadata, SnapshotRow, TableId,
-    TableRow, TableVersionReplacement, ViewRename, ViewRow, latest_snapshot,
-    runtime_schema_change_ops::RuntimeMutableCatalog,
-    runtime_snapshots::snapshot_schema_versions_by_order_shared,
+    TableRow, TableVersionReplacement, ViewCommentChange, ViewRename, ViewRow, latest_snapshot,
+    runtime_schema_change_ops::RuntimeMutableCatalog, schema_version_state::load_schema_version_at,
 };
 
 use crate::runtime_commit_attempt_ops::*;
@@ -55,11 +54,7 @@ pub(super) fn current_catalog_state(
 ) -> CatalogResult<CurrentCatalogState> {
     let started = RuntimeMetricStage::start();
     let latest = latest_snapshot(kv, catalog)?.ok_or(CatalogError::NotFound("catalog snapshot"))?;
-    let versions = snapshot_schema_versions_by_order_shared(kv, catalog)?;
-    let public_schema_version = versions
-        .get(&latest.order)
-        .copied()
-        .ok_or(CatalogError::NotFound("catalog schema version"))?;
+    let public_schema_version = load_schema_version_at(kv, catalog, latest.order)?;
     record_commit_attempt_stage("CurrentCatalogState", started);
     Ok(CurrentCatalogState {
         latest,
@@ -113,158 +108,42 @@ pub(super) struct TableCommitParts {
     pub(super) created_tables: Vec<CreatedTable>,
 }
 
+pub(crate) struct MetadataCommitChanges {
+    pub(crate) sequence: RawSnapshotSequence,
+    pub(crate) commit_metadata: Option<SnapshotCommitMetadata>,
+    pub(crate) public_schema_changed: bool,
+    pub(crate) created_schemas: Vec<SchemaRow>,
+    pub(crate) dropped_schema_ids: Vec<SchemaId>,
+    pub(crate) created_tables: Vec<TableRow>,
+    pub(crate) table_replacements: Vec<TableVersionReplacement>,
+    pub(crate) dropped_table_ids: Vec<TableId>,
+    pub(crate) replacement_tables: Vec<TableRow>,
+    pub(crate) created_views: Vec<ViewRow>,
+    pub(crate) view_renames: Vec<ViewRename>,
+    pub(crate) dropped_view_ids: Vec<TableId>,
+    pub(crate) view_comment_changes: Vec<ViewCommentChange>,
+}
+
 pub(super) trait CommitAttemptTableReplacements: MutableCatalogKv {
-    fn commit_schema_changes_at(
+    fn commit_metadata_changes(
         &mut self,
         catalog: CatalogId,
-        sequence: RawSnapshotSequence,
-        commit_metadata: Option<&SnapshotCommitMetadata>,
-        created: Vec<SchemaRow>,
-        dropped: Vec<SchemaId>,
-    ) -> CatalogResult<()>;
-
-    fn commit_table_changes_at(
-        &mut self,
-        catalog: CatalogId,
-        sequence: RawSnapshotSequence,
-        commit_metadata: Option<&SnapshotCommitMetadata>,
-        created: Vec<TableRow>,
-        replacements: Vec<TableVersionReplacement>,
-    ) -> CatalogResult<()>;
-
-    fn commit_replace_tables_at(
-        &mut self,
-        catalog: CatalogId,
-        sequence: RawSnapshotSequence,
-        dropped_table_ids: &[TableId],
-        tables: Vec<TableRow>,
-        commit_metadata: Option<&SnapshotCommitMetadata>,
+        changes: MetadataCommitChanges,
     ) -> CatalogResult<Vec<TableRow>>;
-
-    fn commit_view_changes_at(
-        &mut self,
-        catalog: CatalogId,
-        sequence: RawSnapshotSequence,
-        created: Vec<ViewRow>,
-        renamed: Vec<ViewRename>,
-        dropped: Vec<TableId>,
-        changes: Vec<crate::ViewCommentChange>,
-    ) -> CatalogResult<()>;
 }
 
 impl CommitAttemptTableReplacements for RuntimeMutableCatalog {
-    fn commit_schema_changes_at(
+    fn commit_metadata_changes(
         &mut self,
         catalog: CatalogId,
-        sequence: RawSnapshotSequence,
-        commit_metadata: Option<&SnapshotCommitMetadata>,
-        created: Vec<SchemaRow>,
-        dropped: Vec<SchemaId>,
-    ) -> CatalogResult<()> {
-        match self {
-            #[cfg(feature = "foundationdb")]
-            Self::FoundationDb(kv) => {
-                let _ = commit_metadata;
-                kv.change_schemas_versionstamped_at(catalog, created, &dropped, sequence)?;
-                Ok(())
-            }
-            #[cfg(not(feature = "foundationdb"))]
-            Self::Unavailable => {
-                let _ = (catalog, sequence, commit_metadata, created, dropped);
-                Err(crate::CatalogError::Backend(
-                    "foundationdb runtime requires ducklake-catalog --features foundationdb"
-                        .to_owned(),
-                ))
-            }
-        }
-    }
-
-    fn commit_table_changes_at(
-        &mut self,
-        catalog: CatalogId,
-        sequence: RawSnapshotSequence,
-        commit_metadata: Option<&SnapshotCommitMetadata>,
-        created: Vec<TableRow>,
-        replacements: Vec<TableVersionReplacement>,
-    ) -> CatalogResult<()> {
-        match self {
-            #[cfg(feature = "foundationdb")]
-            Self::FoundationDb(kv) => kv.commit_table_changes_with_sequence_versionstamped(
-                catalog,
-                sequence,
-                commit_metadata,
-                created,
-                replacements,
-            ),
-            #[cfg(not(feature = "foundationdb"))]
-            Self::Unavailable => {
-                let _ = (catalog, sequence, commit_metadata, created, replacements);
-                Err(crate::CatalogError::Backend(
-                    "foundationdb runtime requires ducklake-catalog --features foundationdb"
-                        .to_owned(),
-                ))
-            }
-        }
-    }
-
-    fn commit_replace_tables_at(
-        &mut self,
-        catalog: CatalogId,
-        sequence: RawSnapshotSequence,
-        dropped_table_ids: &[TableId],
-        tables: Vec<TableRow>,
-        _commit_metadata: Option<&SnapshotCommitMetadata>,
+        changes: MetadataCommitChanges,
     ) -> CatalogResult<Vec<TableRow>> {
-        if dropped_table_ids.is_empty() && tables.is_empty() {
-            return Ok(Vec::new());
-        }
         match self {
             #[cfg(feature = "foundationdb")]
-            Self::FoundationDb(kv) => kv
-                .replace_tables_versionstamped_recoverable(
-                    catalog,
-                    dropped_table_ids,
-                    tables,
-                    Some(sequence),
-                    None,
-                )
-                .inspect(|_tables| {
-                    let _ = _commit_metadata;
-                }),
+            Self::FoundationDb(kv) => kv.commit_metadata_changes_versionstamped(catalog, changes),
             #[cfg(not(feature = "foundationdb"))]
             Self::Unavailable => {
-                let _ = (
-                    catalog,
-                    sequence,
-                    dropped_table_ids,
-                    tables,
-                    _commit_metadata,
-                );
-                Err(crate::CatalogError::Backend(
-                    "foundationdb runtime requires ducklake-catalog --features foundationdb"
-                        .to_owned(),
-                ))
-            }
-        }
-    }
-
-    fn commit_view_changes_at(
-        &mut self,
-        catalog: CatalogId,
-        sequence: RawSnapshotSequence,
-        created: Vec<ViewRow>,
-        renamed: Vec<ViewRename>,
-        dropped: Vec<TableId>,
-        changes: Vec<crate::ViewCommentChange>,
-    ) -> CatalogResult<()> {
-        match self {
-            #[cfg(feature = "foundationdb")]
-            Self::FoundationDb(kv) => kv.change_views_versionstamped_at(
-                catalog, created, renamed, &dropped, changes, sequence,
-            ),
-            #[cfg(not(feature = "foundationdb"))]
-            Self::Unavailable => {
-                let _ = (catalog, sequence, created, renamed, dropped, changes);
+                let _ = (catalog, changes);
                 Err(crate::CatalogError::Backend(
                     "foundationdb runtime requires ducklake-catalog --features foundationdb"
                         .to_owned(),
@@ -276,62 +155,51 @@ impl CommitAttemptTableReplacements for RuntimeMutableCatalog {
 
 #[cfg(test)]
 impl CommitAttemptTableReplacements for crate::FakeOrderedCatalogKv {
-    fn commit_schema_changes_at(
+    fn commit_metadata_changes(
         &mut self,
         catalog: CatalogId,
-        sequence: RawSnapshotSequence,
-        commit_metadata: Option<&SnapshotCommitMetadata>,
-        created: Vec<SchemaRow>,
-        dropped: Vec<SchemaId>,
-    ) -> CatalogResult<()> {
-        commit_schema_changes_at(self, catalog, sequence, commit_metadata, created, dropped)
-    }
-
-    fn commit_table_changes_at(
-        &mut self,
-        catalog: CatalogId,
-        sequence: RawSnapshotSequence,
-        commit_metadata: Option<&SnapshotCommitMetadata>,
-        created: Vec<TableRow>,
-        replacements: Vec<TableVersionReplacement>,
-    ) -> CatalogResult<()> {
-        commit_created_tables_at(self, catalog, sequence, commit_metadata, created)?;
-        self.commit_table_replacements(catalog, previous_sequence(sequence)?, replacements)
-    }
-
-    fn commit_replace_tables_at(
-        &mut self,
-        catalog: CatalogId,
-        sequence: RawSnapshotSequence,
-        dropped_table_ids: &[TableId],
-        tables: Vec<TableRow>,
-        _commit_metadata: Option<&SnapshotCommitMetadata>,
+        changes: MetadataCommitChanges,
     ) -> CatalogResult<Vec<TableRow>> {
-        commit_replaced_tables_at(self, catalog, sequence, dropped_table_ids, tables)
-    }
-
-    fn commit_view_changes_at(
-        &mut self,
-        catalog: CatalogId,
-        _sequence: RawSnapshotSequence,
-        created: Vec<ViewRow>,
-        renamed: Vec<ViewRename>,
-        dropped: Vec<TableId>,
-        changes: Vec<crate::ViewCommentChange>,
-    ) -> CatalogResult<()> {
-        for view in created {
+        commit_schema_changes_at(
+            self,
+            catalog,
+            changes.sequence,
+            changes.commit_metadata.as_ref(),
+            changes.created_schemas,
+            changes.dropped_schema_ids,
+        )?;
+        commit_created_tables_at(
+            self,
+            catalog,
+            changes.sequence,
+            changes.commit_metadata.as_ref(),
+            changes.created_tables,
+        )?;
+        self.commit_table_replacements(
+            catalog,
+            previous_sequence(changes.sequence)?,
+            changes.table_replacements,
+        )?;
+        let created = commit_replaced_tables_at(
+            self,
+            catalog,
+            changes.sequence,
+            &changes.dropped_table_ids,
+            changes.replacement_tables,
+        )?;
+        for view in changes.created_views {
             crate::commit_create_view_row(self, catalog, view)?;
         }
-        for rename in renamed {
+        for rename in changes.view_renames {
             crate::commit_rename_views(self, catalog, &[rename])?;
         }
-        for change in changes {
+        for change in changes.view_comment_changes {
             crate::commit_change_view_comment(self, catalog, &change)?;
         }
-        for view_id in dropped {
+        for view_id in changes.dropped_view_ids {
             crate::commit_drop_views(self, catalog, &[view_id])?;
         }
-        Ok(())
+        Ok(created)
     }
 }
 
@@ -350,7 +218,7 @@ pub(super) fn commit_replaced_tables_at(
     let snapshot = SnapshotRow::new(order, sequence);
     let mut batch = KvBatch::new();
     stage_snapshot(&mut batch, catalog, &snapshot);
-    stage_next_schema_version(kv, &mut batch, catalog)?;
+    stage_next_schema_version(kv, &mut batch, catalog, &snapshot)?;
     for table_id in dropped_table_ids {
         let mut table = load_current_table_row(kv, catalog, *table_id)?
             .ok_or(CatalogError::NotFound("table"))?;
@@ -396,7 +264,7 @@ pub(super) fn commit_schema_changes_at(
     let snapshot = SnapshotRow::new(order, sequence).with_optional_commit_metadata(commit_metadata);
     let mut batch = KvBatch::new();
     stage_snapshot(&mut batch, catalog, &snapshot);
-    stage_next_schema_version(kv, &mut batch, catalog)?;
+    stage_next_schema_version(kv, &mut batch, catalog, &snapshot)?;
     for schema_id in dropped {
         let mut schema = crate::schema_store::load_schema_at(kv, catalog, schema_id, latest.order)?
             .ok_or(CatalogError::NotFound("schema"))?;
@@ -431,7 +299,7 @@ pub(super) fn commit_created_tables_at(
     let snapshot = SnapshotRow::new(order, sequence).with_optional_commit_metadata(commit_metadata);
     let mut batch = KvBatch::new();
     stage_snapshot(&mut batch, catalog, &snapshot);
-    stage_next_schema_version(kv, &mut batch, catalog)?;
+    stage_next_schema_version(kv, &mut batch, catalog, &snapshot)?;
     for mut table in tables {
         table.validity = ValidityWindow::new(order, None);
         batch.put(

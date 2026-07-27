@@ -1,3 +1,4 @@
+use crate::runtime_foundationdb::runtime_foundationdb_commit_data_and_inline_mutation;
 use crate::{
     CatalogId, CatalogOrderId, CatalogResult, ColumnId, CommitAttemptId, DataFileId, DataFileRow,
     DataMutationCommit, DeleteFileId, DeleteFileRow, DuckLakeSnapshotId, FileColumnStatsRow,
@@ -9,7 +10,9 @@ use crate::{
     runtime_foundationdb::runtime_foundationdb_commit_data_mutation,
     runtime_protocol::RuntimeCatalogBackend,
     runtime_snapshot_range::{ProposedCommitSnapshot, SemanticDeleteCoverageBegin},
-    runtime_tabular_payload::{TabularPayload, parse_u32_field, parse_u64_field},
+    runtime_tabular_payload::{
+        TabularPayload, parse_u32_field, parse_u64_field, parse_uuid_u128_field,
+    },
     snapshot_by_ducklake_sequence,
     table_store::load_table_at,
 };
@@ -20,6 +23,7 @@ const COMMIT_DATA_MUTATION: &str = "CommitDataMutation";
 #[derive(Default)]
 pub(crate) struct RuntimeDataMutation {
     pub(crate) proposed_commit_snapshot: Option<ProposedCommitSnapshot>,
+    pub(crate) recovery_attempt_id: Option<CommitAttemptId>,
     pub(crate) read_snapshot: Option<DuckLakeSnapshotId>,
     pub(crate) commit_metadata: SnapshotCommitMetadata,
     pub(crate) data_files: Vec<DataFileRow>,
@@ -84,6 +88,26 @@ pub(crate) fn commit_data_mutation(
     mutation.resolve_proposed_commit_snapshot_from_inline_flushes();
     let (commit, affected_table_ids) =
         { runtime_foundationdb_commit_data_mutation(catalog, mutation)? };
+    Ok(data_mutation_payload(commit, &affected_table_ids))
+}
+
+pub(crate) fn commit_data_and_inline_mutation(
+    _backend: RuntimeCatalogBackend,
+    catalog: CatalogId,
+    payload: &[u8],
+    inline_rows: Vec<crate::runtime_inline_ops::RuntimeInlineRows>,
+    inline_deletes: Vec<crate::runtime_inline_ops::RuntimeInlineDelete>,
+    commit_snapshot: Option<DuckLakeSnapshotId>,
+) -> CatalogResult<Vec<u8>> {
+    let mut mutation = data_mutation_payload_values(payload)?;
+    mutation.resolve_proposed_commit_snapshot_from_inline_flushes();
+    let (commit, affected_table_ids) = runtime_foundationdb_commit_data_and_inline_mutation(
+        catalog,
+        mutation,
+        inline_rows,
+        inline_deletes,
+        commit_snapshot,
+    )?;
     Ok(data_mutation_payload(commit, &affected_table_ids))
 }
 
@@ -349,6 +373,13 @@ pub(crate) fn data_mutation_payload_values(payload: &[u8]) -> CatalogResult<Runt
                         parse_u64_field(COMMIT_DATA_MUTATION, snapshot_id, "commit snapshot id")?
                             .into(),
                     )));
+            }
+            ["recovery_attempt", attempt_id] => {
+                mutation.recovery_attempt_id = Some(CommitAttemptId(parse_uuid_u128_field(
+                    COMMIT_DATA_MUTATION,
+                    attempt_id,
+                    "recovery attempt id",
+                )?));
             }
             ["read_snapshot", snapshot_id] => {
                 mutation.read_snapshot = Some(DuckLakeSnapshotId(parse_u64_field(

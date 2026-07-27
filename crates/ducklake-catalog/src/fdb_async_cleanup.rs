@@ -1,16 +1,19 @@
 use crate::{
     CatalogError, CatalogId, CatalogResult, ColumnId, DataFileId, DataFileRow, FdbOrderedCatalogKv,
     FileColumnStatsRow, FilePartitionValueRow, PartitionKeyIndex, RangeDirection, TableId,
+    fdb_async::{MAX_ASYNC_FDB_RETRIES, is_retryable_async_catalog_error},
     fdb_runtime::map_fdb_commit_error,
     file_partitions::remove_cached_file_partition_values,
-    file_stats::remove_cached_file_column_stats_for_data_file,
+    file_stats::{
+        remove_cached_file_column_stats_for_data_file, remove_cached_file_column_stats_rows,
+    },
     keys::{
         KeyFamily, current_data_file_key, data_file_begin_key, data_file_end_key, data_file_key,
         family_prefix, file_column_stats_key, file_column_stats_lookup_key,
-        file_column_stats_lookup_prefix, file_partition_value_key, file_partition_value_prefix,
-        partition_value_lookup_key, partition_value_lookup_prefix,
+        file_partition_value_key, file_partition_value_prefix, partition_value_lookup_key,
     },
 };
+use futures::try_join;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AsyncFileCleanupMetadataCounts {
@@ -39,12 +42,10 @@ impl FdbOrderedCatalogKv {
                 data_file_id.0
             )));
         }
-        let partition_lookups = self
-            .partition_lookup_keys_for_data_file(catalog, data_file_id)
-            .await?;
-        let stats_lookups = self
-            .stats_lookup_keys_for_data_file(catalog, data_file_id)
-            .await?;
+        let (partition_lookups, stats_lookups) = try_join!(
+            self.partition_lookup_keys_for_data_file(catalog, data_file_id),
+            self.stats_lookup_keys_for_data_file(catalog, data_file_id),
+        )?;
 
         let trx = self.create_transaction()?;
         trx.clear(&self.namespaced_key(&data_file_key(catalog, data_file_id)));
@@ -90,6 +91,32 @@ impl FdbOrderedCatalogKv {
         stats: FileColumnStatsRow,
     ) -> CatalogResult<()> {
         validate_cleanup_metadata_pair(&partition, &stats)?;
+        let mut last_retry_error = None;
+        for _ in 0..=MAX_ASYNC_FDB_RETRIES {
+            match self
+                .try_register_file_cleanup_metadata_async(catalog, &partition, &stats)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(error) if is_retryable_async_catalog_error(&error) => {
+                    last_retry_error = Some(error);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(last_retry_error.unwrap_or_else(|| {
+            CatalogError::InvalidMutation(
+                "foundationdb async cleanup-metadata retry loop did not run".to_owned(),
+            )
+        }))
+    }
+
+    async fn try_register_file_cleanup_metadata_async(
+        &self,
+        catalog: CatalogId,
+        partition: &FilePartitionValueRow,
+        stats: &FileColumnStatsRow,
+    ) -> CatalogResult<()> {
         let Some(value) = self
             .get_async(&data_file_key(catalog, partition.data_file_id))
             .await?
@@ -143,7 +170,7 @@ impl FdbOrderedCatalogKv {
         );
         trx.commit().await.map_err(map_fdb_commit_error)?;
         remove_cached_file_partition_values(self, catalog, partition.data_file_id);
-        remove_cached_file_column_stats_for_data_file(self, catalog, stats.data_file_id);
+        remove_cached_file_column_stats_rows(self, catalog, std::slice::from_ref(stats));
         Ok(())
     }
 
@@ -156,44 +183,29 @@ impl FdbOrderedCatalogKv {
         partition_value: &str,
         column_id: ColumnId,
     ) -> CatalogResult<AsyncFileCleanupMetadataCounts> {
+        let partition_value_key =
+            file_partition_value_key(catalog, data_file_id, partition_key_index);
+        let partition_lookup_key = partition_value_lookup_key(
+            catalog,
+            table_id,
+            partition_key_index,
+            partition_value,
+            data_file_id,
+        );
+        let column_stats_key = file_column_stats_key(catalog, data_file_id, column_id);
+        let column_stats_lookup_key =
+            file_column_stats_lookup_key(catalog, table_id, column_id, data_file_id);
+        let (partition_values, partition_lookups, column_stats, column_stats_lookups) = futures::try_join!(
+            self.get_async(&partition_value_key),
+            self.get_async(&partition_lookup_key),
+            self.get_async(&column_stats_key),
+            self.get_async(&column_stats_lookup_key),
+        )?;
         Ok(AsyncFileCleanupMetadataCounts {
-            partition_values: self
-                .scan_prefix_async(
-                    &file_partition_value_prefix(catalog, data_file_id),
-                    RangeDirection::Forward,
-                    usize::MAX,
-                )
-                .await?
-                .len(),
-            partition_lookups: self
-                .scan_prefix_async(
-                    &partition_value_lookup_prefix(
-                        catalog,
-                        table_id,
-                        partition_key_index,
-                        partition_value,
-                    ),
-                    RangeDirection::Forward,
-                    usize::MAX,
-                )
-                .await?
-                .len(),
-            column_stats: self
-                .scan_prefix_async(
-                    &file_column_stats_prefix(catalog, data_file_id),
-                    RangeDirection::Forward,
-                    usize::MAX,
-                )
-                .await?
-                .len(),
-            column_stats_lookups: self
-                .scan_prefix_async(
-                    &file_column_stats_lookup_prefix(catalog, table_id, column_id),
-                    RangeDirection::Forward,
-                    usize::MAX,
-                )
-                .await?
-                .len(),
+            partition_values: usize::from(partition_values.is_some()),
+            partition_lookups: usize::from(partition_lookups.is_some()),
+            column_stats: usize::from(column_stats.is_some()),
+            column_stats_lookups: usize::from(column_stats_lookups.is_some()),
         })
     }
 

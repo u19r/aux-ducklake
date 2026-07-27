@@ -2,7 +2,7 @@ use std::{cell::Cell, collections::BTreeMap};
 
 use crate::{
     CatalogId, CatalogOrderId, CatalogResult, ColumnId, DataFileId, DataFileRow,
-    FakeOrderedCatalogKv, FileColumnStatsRow, OrderedCatalogKv, RangeDirection, RangeItem,
+    FakeOrderedCatalogKv, FileColumnStatsRow, KvBatch, OrderedCatalogKv, RangeDirection, RangeItem,
     SchemaId, TableId, commit_append_data_files, initialize_catalog_if_absent,
     keys::{
         KeyFamily, catalog_file_stats_version_key, family_prefix,
@@ -157,6 +157,39 @@ fn given_same_file_column_stats_loaded_twice_when_cached_then_second_load_skips_
 }
 
 #[test]
+fn given_file_stats_are_immutable_when_read_context_changes_then_cached_rows_are_reused() {
+    let catalog = CatalogId(58);
+    let table = TableId(24);
+    let file = DataFileId(20);
+    let column = ColumnId(1);
+    let mut inner = FakeOrderedCatalogKv::new();
+    initialize_catalog_if_absent(&mut inner, catalog).unwrap();
+    commit_append_data_files(&mut inner, catalog, vec![test_data_file(file, table)]).unwrap();
+    register_file_column_stats(
+        &mut inner,
+        catalog,
+        FileColumnStatsRow::new(
+            file,
+            table,
+            column,
+            0,
+            Some("1".to_owned()),
+            Some("9".to_owned()),
+        ),
+    )
+    .unwrap();
+    let kv = CountingStatsKv::new(inner, file_column_stats_key(catalog, file, column));
+    let files = vec![test_data_file(file, table)];
+    let columns_by_table = columns_by_table(table, [column]);
+
+    super::list_file_column_stats_for_data_files(&kv, catalog, &files, &columns_by_table).unwrap();
+    kv.set_read_context(2);
+    super::list_file_column_stats_for_data_files(&kv, catalog, &files, &columns_by_table).unwrap();
+
+    assert_eq!(kv.stats_batch_gets(), 1);
+}
+
+#[test]
 fn given_multiple_file_column_stats_loaded_twice_when_cached_then_second_load_skips_batch_get() {
     let catalog = CatalogId(49);
     let table = TableId(15);
@@ -278,6 +311,40 @@ fn given_cached_stats_are_registered_again_when_loaded_then_overwritten_stats_ar
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].min_value.as_deref(), Some("2"));
     assert_eq!(rows[0].max_value.as_deref(), Some("10"));
+}
+
+#[test]
+fn given_cached_stats_when_data_file_id_is_reused_then_fresh_stats_are_returned() {
+    let catalog = CatalogId(48);
+    let table = TableId(14);
+    let file = DataFileId(19);
+    let column = ColumnId(1);
+    let mut kv = FakeOrderedCatalogKv::new();
+    initialize_catalog_if_absent(&mut kv, catalog).unwrap();
+    let files = vec![test_data_file(file, table)];
+    commit_append_data_files(&mut kv, catalog, files.clone()).unwrap();
+    let columns_by_table = columns_by_table(table, [column]);
+    register_file_column_stats(
+        &mut kv,
+        catalog,
+        FileColumnStatsRow::new(file, table, column, 0, Some("1".to_owned()), None),
+    )
+    .unwrap();
+    super::list_file_column_stats_for_data_files(&kv, catalog, &files, &columns_by_table).unwrap();
+
+    let replacement = FileColumnStatsRow::new(file, table, column, 0, Some("2".to_owned()), None);
+    let mut batch = KvBatch::new();
+    batch.put(
+        file_column_stats_key(catalog, file, column),
+        replacement.encode(),
+    );
+    kv.commit(batch).unwrap();
+    super::remove_cached_file_column_stats_for_data_file(&kv, catalog, file);
+    let rows =
+        super::list_file_column_stats_for_data_files(&kv, catalog, &files, &columns_by_table)
+            .unwrap();
+
+    assert_eq!(rows, vec![replacement]);
 }
 
 #[test]
@@ -489,6 +556,7 @@ fn columns_by_table(
 struct CountingStatsKv {
     inner: FakeOrderedCatalogKv,
     counted_key: Vec<u8>,
+    read_context: Cell<u64>,
     stats_batch_gets: Cell<usize>,
 }
 
@@ -582,8 +650,13 @@ impl CountingStatsKv {
         Self {
             inner,
             counted_key,
+            read_context: Cell::new(1),
             stats_batch_gets: Cell::new(0),
         }
+    }
+
+    fn set_read_context(&self, read_context: u64) {
+        self.read_context.set(read_context);
     }
 
     fn stats_batch_gets(&self) -> usize {
@@ -592,6 +665,11 @@ impl CountingStatsKv {
 }
 
 impl OrderedCatalogKv for CountingStatsKv {
+    fn catalog_cache_namespace(&self) -> crate::CatalogCacheNamespace {
+        crate::CatalogCacheNamespace::process_local(self as *const Self as usize)
+            .with_read_context(Some(self.read_context.get()))
+    }
+
     fn get(&self, key: &[u8]) -> CatalogResult<Option<Vec<u8>>> {
         Ok(self.inner.get(key))
     }

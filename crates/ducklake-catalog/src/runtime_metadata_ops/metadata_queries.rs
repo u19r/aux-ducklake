@@ -1,9 +1,10 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    CatalogId, CatalogResult, DataFileId, DataFileRow, DeleteFileId, DeleteFileRow,
-    FileColumnStatsRow, FilePartitionValueRow, OrderedCatalogKv, RangeDirection, TableId,
-    keys::{KeyFamily, data_file_key, delete_file_key, family_prefix},
+    CatalogId, CatalogOrderId, CatalogResult, DataFileId, DataFileRow, DeleteFileId, DeleteFileRow,
+    FileColumnStatsRow, FilePartitionValueRow, OrderedCatalogKv, RangeDirection, SnapshotRow,
+    TableId,
+    keys::{KeyFamily, data_file_key, delete_file_key, family_prefix, snapshot_key},
 };
 
 use crate::runtime_metadata_ops::*;
@@ -22,7 +23,34 @@ pub(super) fn list_delete_files(
     .collect()
 }
 
+pub(super) fn list_snapshots_for_orders(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    orders: BTreeSet<CatalogOrderId>,
+) -> CatalogResult<Vec<SnapshotRow>> {
+    let keys = orders
+        .iter()
+        .map(|order| snapshot_key(catalog, *order))
+        .collect::<Vec<_>>();
+    let values = kv.batch_get(&keys)?;
+    keys.into_iter()
+        .zip(values)
+        .filter_map(|(key, value)| value.map(|value| (key, value)))
+        .map(|(key, value)| crate::store::decode_snapshot_item(catalog, &key, &value))
+        .collect()
+}
+
 pub(super) fn list_current_data_files_for_data_file_ids(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    data_file_ids: &[DataFileId],
+) -> CatalogResult<Vec<DataFileRow>> {
+    let mut rows = list_data_files_for_data_file_ids(kv, catalog, data_file_ids)?;
+    rows.retain(|row| row.validity.end_order.is_none());
+    Ok(rows)
+}
+
+pub(super) fn list_data_files_for_data_file_ids(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
     data_file_ids: &[DataFileId],
@@ -38,11 +66,6 @@ pub(super) fn list_current_data_files_for_data_file_ids(
         .into_iter()
         .flatten()
         .map(|value| DataFileRow::decode(&value))
-        .filter(|row| {
-            row.as_ref()
-                .map(|row| row.validity.end_order.is_none())
-                .unwrap_or(true)
-        })
         .collect::<CatalogResult<Vec<_>>>()?;
     rows.sort_by_key(|row| row.data_file_id.0);
     Ok(rows)
@@ -69,21 +92,31 @@ pub(super) fn list_delete_files_for_delete_file_ids(
     Ok(rows)
 }
 
+pub(super) fn list_delete_files_for_data_file_ids(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    data_file_ids: &[DataFileId],
+) -> CatalogResult<Vec<DeleteFileRow>> {
+    let mut rows = BTreeMap::new();
+    for data_file_id in unique_data_file_ids(data_file_ids) {
+        for item in kv.scan_prefix(
+            &crate::keys::delete_file_timeline_prefix(catalog, data_file_id),
+            RangeDirection::Forward,
+            usize::MAX,
+        )? {
+            let row = delete_file_from_timeline_value(kv, catalog, &item.value)?;
+            rows.insert(row.delete_file_id, row);
+        }
+    }
+    Ok(rows.into_values().collect())
+}
+
 pub(super) fn list_file_column_stats_for_data_file_ids(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
     data_file_ids: &[DataFileId],
 ) -> CatalogResult<Vec<FileColumnStatsRow>> {
-    if data_file_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    let requested_ids = data_file_ids.iter().copied().collect::<BTreeSet<_>>();
-    let mut rows = current_metadata_file_column_stats(kv, catalog)?
-        .into_iter()
-        .filter(|row| requested_ids.contains(&row.data_file_id))
-        .collect::<Vec<_>>();
-    rows.sort_by_key(|row| (row.table_id.0, row.data_file_id.0, row.column_id.0));
-    Ok(rows)
+    crate::file_stats::list_file_column_stats_for_data_file_ids(kv, catalog, data_file_ids)
 }
 
 pub(super) fn unique_data_file_ids(data_file_ids: &[DataFileId]) -> Vec<DataFileId> {
@@ -111,6 +144,42 @@ pub(super) fn data_file_ids_payload_values(payload: &[u8]) -> CatalogResult<Vec<
 pub(super) fn delete_file_ids_payload_values(payload: &[u8]) -> CatalogResult<Vec<DeleteFileId>> {
     parse_id_payload(payload, "delete_file_id")
         .map(|ids| ids.into_iter().map(DeleteFileId).collect())
+}
+
+pub(super) fn bounded_delete_file_mirror_payload_values(
+    payload: &[u8],
+) -> CatalogResult<(Vec<DeleteFileId>, Vec<DataFileId>)> {
+    let input = std::str::from_utf8(payload).map_err(|error| {
+        crate::CatalogError::Decode(format!(
+            "invalid bounded delete file mirror payload: {error}"
+        ))
+    })?;
+    let mut delete_file_ids = BTreeSet::new();
+    let mut data_file_ids = BTreeSet::new();
+    for line in input.lines().filter(|line| !line.is_empty()) {
+        let Some((label, value)) = line.split_once('\t') else {
+            return Err(crate::CatalogError::Decode(format!(
+                "invalid bounded delete file mirror payload row: {line}"
+            )));
+        };
+        match label {
+            "delete_file_id" => {
+                delete_file_ids.insert(DeleteFileId(parse_u64(value, "delete file id")?));
+            }
+            "data_file_id" => {
+                data_file_ids.insert(DataFileId(parse_u64(value, "data file id")?));
+            }
+            _ => {
+                return Err(crate::CatalogError::Decode(format!(
+                    "invalid bounded delete file mirror payload label: {label}"
+                )));
+            }
+        }
+    }
+    Ok((
+        delete_file_ids.into_iter().collect(),
+        data_file_ids.into_iter().collect(),
+    ))
 }
 
 pub(super) fn bounded_append_mirror_payload_values(
@@ -165,6 +234,13 @@ pub(super) fn data_file_ids_sql(ids: &[DataFileId]) -> String {
 }
 
 pub(super) fn delete_file_ids_sql(ids: &[DeleteFileId]) -> String {
+    let mut values = ids.iter().map(|id| id.0).collect::<Vec<_>>();
+    values.sort_unstable();
+    values.dedup();
+    id_sql(values)
+}
+
+pub(super) fn table_ids_sql(ids: &[TableId]) -> String {
     let mut values = ids.iter().map(|id| id.0).collect::<Vec<_>>();
     values.sort_unstable();
     values.dedup();

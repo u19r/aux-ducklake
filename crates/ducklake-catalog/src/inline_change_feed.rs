@@ -1,3 +1,4 @@
+use crate::runtime_metrics::RuntimeMetricStage;
 #[cfg(feature = "runtime-metrics")]
 use crate::runtime_metrics::record_runtime_method_elapsed;
 use crate::{
@@ -78,8 +79,13 @@ pub(crate) fn stage_inline_row_changes_for_payload(
 }
 
 fn optional_inline_payload_row_ids(payload: &[u8]) -> CatalogResult<Vec<u64>> {
-    match inline_payload_row_ids(payload) {
-        Ok(row_ids) => Ok(row_ids),
+    optional_inline_payload_rows(payload)
+        .map(|rows| rows.into_iter().map(|(row_id, _)| row_id).collect())
+}
+
+pub(crate) fn optional_inline_payload_rows(payload: &[u8]) -> CatalogResult<Vec<(u64, Vec<u8>)>> {
+    match inline_payload_rows(payload) {
+        Ok(rows) => Ok(rows),
         Err(CatalogError::Decode(message))
             if message.starts_with("inline payload is not utf-8")
                 || message.starts_with("inline payload row has invalid shape") =>
@@ -88,6 +94,14 @@ fn optional_inline_payload_row_ids(payload: &[u8]) -> CatalogResult<Vec<u64>> {
         }
         Err(error) => Err(error),
     }
+}
+
+pub(crate) fn inline_payload_rows(payload: &[u8]) -> CatalogResult<Vec<(u64, Vec<u8>)>> {
+    inline_payload_text(payload)?
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| Ok((inline_row_id(line)?, line.as_bytes().to_vec())))
+        .collect()
 }
 
 pub(crate) fn stage_inline_row_change(
@@ -540,11 +554,6 @@ fn without_compacted_sources(rows: Vec<DataFileRow>) -> Vec<DataFileRow> {
         .collect()
 }
 
-fn inline_payload_row_ids(payload: &[u8]) -> CatalogResult<Vec<u64>> {
-    let text = inline_payload_text(payload)?;
-    text.lines().map(inline_row_id).collect()
-}
-
 fn inline_payload_row(payload: &[u8], wanted_row_id: u64) -> CatalogResult<Option<Vec<u8>>> {
     let text = inline_payload_text(payload)?;
     for line in text.lines() {
@@ -668,33 +677,6 @@ fn decode_schema_kind_inline_row_change_key(
         kind,
         row_id,
     })
-}
-
-#[cfg(feature = "runtime-metrics")]
-#[derive(Clone, Copy)]
-struct RuntimeMetricStage(std::time::Instant);
-
-#[cfg(not(feature = "runtime-metrics"))]
-#[derive(Clone, Copy)]
-struct RuntimeMetricStage;
-
-impl RuntimeMetricStage {
-    #[inline]
-    fn start() -> Self {
-        #[cfg(feature = "runtime-metrics")]
-        {
-            Self(std::time::Instant::now())
-        }
-        #[cfg(not(feature = "runtime-metrics"))]
-        {
-            Self
-        }
-    }
-
-    #[cfg(feature = "runtime-metrics")]
-    fn elapsed_micros(self) -> u64 {
-        u64::try_from(self.0.elapsed().as_micros()).unwrap_or(u64::MAX)
-    }
 }
 
 #[cfg(feature = "runtime-metrics")]

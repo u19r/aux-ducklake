@@ -13,27 +13,24 @@ use futures::executor::block_on;
 
 use crate::{
     CatalogCacheNamespace, CatalogError, CatalogResult, DataFileChangeKind, DataFileRow,
-    DeleteFileRow, MetadataSettingRow, SnapshotRow, ValidityWindow,
+    MetadataSettingRow, SnapshotRow, ValidityWindow,
+    fdb_data_mutation_staging::stage_data_file,
     fdb_runtime::{map_fdb_commit_error, map_fdb_error, shared_foundationdb_database},
     fdb_versionstamp::{
-        append_versionstamp_offset, committed_order, data_file_begin_key_order_offset,
-        data_file_end_key_order_offset, delete_file_timeline_key_order_offset,
-        estimate_versionstamped_append_bytes, estimate_versionstamped_delete_bytes,
-        estimate_versionstamped_expire_bytes, incomplete_order,
-        order_delete_file_change_key_order_offset, snapshot_data_file_change_key_order_offset,
-        snapshot_key_order_offset, snapshot_timestamp_key_order_offset, strip_namespace,
-        table_data_file_change_key_order_offset, table_delete_file_change_key_order_offset,
-        versionstamped_value,
+        append_versionstamp_offset, committed_order, data_file_end_key_order_offset,
+        estimate_versionstamped_append_bytes, estimate_versionstamped_expire_bytes,
+        incomplete_order, snapshot_data_file_change_key_order_offset, snapshot_key_order_offset,
+        snapshot_timestamp_key_order_offset, strip_namespace,
+        table_data_file_change_key_order_offset, versionstamped_value,
     },
     keys::{
-        current_data_file_key, current_delete_file_key, data_file_begin_key, data_file_end_key,
-        data_file_key, delete_file_key, delete_file_timeline_key, order_delete_file_change_key,
+        current_data_file_key, data_file_begin_key, data_file_end_key, data_file_key,
         snapshot_data_file_change_key, snapshot_key, snapshot_timestamp_key,
-        table_data_file_change_key, table_delete_file_change_key,
+        table_data_file_change_key,
     },
     kv::OrderedCatalogKv,
     metadata_settings::metadata_setting_key,
-    store::{latest_snapshot, stage_fdb_latest_snapshot_value},
+    store::{latest_snapshot, stage_fdb_snapshot_indexes},
 };
 
 #[derive(Clone)]
@@ -43,7 +40,9 @@ pub struct FdbOrderedCatalogKv {
 }
 
 impl FdbOrderedCatalogKv {
-    pub(crate) const MAX_COMMIT_BYTES: usize = 1024 * 1024;
+    // Reserve 2 MB below FoundationDB's 10,000,000-byte transaction limit for
+    // conflict ranges and any conservative-estimate drift.
+    pub(crate) const MAX_COMMIT_BYTES: usize = 8_000_000;
 
     pub fn open_default_with_prefix(key_prefix: impl Into<Vec<u8>>) -> CatalogResult<Self> {
         Self::open_with_prefix(None, key_prefix)
@@ -87,6 +86,7 @@ impl FdbOrderedCatalogKv {
         let mut hasher = DefaultHasher::new();
         self.key_prefix.hash(&mut hasher);
         CatalogCacheNamespace::foundationdb(Arc::as_ptr(&self.db) as usize, hasher.finish())
+            .with_read_context(crate::store::active_runtime_read_context_id())
     }
 
     pub(crate) fn strip_namespace(&self, key: &[u8]) -> CatalogResult<Vec<u8>> {
@@ -131,7 +131,7 @@ impl FdbOrderedCatalogKv {
             &row.sequence.to_be_bytes(),
             MutationType::SetVersionstampedKey,
         );
-        stage_fdb_latest_snapshot_value(self, &trx, catalog, &row)?;
+        stage_fdb_snapshot_indexes(self, &trx, catalog, &row)?;
         for setting in metadata {
             trx.set(
                 &self.namespaced_key(&metadata_setting_key(catalog, setting.scope, &setting.key)),
@@ -208,59 +208,10 @@ impl FdbOrderedCatalogKv {
             &snapshot.sequence.to_be_bytes(),
             MutationType::SetVersionstampedKey,
         );
-        stage_fdb_latest_snapshot_value(self, &trx, catalog, &snapshot)?;
+        stage_fdb_snapshot_indexes(self, &trx, catalog, &snapshot)?;
         for row in &mut rows {
             row.validity = ValidityWindow::new(placeholder, None);
-            trx.atomic_op(
-                &self.namespaced_key(&current_data_file_key(
-                    catalog,
-                    row.table_id,
-                    row.data_file_id,
-                )),
-                &versionstamped_value(&row.encode(), DataFileRow::BEGIN_ORDER_BYTES_OFFSET)?,
-                MutationType::SetVersionstampedValue,
-            );
-            trx.atomic_op(
-                &self.namespaced_key(&data_file_key(catalog, row.data_file_id)),
-                &versionstamped_value(&row.encode(), DataFileRow::BEGIN_ORDER_BYTES_OFFSET)?,
-                MutationType::SetVersionstampedValue,
-            );
-            trx.atomic_op(
-                &self.versionstamped_key(
-                    &data_file_begin_key(catalog, row.table_id, placeholder, row.data_file_id),
-                    data_file_begin_key_order_offset(catalog, row.table_id),
-                )?,
-                &row.encode(),
-                MutationType::SetVersionstampedKey,
-            );
-            trx.atomic_op(
-                &self.versionstamped_key(
-                    &table_data_file_change_key(
-                        catalog,
-                        row.table_id,
-                        placeholder,
-                        DataFileChangeKind::Added,
-                        row.data_file_id,
-                    ),
-                    table_data_file_change_key_order_offset(catalog, row.table_id),
-                )?,
-                &[],
-                MutationType::SetVersionstampedKey,
-            );
-            trx.atomic_op(
-                &self.versionstamped_key(
-                    &snapshot_data_file_change_key(
-                        catalog,
-                        row.table_id,
-                        placeholder,
-                        DataFileChangeKind::Added,
-                        row.data_file_id,
-                    ),
-                    snapshot_data_file_change_key_order_offset(catalog),
-                )?,
-                &[],
-                MutationType::SetVersionstampedKey,
-            );
+            stage_data_file(self, &trx, catalog, row)?;
         }
         let versionstamp = trx.get_versionstamp();
         block_on(trx.commit()).map_err(map_fdb_commit_error)?;
@@ -269,83 +220,6 @@ impl FdbOrderedCatalogKv {
             row.validity = ValidityWindow::new(order, None);
         }
         Ok(rows)
-    }
-
-    pub fn register_delete_file_versionstamped(
-        &self,
-        catalog: crate::CatalogId,
-        mut row: DeleteFileRow,
-    ) -> CatalogResult<DeleteFileRow> {
-        let Some(data_file_value) = self.get(&data_file_key(catalog, row.data_file_id))? else {
-            return Err(CatalogError::NotFound("data file"));
-        };
-        let data_file = DataFileRow::decode(&data_file_value)?;
-        let placeholder = incomplete_order();
-        row.validity = ValidityWindow::new(placeholder, None);
-        let estimated_bytes =
-            estimate_versionstamped_delete_bytes(catalog, data_file.table_id, &row);
-        if estimated_bytes > Self::MAX_COMMIT_BYTES {
-            return Err(CatalogError::InvalidMutation(format!(
-                "foundationdb versionstamped delete-file registration is {estimated_bytes} bytes, over {} byte limit",
-                Self::MAX_COMMIT_BYTES
-            )));
-        }
-
-        let trx = self.create_transaction()?;
-        trx.atomic_op(
-            &self.namespaced_key(&current_delete_file_key(catalog, row.data_file_id)),
-            &versionstamped_value(&row.encode(), DeleteFileRow::BEGIN_ORDER_BYTES_OFFSET)?,
-            MutationType::SetVersionstampedValue,
-        );
-        trx.atomic_op(
-            &self.namespaced_key(&delete_file_key(catalog, row.delete_file_id)),
-            &versionstamped_value(&row.encode(), DeleteFileRow::BEGIN_ORDER_BYTES_OFFSET)?,
-            MutationType::SetVersionstampedValue,
-        );
-        trx.atomic_op(
-            &self.versionstamped_key(
-                &delete_file_timeline_key(
-                    catalog,
-                    row.data_file_id,
-                    placeholder,
-                    row.delete_file_id,
-                ),
-                delete_file_timeline_key_order_offset(catalog, row.data_file_id),
-            )?,
-            &row.encode(),
-            MutationType::SetVersionstampedKey,
-        );
-        trx.atomic_op(
-            &self.versionstamped_key(
-                &table_delete_file_change_key(
-                    catalog,
-                    data_file.table_id,
-                    placeholder,
-                    row.delete_file_id,
-                ),
-                table_delete_file_change_key_order_offset(catalog, data_file.table_id),
-            )?,
-            &[],
-            MutationType::SetVersionstampedKey,
-        );
-        trx.atomic_op(
-            &self.versionstamped_key(
-                &order_delete_file_change_key(
-                    catalog,
-                    placeholder,
-                    data_file.table_id,
-                    row.delete_file_id,
-                ),
-                order_delete_file_change_key_order_offset(catalog),
-            )?,
-            &[],
-            MutationType::SetVersionstampedKey,
-        );
-        let versionstamp = trx.get_versionstamp();
-        block_on(trx.commit()).map_err(map_fdb_commit_error)?;
-        let order = committed_order(block_on(versionstamp).map_err(map_fdb_error)?.deref())?;
-        row.validity = ValidityWindow::new(order, None);
-        Ok(row)
     }
 
     pub fn expire_data_file_versionstamped(
