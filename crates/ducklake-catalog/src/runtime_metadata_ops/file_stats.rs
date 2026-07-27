@@ -1,14 +1,13 @@
 use std::collections::BTreeSet;
 
 use crate::{
-    CatalogId, CatalogResult, list_column_mappings, list_file_column_stats, put_column_mappings,
-    runtime_protocol::RuntimeCatalogBackend,
+    CatalogId, CatalogResult, DataFileId, PartitionKeyIndex, list_column_mappings,
+    list_file_column_stats, put_column_mappings, runtime_protocol::RuntimeCatalogBackend,
 };
 
 #[cfg(feature = "foundationdb")]
 use crate::{
-    DataFileId, DuckLakeSnapshotId, PartitionKeyIndex, TableId,
-    runtime_catalog_snapshot::conflict_snapshot_payload_for_row,
+    DuckLakeSnapshotId, TableId, runtime_catalog_snapshot::conflict_snapshot_payload_for_row,
     runtime_payload::payload_u64_value, runtime_snapshots::snapshot_changes_after_payload,
     store::latest_snapshot_uncached,
 };

@@ -2,26 +2,22 @@ use ducklake_catalog::{
     CatalogDebugRow, CatalogId, CatalogOrderId, ColumnId, DataFileId, DataFileRow, DeleteFileId,
     DeleteFileRow, DuckLakeSnapshotId, FakeOrderedCatalogKv, FileColumnStatsRow,
     FilePartitionValueRow, INLINE_PAYLOAD_LIMIT_BYTES, InlineFileDeletionRow, InlineTableFlush,
-    InlineTablePayloadCommit, MacroId, MacroImplementationRow, MacroParameterRow, MacroRow,
-    MergeAdjacentCompaction, OrderedCatalogKv, PartitionKeyIndex, RangeDirection,
-    RawSnapshotSequence, RewriteDeleteCompaction, SchemaId, TableColumnRow, TableId,
-    TablePartitionChange, TablePartitionFieldRow, TablePartitionRow, TableRow, TableSortChange,
-    TableSortFieldRow, TableSortRow, append_data_file, commit_append_data_files,
-    commit_append_table_columns, commit_change_table_partition, commit_change_table_sort,
-    commit_create_macro_rows, commit_create_table_row, commit_data_mutation_with_file_partitions,
-    commit_delete_inline_table_rows, commit_inline_file_deletions,
-    commit_merge_adjacent_data_files, commit_register_delete_files,
+    MacroId, MacroImplementationRow, MacroParameterRow, MacroRow, MergeAdjacentCompaction,
+    OrderedCatalogKv, PartitionKeyIndex, RawSnapshotSequence, RewriteDeleteCompaction, SchemaId,
+    TableColumnRow, TableId, TablePartitionChange, TablePartitionFieldRow, TablePartitionRow,
+    TableRow, TableSortChange, TableSortFieldRow, TableSortRow, append_data_file,
+    commit_append_data_files, commit_append_table_columns, commit_change_table_partition,
+    commit_change_table_sort, commit_create_macro_rows, commit_create_table_row,
+    commit_data_mutation_with_file_partitions, commit_delete_inline_table_rows,
+    commit_inline_file_deletions, commit_merge_adjacent_data_files, commit_register_delete_files,
     commit_rewrite_delete_data_files, expire_snapshots, initialize_catalog_if_absent,
-    insertion_files,
-    keys::{KeyFamily, family_prefix, inline_table_end_key},
-    latest_snapshot, list_catalog_debug_rows, list_current_data_files,
-    list_current_data_files_by_partition_value, list_data_file_changes, list_data_files_at,
-    list_file_column_stats_for_table_column, list_file_partition_values,
+    insertion_files, keys::inline_table_end_key, latest_snapshot, list_catalog_debug_rows,
+    list_current_data_files, list_current_data_files_by_partition_value, list_data_file_changes,
+    list_data_files_at, list_file_column_stats_for_table_column, list_file_partition_values,
     list_inline_row_payload_changes, list_macros_at, list_old_data_files_for_cleanup,
     list_snapshots, list_table_deletion_scan_files, load_inline_table_payload_at, load_table_at,
     public_snapshot_sequence_for_order, register_file_column_stats, register_file_partition_value,
-    register_inline_table_payload, register_inline_table_payload_with_table, remove_old_data_files,
-    route_inline_table_payload_or_data_file, snapshot_by_public_sequence,
+    register_inline_table_payload_with_table, remove_old_data_files, snapshot_by_public_sequence,
 };
 
 // This file is a fast Rust translation queue for upstream SQLLogic failures. Each test names the
@@ -98,8 +94,7 @@ fn given_hidden_metadata_debug_rows_when_stats_are_saved_then_stats_are_returned
 }
 
 #[test]
-fn given_oversized_inline_rows_when_registering_inline_payload_then_storage_routes_away_from_fdb_values()
- {
+fn given_many_small_inline_rows_when_registering_large_payload_then_storage_chunks_fdb_values() {
     // Upstream: test/sql/data_inlining/data_inlining_partitions.test
     // Storage request: save many inline rows whose total encoded payload is over FDB's safe item
     // size, while each encoded row remains below the per-value limit.
@@ -135,65 +130,6 @@ fn given_oversized_inline_rows_when_registering_inline_payload_then_storage_rout
             .unwrap(),
         Some(payload),
         "storage should return the chunked inline payload it was asked to save"
-    );
-}
-
-#[test]
-fn given_single_inline_row_over_fdb_limit_when_routing_then_storage_uses_file_backed_metadata() {
-    // Upstream requirement: FoundationDB has a 100KB item limit.
-    // Storage request: save one encoded inline row that exceeds the FDB-safe row ceiling.
-    // Required return: direct inline storage rejects it, and the routing API writes supplied
-    // file-backed metadata without leaving inline chunks.
-    let mut kv = FakeOrderedCatalogKv::new();
-    let catalog = CatalogId(1);
-    let table = TableId(10);
-    let schema = SchemaId(0);
-    initialize_catalog_if_absent(&mut kv, catalog).unwrap();
-    let payload = oversized_inline_row_payload();
-    let direct_error =
-        register_inline_table_payload(&mut kv, catalog, table, schema, payload.clone())
-            .unwrap_err();
-    assert!(
-        direct_error
-            .to_string()
-            .contains(&format!("over {INLINE_PAYLOAD_LIMIT_BYTES} byte limit")),
-        "direct inline registration should reject a single oversized row before writing chunks"
-    );
-    let fallback = DataFileRow::new(
-        DataFileId(501),
-        table,
-        "main/orders/inline-fallback-0001.parquet",
-        20,
-        (INLINE_PAYLOAD_LIMIT_BYTES + 1) as u64,
-        CatalogOrderId::uuid_v7(0),
-    );
-    let routed =
-        route_inline_table_payload_or_data_file(&mut kv, catalog, table, schema, payload, fallback)
-            .expect("single oversized inline row should route through file-backed metadata");
-
-    let InlineTablePayloadCommit::FileBacked(files) = routed else {
-        panic!("single oversized inline row should route to file-backed metadata");
-    };
-    assert_eq!(files.len(), 1);
-    assert_eq!(files[0].data_file_id, DataFileId(501));
-    assert_eq!(
-        list_current_data_files(&kv, catalog, table).unwrap(),
-        files,
-        "storage should return the fallback file metadata after routing"
-    );
-    assert!(
-        kv.scan_prefix(
-            &family_prefix(catalog, KeyFamily::InlineTable),
-            RangeDirection::Forward,
-            usize::MAX,
-        )
-        .is_empty(),
-        "oversized payload must not leave inline FDB chunks behind"
-    );
-    let latest = latest_snapshot(&kv, catalog).unwrap().unwrap();
-    assert_eq!(
-        load_inline_table_payload_at(&kv, catalog, table, schema, latest.order).unwrap(),
-        None
     );
 }
 
@@ -1514,12 +1450,5 @@ fn small_inline_rows_payload(min_len: usize) -> Vec<u8> {
         payload.extend_from_slice(format!("row\t{row_id}\ti:{row_id}\n").as_bytes());
         row_id += 1;
     }
-    payload
-}
-
-fn oversized_inline_row_payload() -> Vec<u8> {
-    let mut payload = b"row\t1\ts:".to_vec();
-    payload.extend(std::iter::repeat_n(b'x', INLINE_PAYLOAD_LIMIT_BYTES));
-    payload.push(b'\n');
     payload
 }

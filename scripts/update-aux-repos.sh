@@ -4,8 +4,8 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 workspace_dir="$(cd "$script_dir/../.." && pwd)"
 
-previous_release_tag="v0.1.2"
-release_tag="v0.1.3"
+previous_release_tag="v0.1.3"
+release_tag="v0.1.4"
 release_build="v2856687c"
 
 require_literal() {

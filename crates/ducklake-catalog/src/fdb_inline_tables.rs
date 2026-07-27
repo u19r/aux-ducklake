@@ -10,10 +10,10 @@ use foundationdb::{
 use futures::executor::block_on;
 
 use crate::{
-    CatalogError, CatalogId, CatalogOrderId, CatalogResult, DataFileRow, DuckLakeSnapshotId,
+    CatalogError, CatalogId, CatalogOrderId, CatalogResult, DuckLakeSnapshotId,
     FdbOrderedCatalogKv, InlineRowChangeKind, InlineTableChunkRow, InlineTableDeleteCommit,
-    InlineTablePayloadCommit, KvBatch, OrderedCatalogKv, RawSnapshotSequence, SchemaId,
-    SnapshotRow, TableId, TableRow, ValidityWindow,
+    KvBatch, OrderedCatalogKv, RawSnapshotSequence, SchemaId, SnapshotRow, TableId, TableRow,
+    ValidityWindow,
     conflict_watermarks::{stage_fdb_max_catalog_id_watermark, stage_fdb_max_file_id_watermark},
     fdb_runtime::{map_fdb_commit_error, map_fdb_error},
     fdb_tables::{
@@ -131,29 +131,6 @@ impl FdbOrderedCatalogKv {
         context: InlineTableCommitContext<'_>,
     ) -> CatalogResult<InlineTableMutationCommit> {
         commit_inline_table_mutations(self, catalog, tables, payloads, deletes, context)
-    }
-
-    pub fn route_inline_table_payload_or_data_file_versionstamped(
-        &self,
-        catalog: CatalogId,
-        table_id: TableId,
-        schema_id: SchemaId,
-        payload: Vec<u8>,
-        fallback_file: DataFileRow,
-    ) -> CatalogResult<InlineTablePayloadCommit> {
-        if fallback_file.table_id != table_id {
-            return Err(CatalogError::InvalidMutation(format!(
-                "inline fallback file table {} does not match inline table {}",
-                fallback_file.table_id.0, table_id.0
-            )));
-        }
-        if validate_inline_table_rows_fit_fdb(&payload).is_ok() {
-            return self
-                .register_inline_table_payload_versionstamped(catalog, table_id, schema_id, payload)
-                .map(InlineTablePayloadCommit::Inlined);
-        }
-        self.append_data_files_versionstamped(catalog, vec![fallback_file])
-            .map(InlineTablePayloadCommit::FileBacked)
     }
 
     pub fn commit_delete_inline_table_rows_versionstamped(

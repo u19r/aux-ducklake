@@ -199,14 +199,13 @@ pub use inline_change_feed::{
 pub(crate) use inline_data::list_inline_file_deletion_rows_for_table_at;
 pub use inline_data::{
     INLINE_PAYLOAD_LIMIT_BYTES, InlineDeletionChunkRow, InlineFileDeletionRow, InlineTableChunkRow,
-    InlineTableDeleteCommit, InlineTableFlush, InlineTablePayloadCommit, InlineTablePayloadRow,
+    InlineTableDeleteCommit, InlineTableFlush, InlineTablePayloadRow,
     commit_delete_inline_table_rows, commit_delete_inline_table_rows_at_snapshot,
     commit_inline_file_deletions, list_inline_file_deletions_at,
     list_inline_file_deletions_between, list_inline_table_payloads_at,
     load_inline_deletion_payload_at, load_inline_table_payload_at,
     register_inline_deletion_payload, register_inline_table_payload,
     register_inline_table_payload_with_table, register_inline_table_payload_with_table_at_snapshot,
-    route_inline_table_payload_or_data_file,
 };
 pub use kv::{
     CatalogCacheNamespace, FakeOrderedCatalogKv, KvBatch, MutableCatalogKv, OrderedCatalogKv,
