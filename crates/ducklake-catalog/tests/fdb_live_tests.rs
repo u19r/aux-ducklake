@@ -10,16 +10,15 @@ use ducklake_catalog::{
     ColumnCommentChange, ColumnDefaultChange, ColumnDrop, ColumnId, ColumnRename, CommitAttemptId,
     CommitAttemptRow, DataFileChange, DataFileChangeKind, DataFileId, DataFileRow, DeleteFileId,
     DeleteFileRow, DuckLakeSnapshotId, FdbDataMutation, FdbOrderedCatalogKv, FilePartitionValueRow,
-    INLINE_PAYLOAD_LIMIT_BYTES, InlineFileDeletionRow, InlineRowChangeKind, InlineTableFlush,
-    InlineTablePayloadCommit, InlinedTableRow, KvBatch, MacroId, MacroImplementationRow, MacroRow,
-    MergeAdjacentCompaction, MutableCatalogKv, OrderedCatalogKv, PartitionKeyIndex,
-    RawSnapshotSequence, RewriteDeleteCompaction, SchemaId, SchemaRow, TableColumnRow,
-    TableCommentChange, TableId, TablePartitionChange, TablePartitionFieldRow, TablePartitionRow,
-    TableRename, TableRow, TableSortChange, TableSortFieldRow, TableSortRow, ViewRow,
-    append_data_file, commit_append_table_columns, commit_change_table_column_defaults,
-    commit_change_table_comments, commit_change_table_partition, commit_change_table_sort,
-    commit_drop_table_columns, commit_rename_table_columns, commit_rename_tables, expire_data_file,
-    expire_snapshots,
+    InlineFileDeletionRow, InlineRowChangeKind, InlineTableFlush, InlinedTableRow, KvBatch,
+    MacroId, MacroImplementationRow, MacroRow, MergeAdjacentCompaction, MutableCatalogKv,
+    OrderedCatalogKv, PartitionKeyIndex, RawSnapshotSequence, RewriteDeleteCompaction, SchemaId,
+    SchemaRow, TableColumnRow, TableCommentChange, TableId, TablePartitionChange,
+    TablePartitionFieldRow, TablePartitionRow, TableRename, TableRow, TableSortChange,
+    TableSortFieldRow, TableSortRow, ViewRow, append_data_file, commit_append_table_columns,
+    commit_change_table_column_defaults, commit_change_table_comments,
+    commit_change_table_partition, commit_change_table_sort, commit_drop_table_columns,
+    commit_rename_table_columns, commit_rename_tables, expire_data_file, expire_snapshots,
     keys::{
         conflict_fence_key, current_delete_file_key, current_schema_version_key, delete_file_key,
         inline_live_row_key,
@@ -1999,79 +1998,6 @@ fn fdb_live_given_inline_file_deletions_without_inline_rows_when_flushing_then_f
             .unwrap()
             .is_empty()
     );
-}
-
-#[test]
-fn fdb_live_oversized_inline_payload_routes_to_data_file_without_inline_chunks_when_enabled() {
-    if live_fdb_disabled() {
-        return;
-    }
-
-    let catalog = CatalogId(92);
-    let table = TableId(92);
-    let schema = SchemaId(9);
-    let kv = FdbOrderedCatalogKv::open_default_with_prefix(
-        unique_prefix("inline-fallback").into_bytes(),
-    )
-    .unwrap();
-    kv.initialize_catalog_if_absent_versionstamped(catalog)
-        .unwrap();
-    kv.create_table_versionstamped(
-        catalog,
-        TableRow::with_catalog_metadata(
-            table,
-            SchemaId(0),
-            "inline-fallback-table-uuid",
-            "inline_fallback",
-            "main/inline_fallback",
-            vec![TableColumnRow::new(
-                ColumnId(1),
-                "id",
-                "INTEGER",
-                false,
-                None,
-            )],
-            CatalogOrderId::uuid_v7(0),
-        ),
-        None,
-    )
-    .unwrap();
-
-    let fallback = DataFileRow::new(
-        DataFileId(920),
-        table,
-        "main/inline-fallback.parquet",
-        1,
-        4096,
-        CatalogOrderId::uuid_v7(0),
-    );
-    let payload = oversized_inline_row_payload();
-    let result = kv
-        .route_inline_table_payload_or_data_file_versionstamped(
-            catalog, table, schema, payload, fallback,
-        )
-        .unwrap();
-
-    let InlineTablePayloadCommit::FileBacked(files) = result else {
-        panic!("oversized FDB inline payload should route to file-backed path");
-    };
-    assert_eq!(files.len(), 1);
-    assert_eq!(files[0].data_file_id, DataFileId(920));
-    assert_eq!(list_current_data_files(&kv, catalog, table).unwrap(), files);
-    let latest = latest_snapshot(&kv, catalog).unwrap().unwrap();
-    assert_eq!(latest.order, files[0].validity.begin_order);
-    assert!(
-        list_inline_table_payloads_at(&kv, catalog, table, schema, latest.order)
-            .unwrap()
-            .is_empty()
-    );
-}
-
-fn oversized_inline_row_payload() -> Vec<u8> {
-    let mut payload = b"row\t1\ts:".to_vec();
-    payload.extend(std::iter::repeat_n(b'x', INLINE_PAYLOAD_LIMIT_BYTES));
-    payload.push(b'\n');
-    payload
 }
 
 #[test]

@@ -37,10 +37,9 @@ pub use inline_row_deletes::{
 #[cfg(not(test))]
 pub(crate) use inline_tables::invalidate_inline_table_payload_read_context;
 pub use inline_tables::{
-    InlineTableChunkRow, InlineTableFlush, InlineTablePayloadCommit, InlineTablePayloadRow,
-    list_inline_table_payloads_at, load_inline_table_payload_at, register_inline_table_payload,
+    InlineTableChunkRow, InlineTableFlush, InlineTablePayloadRow, list_inline_table_payloads_at,
+    load_inline_table_payload_at, register_inline_table_payload,
     register_inline_table_payload_with_table, register_inline_table_payload_with_table_at_snapshot,
-    route_inline_table_payload_or_data_file,
 };
 pub(crate) use inline_tables::{
     assemble_inline_payload, decode_inline_table_item, inline_chunk_visible_at,

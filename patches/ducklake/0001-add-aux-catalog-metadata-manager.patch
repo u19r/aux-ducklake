@@ -213,7 +213,7 @@ new file mode 100644
 index 00000000..0e4e2eee
 --- /dev/null
 +++ b/src/include/metadata_manager/aux_catalog_metadata_manager.hpp
-@@ -0,0 +1,253 @@
+@@ -0,0 +1,254 @@
 +//===----------------------------------------------------------------------===//
 +//                         DuckDB
 +//
@@ -251,6 +251,7 @@ index 00000000..0e4e2eee
 +		return true;
 +	}
 +
++	bool CanInlineRow(DataChunk &chunk, idx_t row_idx, idx_t &encoded_size) const override;
 +	unique_ptr<QueryResult> AttachMetadata(const string &attach_query) override;
 +	bool MetadataExists() override;
 +	void InitializeDuckLake(bool has_explicit_schema, DuckLakeEncryption encryption) override;
@@ -684,6 +685,30 @@ index 3e185729..6ab10c5b 100644
  
  	optional_ptr<CatalogEntry> GetEntryById(DuckLakeTransaction &transaction, DuckLakeSnapshot snapshot,
  	                                        SchemaIndex schema_id);
+diff --git a/src/include/storage/ducklake_inline_data.hpp b/src/include/storage/ducklake_inline_data.hpp
+index 96db6bc9..812b9331 100644
+--- a/src/include/storage/ducklake_inline_data.hpp
++++ b/src/include/storage/ducklake_inline_data.hpp
+@@ -15,15 +15,18 @@
+ 
+ namespace duckdb {
+ class DuckLakeInsert;
++class DuckLakeMetadataManager;
+ 
+ class DuckLakeInlineData : public PhysicalOperator {
+ public:
+ 	static constexpr const PhysicalOperatorType TYPE = PhysicalOperatorType::EXTENSION;
+ 
+ public:
+-	DuckLakeInlineData(PhysicalPlan &physical_plan, PhysicalOperator &child, idx_t inline_row_limit);
++	DuckLakeInlineData(PhysicalPlan &physical_plan, PhysicalOperator &child, idx_t inline_row_limit,
++	                   DuckLakeMetadataManager &metadata_manager);
+ 
+ 	idx_t inline_row_limit;
++	reference<DuckLakeMetadataManager> metadata_manager;
+ 	optional_ptr<DuckLakeInsert> insert;
+ 
+ public:
 diff --git a/src/include/storage/ducklake_inlined_data.hpp b/src/include/storage/ducklake_inlined_data.hpp
 index 226b8cba..fe050946 100644
 --- a/src/include/storage/ducklake_inlined_data.hpp
@@ -755,7 +780,16 @@ index 5b1dee6c..cf457247 100644
  
  	//! Probe the metadata server for optional capabilities, for now we only check for server-side retries
  	virtual void ProbeServerCapabilities() {
-@@ -187,6 +193,14 @@ public:
+@@ -163,6 +169,8 @@ public:
+ 	//! Check whether a table with the given columns can be inlined
+ 	bool CanInlineColumns(const ColumnList &columns);
+ 	bool CanInlineColumns(const vector<DuckLakeColumnInfo> &columns);
++	//! Check whether one physical row fits the metadata backend's inline representation
++	virtual bool CanInlineRow(DataChunk &chunk, idx_t row_idx, idx_t &encoded_size) const;
+ 
+ 	virtual string GetColumnTypeInternal(const LogicalType &column_type);
+ 	virtual string CastColumnToTarget(const string &column, const LogicalType &type);
+@@ -187,6 +195,14 @@ public:
  
  	virtual unique_ptr<QueryResult> Execute(DuckLakeSnapshot snapshot, string &query);
  	virtual unique_ptr<QueryResult> Execute(string &query);
@@ -770,7 +804,7 @@ index 5b1dee6c..cf457247 100644
  
  	virtual unique_ptr<QueryResult> Query(DuckLakeSnapshot snapshot, string &query);
  	virtual unique_ptr<QueryResult> Query(string &query);
-@@ -224,6 +238,8 @@ public:
+@@ -224,6 +240,8 @@ public:
  	                        const std::function<unique_ptr<QueryResult>(DuckLakeSnapshot, string)> &query_executor,
  	                        const string &base_data_path, const string &separator);
  	virtual vector<DuckLakeGlobalStatsInfo> GetGlobalTableStats(DuckLakeSnapshot snapshot, TableIndex table_id);
@@ -779,7 +813,7 @@ index 5b1dee6c..cf457247 100644
  	virtual vector<DuckLakeFileListEntry> GetFilesForTable(DuckLakeTableEntry &table, DuckLakeSnapshot snapshot,
  	                                                       const FilterPushdownInfo *filter_info = nullptr);
  	virtual vector<DuckLakeFileListEntry> GetTableInsertions(DuckLakeTableEntry &table, DuckLakeSnapshot start_snapshot,
-@@ -241,6 +257,7 @@ public:
+@@ -241,6 +259,7 @@ public:
  	virtual idx_t GetBeginSnapshotForSchemaVersion(TableIndex table_id, idx_t schema_version);
  	virtual idx_t GetNetDataFileRowCount(TableIndex table_id, DuckLakeSnapshot snapshot);
  	virtual idx_t GetNetInlinedRowCount(const string &inlined_table_name, DuckLakeSnapshot snapshot);
@@ -787,7 +821,7 @@ index 5b1dee6c..cf457247 100644
  	//! SQL builders for stats-refresh metadata lookups; caller substitutes placeholders + executes.
  	static string GetNetDataFileRowCountSql(TableIndex table_id, const string &inlined_deletion_table);
  	static string GetNetInlinedRowCountSql(const string &inlined_table_name);
-@@ -281,20 +298,68 @@ public:
+@@ -281,20 +300,68 @@ public:
  	virtual string WriteNewDataFiles(DuckLakeSnapshot &commit_snapshot, const vector<DuckLakeFileInfo> &new_files,
  	                                 const vector<DuckLakeTableInfo> &new_tables,
  	                                 vector<DuckLakeSchemaInfo> &new_schemas_result);
@@ -860,7 +894,7 @@ index 5b1dee6c..cf457247 100644
  	//! Creates the INSERT INTO {METADATA_CATALOG}.<inlined_table_name> VALUES (...) batch.
  	static string FormatInlinedDataInsert(const string &inlined_table_name, idx_t row_id_start,
  	                                      bool has_preserved_row_ids, const vector<int64_t> *row_ids,
-@@ -394,6 +459,8 @@ public:
+@@ -394,6 +461,8 @@ public:
  	virtual string GetPathForSchema(SchemaIndex schema_id, vector<DuckLakeSchemaInfo> &new_schemas_result);
  	virtual string GetPathForTable(TableIndex table_id, const vector<DuckLakeTableInfo> &new_tables,
  	                               const vector<DuckLakeSchemaInfo> &new_schemas_result);
@@ -3555,7 +3589,7 @@ new file mode 100644
 index 00000000..ad64d447
 --- /dev/null
 +++ b/src/metadata_manager/aux_catalog_inline.cpp
-@@ -0,0 +1,470 @@
+@@ -0,0 +1,485 @@
 +#include "metadata_manager/aux_catalog_metadata_manager.hpp"
 +#include "metadata_manager/aux_catalog_tabular_payload.hpp"
 +#include "metadata_manager/aux_catalog_runtime_bridge.hpp"
@@ -3658,6 +3692,21 @@ index 00000000..ad64d447
 +	default:
 +		throw NotImplementedException("aux_catalog data inlining does not support type %s yet", value.type().ToString());
 +	}
++}
++
++bool AuxCatalogMetadataManager::CanInlineRow(DataChunk &chunk, idx_t row_idx, idx_t &encoded_size) const {
++	static constexpr idx_t INLINE_ROW_LIMIT_BYTES = 90 * 1024;
++	static constexpr idx_t DECIMAL_U64_MAX_BYTES = 20;
++	static constexpr idx_t INLINE_ROW_OVERHEAD_BYTES =
++	    sizeof("row_begin\t") - 1 + DECIMAL_U64_MAX_BYTES + 1 + DECIMAL_U64_MAX_BYTES + 1;
++	encoded_size = INLINE_ROW_OVERHEAD_BYTES;
++	for (idx_t col_idx = 0; col_idx < chunk.ColumnCount(); col_idx++) {
++		encoded_size += 1 + EncodeValue(chunk.GetValue(col_idx, row_idx)).size();
++		if (encoded_size > INLINE_ROW_LIMIT_BYTES) {
++			return false;
++		}
++	}
++	return true;
 +}
 +
 +struct LatestInlinedTable {
@@ -7880,10 +7929,100 @@ index 41d3ff6b..94a7127e 100644
  			new_manager = make_uniq<DuckLakeMetadataManagerV1_1<PostgresMetadataManager>>(transaction);
  		} else if (dynamic_cast<SQLiteMetadataManager *>(&current)) {
 diff --git a/src/storage/ducklake_inline_data.cpp b/src/storage/ducklake_inline_data.cpp
-index dc94377f..f5c89f1e 100644
+index dc94377f..3a14fcee 100644
 --- a/src/storage/ducklake_inline_data.cpp
 +++ b/src/storage/ducklake_inline_data.cpp
-@@ -372,6 +372,7 @@ OperatorFinalResultType DuckLakeInlineData::OperatorFinalize(Pipeline &pipeline,
+@@ -3,6 +3,7 @@
+ 
+ #include "duckdb/common/type_visitor.hpp"
+ #include "storage/ducklake_insert.hpp"
++#include "storage/ducklake_metadata_manager.hpp"
+ #include "storage/ducklake_table_entry.hpp"
+ #include "storage/ducklake_transaction.hpp"
+ #include "duckdb/common/types/column/column_data_collection.hpp"
+@@ -12,9 +13,10 @@
+ 
+ namespace duckdb {
+ 
+-DuckLakeInlineData::DuckLakeInlineData(PhysicalPlan &physical_plan, PhysicalOperator &child, idx_t inline_row_limit)
++DuckLakeInlineData::DuckLakeInlineData(PhysicalPlan &physical_plan, PhysicalOperator &child, idx_t inline_row_limit,
++                                       DuckLakeMetadataManager &metadata_manager)
+     : PhysicalOperator(physical_plan, PhysicalOperatorType::EXTENSION, child.types, child.estimated_cardinality),
+-      inline_row_limit(inline_row_limit) {
++      inline_row_limit(inline_row_limit), metadata_manager(metadata_manager) {
+ 	children.push_back(child);
+ }
+ 
+@@ -35,17 +37,28 @@ public:
+ 	explicit InlineDataGlobalState(const DuckLakeInlineData &op) : op(op), total_inlined_rows(0) {
+ 	}
+ 
+-	InlinePhase AddRows(InlineDataState &state, idx_t new_rows) {
++	InlinePhase AddRows(InlineDataState &state, idx_t new_rows, idx_t new_inline_bytes, bool can_inline_rows) {
++		// Sized backends store rows twice; retain headroom below FoundationDB's 8 MB commit guard.
++		static constexpr idx_t MAX_INLINE_BYTES = 3'500'000;
+ 		lock_guard<mutex> guard(lock);
++		if (global_phase == InlinePhase::PASS_THROUGH_ROWS) {
++			return InlinePhase::PASS_THROUGH_ROWS;
++		}
++		if (new_inline_bytes > MAX_INLINE_BYTES ||
++		    total_inlined_bytes > MAX_INLINE_BYTES - new_inline_bytes) {
++			can_inline_rows = false;
++		}
+ 		total_inlined_rows += new_rows;
+-		if (total_inlined_rows > op.inline_row_limit) {
++		if (!can_inline_rows || total_inlined_rows > op.inline_row_limit) {
+ 			// we have exceeded the total amount of rows - bail
++			global_phase = InlinePhase::PASS_THROUGH_ROWS;
+ 			if (global_inlined_data) {
+ 				// if we have any global inlined data - add it to the local inlined data so we can emit it
+ 				AddToCollection(std::move(global_inlined_data), state.inlined_data);
+ 			}
+ 			return InlinePhase::PASS_THROUGH_ROWS;
+ 		}
++		total_inlined_bytes += new_inline_bytes;
+ 		// we are still inlining rows
+ 		return InlinePhase::INLINING_ROWS;
+ 	}
+@@ -65,6 +78,7 @@ public:
+ 	const DuckLakeInlineData &op;
+ 	mutex lock;
+ 	idx_t total_inlined_rows = 0;
++	idx_t total_inlined_bytes = 0;
+ 	InlinePhase global_phase = InlinePhase::INLINING_ROWS;
+ 	unique_ptr<ColumnDataCollection> global_inlined_data;
+ };
+@@ -98,7 +112,19 @@ OperatorResultType DuckLakeInlineData::Execute(ExecutionContext &context, DataCh
+ 	}
+ 	// we have a new batch of rows
+ 	// add the count to the global count and check if we are still inlining rows
+-	auto new_phase = gstate.AddRows(state, input.size());
++	bool can_inline_rows = input.size() <= inline_row_limit;
++	idx_t new_inline_bytes = 0;
++	if (can_inline_rows) {
++		for (idx_t row_idx = 0; row_idx < input.size(); row_idx++) {
++			idx_t encoded_size = 0;
++			if (!metadata_manager.get().CanInlineRow(input, row_idx, encoded_size)) {
++				can_inline_rows = false;
++				break;
++			}
++			new_inline_bytes += encoded_size;
++		}
++	}
++	auto new_phase = gstate.AddRows(state, input.size(), new_inline_bytes, can_inline_rows);
+ 	if (new_phase != InlinePhase::INLINING_ROWS) {
+ 		// we have exceeded the limit - start emitting rows from the `inlined_data` if we have it
+ 		if (state.inlined_data) {
+@@ -140,7 +166,7 @@ OperatorFinalizeResultType DuckLakeInlineData::FinalExecute(ExecutionContext &co
+ 	}
+ 	// push the inlined data into the global inlined data
+ 	lock_guard<mutex> guard(gstate.lock);
+-	if (gstate.total_inlined_rows > inline_row_limit) {
++	if (gstate.global_phase == InlinePhase::PASS_THROUGH_ROWS) {
+ 		// we have changed our mind on inlining - we need to emit the rows again
+ 		state.inlined_data->InitializeScan(state.emit_scan);
+ 		state.phase = InlinePhase::EMITTING_PREVIOUSLY_INLINED_ROWS;
+@@ -372,6 +398,7 @@ OperatorFinalResultType DuckLakeInlineData::OperatorFinalize(Pipeline &pipeline,
  		// If we have extra columns, we need to extract the physical columns
  		vector<LogicalType> phys_types(inlined_data.Types().begin(), inlined_data.Types().begin() + physical_col_count);
  		auto phys_data = make_uniq<ColumnDataCollection>(context, phys_types);
@@ -7891,7 +8030,7 @@ index dc94377f..f5c89f1e 100644
  		ColumnDataAppendState append_state;
  		phys_data->InitializeAppend(append_state);
  		for (auto &chunk : inlined_data.Chunks()) {
-@@ -384,6 +385,20 @@ OperatorFinalResultType DuckLakeInlineData::OperatorFinalize(Pipeline &pipeline,
+@@ -384,6 +411,20 @@ OperatorFinalResultType DuckLakeInlineData::OperatorFinalize(Pipeline &pipeline,
  				auto idx = row_id_format.sel->get_index(r);
  				result->row_ids.push_back(row_id_data[idx]);
  			}
@@ -8160,8 +8299,19 @@ index 22df554b..ee887134 100644
  	return result;
  }
  
-@@ -859,12 +859,12 @@ PhysicalOperator &DuckLakeCatalog::PlanCreateTableAs(ClientContext &context, Phy
- 		root = planner.Make<DuckLakeInlineData>(root.get(), data_inlining_row_limit);
+@@ -821,7 +821,8 @@ PhysicalOperator &DuckLakeCatalog::PlanInsert(ClientContext &context, PhysicalPl
+ 
+ 	idx_t data_inlining_row_limit = GetInliningLimit(context, ducklake_table);
+ 	if (data_inlining_row_limit > 0) {
+-		plan = planner.Make<DuckLakeInlineData>(*plan, data_inlining_row_limit);
++		auto &metadata_manager = DuckLakeTransaction::Get(context, *this).GetMetadataManager();
++		plan = planner.Make<DuckLakeInlineData>(*plan, data_inlining_row_limit, metadata_manager);
+ 		inline_data = plan->Cast<DuckLakeInlineData>();
+ 
+ 		// When sort_on_insert=false but inlining is enabled, add sorting AFTER
+@@ -859,12 +860,12 @@ PhysicalOperator &DuckLakeCatalog::PlanCreateTableAs(ClientContext &context, Phy
+-		root = planner.Make<DuckLakeInlineData>(root.get(), data_inlining_row_limit);
++		root = planner.Make<DuckLakeInlineData>(root.get(), data_inlining_row_limit, metadata_manager);
  		inline_data = root.get().Cast<DuckLakeInlineData>();
  	}
 -	for (auto &col : op.info->Base().columns.Logical()) {
@@ -8177,6 +8327,30 @@ index 22df554b..ee887134 100644
  
  	DuckLakeCopyInput copy_input(context, duck_schema, columns, table_data_path);
  	auto &physical_copy = DuckLakeInsert::PlanCopyForInsert(context, planner, copy_input, root.get());
+diff --git a/src/storage/ducklake_merge_into.cpp b/src/storage/ducklake_merge_into.cpp
+index 108b47ed..9097930b 100644
+--- a/src/storage/ducklake_merge_into.cpp
++++ b/src/storage/ducklake_merge_into.cpp
+@@ -7,2 +7,3 @@
+ #include "storage/ducklake_inline_data.hpp"
++#include "storage/ducklake_transaction.hpp"
+ #include "storage/ducklake_table_entry.hpp"
+@@ -510,4 +511,5 @@ static unique_ptr<MergeIntoOperator> DuckLakePlanMergeIntoAction(DuckLakeCatalog
+ 		if (data_inlining_row_limit > 0) {
+-			auto &inline_op =
+-			    planner.Make<DuckLakeInlineData>(update_op, data_inlining_row_limit).Cast<DuckLakeInlineData>();
++			auto &metadata_manager = DuckLakeTransaction::Get(context, catalog).GetMetadataManager();
++			auto &inline_op = planner.Make<DuckLakeInlineData>(update_op, data_inlining_row_limit, metadata_manager)
++			                      .Cast<DuckLakeInlineData>();
+ 			inline_data_op = &inline_op;
+@@ -589,4 +591,5 @@ static unique_ptr<MergeIntoOperator> DuckLakePlanMergeIntoAction(DuckLakeCatalog
+ 			auto &inline_dummy = planner.Make<PhysicalDummyScan>(std::move(inline_types), 1);
+-			auto &inline_op =
+-			    planner.Make<DuckLakeInlineData>(inline_dummy, data_inlining_row_limit).Cast<DuckLakeInlineData>();
++			auto &metadata_manager = DuckLakeTransaction::Get(context, catalog).GetMetadataManager();
++			auto &inline_op = planner.Make<DuckLakeInlineData>(inline_dummy, data_inlining_row_limit, metadata_manager)
++			                      .Cast<DuckLakeInlineData>();
+ 			inline_data_op = &inline_op;
 diff --git a/src/storage/ducklake_metadata_manager.cpp b/src/storage/ducklake_metadata_manager.cpp
 index 2ac100ec..1b987f39 100644
 --- a/src/storage/ducklake_metadata_manager.cpp
@@ -8196,8 +8370,19 @@ index 2ac100ec..1b987f39 100644
 +    {"aux_catalog", AuxCatalogMetadataManager::Create},
      {"quack", QuackMetadataManager::Create},       {"quack_scanner", QuackMetadataManager::Create},
      {"sqlite", SQLiteMetadataManager::Create},     {"sqlite_scanner", SQLiteMetadataManager::Create}};
+
+@@ -142,6 +144,10 @@ bool DuckLakeMetadataManager::CanInlineColumns(const vector<DuckLakeColumnInfo>
+ 	return SupportsInliningColumns(columns);
+ }
  
-@@ -635,6 +637,15 @@ idx_t DuckLakeMetadataManager::GetNetInlinedRowCount(const string &inlined_table
++bool DuckLakeMetadataManager::CanInlineRow(DataChunk &, idx_t, idx_t &) const {
++	return true;
++}
++
+ FileSystem &DuckLakeMetadataManager::GetFileSystem() {
+ 	return FileSystem::GetFileSystem(transaction.GetCatalog().GetDatabase());
+ }
+@@ -635,6 +641,15 @@ idx_t DuckLakeMetadataManager::GetNetInlinedRowCount(const string &inlined_table
  	return 0;
  }
  
@@ -8246,7 +8431,7 @@ index 2ac100ec..1b987f39 100644
  string DuckLakeMetadataManager::GetFileSelectList(const string &prefix) {
  	static const vector<string> column_list {
  	    "path", "path_is_relative", "file_size_bytes", "footer_size", "encryption_key",
-@@ -2964,6 +3001,10 @@ string DuckLakeMetadataManager::FormatInlinedDataInsert(const string &inlined_ta
+@@ -2964,6 +3005,10 @@ string DuckLakeMetadataManager::FormatInlinedDataInsert(const string &inlined_ta
  }
  
  string DuckLakeMetadataManager::WriteNewInlinedDeletes(const vector<DuckLakeDeletedInlinedDataInfo> &new_deletes) {
@@ -8257,7 +8442,7 @@ index 2ac100ec..1b987f39 100644
  	string batch_queries;
  	if (new_deletes.empty()) {
  		return batch_queries;
-@@ -3560,6 +3601,12 @@ string DuckLakeMetadataManager::GetPathForSchema(SchemaIndex schema_id,
+@@ -3560,6 +3605,12 @@ string DuckLakeMetadataManager::GetPathForSchema(SchemaIndex schema_id,
  			return FromRelativePath(path, base_data_path, separator);
  		}
  	}
@@ -8270,7 +8455,7 @@ index 2ac100ec..1b987f39 100644
  	auto query = StringUtil::Format(R"(
  SELECT path, path_is_relative
  FROM {METADATA_CATALOG}.ducklake_schema
-@@ -3902,6 +3949,113 @@ bool DuckLakeMetadataManager::TryAppendDataFiles(DuckLakeSnapshot &commit_snapsh
+@@ -3902,6 +3953,113 @@ bool DuckLakeMetadataManager::TryAppendDataFiles(DuckLakeSnapshot &commit_snapsh
  	return true;
  }
  
@@ -10042,6 +10227,16 @@ index f17b8b9e..f21bba9e 100644
  			if (flushed_inlined && !context.skip_drop_empty_inlined) {
  				DropEmptySupersededInlinedTables(context);
  			}
+diff --git a/src/storage/ducklake_update.cpp b/src/storage/ducklake_update.cpp
+index 27fe377a..9d393b4b 100644
+--- a/src/storage/ducklake_update.cpp
++++ b/src/storage/ducklake_update.cpp
+@@ -275,3 +275,4 @@ PhysicalOperator &DuckLakeCatalog::PlanUpdate(ClientContext &context, PhysicalPl
+ 	if (data_inlining_row_limit > 0) {
+-		plan = planner.Make<DuckLakeInlineData>(*plan, data_inlining_row_limit);
++		auto &metadata_manager = DuckLakeTransaction::Get(context, *this).GetMetadataManager();
++		plan = planner.Make<DuckLakeInlineData>(*plan, data_inlining_row_limit, metadata_manager);
+ 		inline_data = plan->Cast<DuckLakeInlineData>();
 diff --git a/src/storage/ducklake_view_entry.cpp b/src/storage/ducklake_view_entry.cpp
 index fe1706fa..c069fd3a 100644
 --- a/src/storage/ducklake_view_entry.cpp

@@ -1,12 +1,10 @@
 use ducklake_catalog::{
-    CatalogId, CatalogOrderId, DataFileId, DataFileRow, FakeOrderedCatalogKv,
-    INLINE_PAYLOAD_LIMIT_BYTES, InlineDeletionChunkRow, InlineTableChunkRow,
-    InlineTablePayloadCommit, RangeDirection, SchemaId, TableId,
+    CatalogId, CatalogOrderId, DataFileId, FakeOrderedCatalogKv, INLINE_PAYLOAD_LIMIT_BYTES,
+    InlineDeletionChunkRow, InlineTableChunkRow, RangeDirection, SchemaId, TableId,
     keys::{KeyFamily, family_prefix},
-    latest_snapshot, list_current_data_files, list_inline_deletion_debug_chunks,
-    list_inline_table_debug_chunks, load_inline_deletion_payload_at, load_inline_table_payload_at,
+    latest_snapshot, list_inline_deletion_debug_chunks, list_inline_table_debug_chunks,
+    load_inline_deletion_payload_at, load_inline_table_payload_at,
     register_inline_deletion_payload, register_inline_table_payload,
-    route_inline_table_payload_or_data_file,
 };
 
 #[test]
@@ -58,47 +56,6 @@ fn given_many_small_inline_rows_above_limit_when_registered_then_chunks_are_writ
     assert_eq!(
         load_inline_table_payload_at(&kv, catalog, table, schema, begin_order).unwrap(),
         Some(payload)
-    );
-}
-
-#[test]
-fn given_single_inline_row_above_limit_when_routed_then_data_file_path_commits_without_inline_chunks()
- {
-    let catalog = CatalogId(7);
-    let table = TableId(16);
-    let schema = SchemaId(5);
-    let fallback = DataFileRow::new(
-        DataFileId(201),
-        table,
-        "main/inline-fallback-0001.parquet",
-        50,
-        4096,
-        CatalogOrderId::uuid_v7(0),
-    );
-    let mut kv = FakeOrderedCatalogKv::new();
-    let payload = oversized_inline_row_payload();
-
-    let result =
-        route_inline_table_payload_or_data_file(&mut kv, catalog, table, schema, payload, fallback)
-            .unwrap();
-
-    let InlineTablePayloadCommit::FileBacked(files) = result else {
-        panic!("oversized inline payload should route to data-file path");
-    };
-    assert_eq!(files.len(), 1);
-    assert_eq!(files[0].data_file_id, DataFileId(201));
-    assert_eq!(
-        latest_snapshot(&kv, catalog).unwrap().unwrap().order,
-        files[0].validity.begin_order
-    );
-    assert_eq!(list_current_data_files(&kv, catalog, table).unwrap(), files);
-    assert!(
-        kv.scan_prefix(
-            &family_prefix(catalog, KeyFamily::InlineTable),
-            RangeDirection::Forward,
-            usize::MAX,
-        )
-        .is_empty()
     );
 }
 

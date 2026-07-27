@@ -229,6 +229,9 @@ ATTACH 'ducklake:$tmp_dir/inline-metadata.duckdb' AS dl (
     DATA_INLINING_ROW_LIMIT 100
 );
 CREATE TABLE dl.main.runtime_inline(id INTEGER, note VARCHAR);
+CREATE TABLE dl.main.runtime_boundary_inline(id INTEGER, note VARCHAR);
+CREATE TABLE dl.main.runtime_oversized_inline(id INTEGER, note VARCHAR);
+CREATE TABLE dl.main.runtime_aggregate_inline(id INTEGER, note VARCHAR);
 SET VARIABLE before_inline = (SELECT id FROM ducklake_current_snapshot('dl'));
 INSERT INTO dl.main.runtime_inline VALUES (101, 'inline_101'), (102, 'inline_102');
 SET VARIABLE after_inline = (SELECT id FROM ducklake_current_snapshot('dl'));
@@ -267,6 +270,59 @@ FROM ducklake_table_changes(
     getvariable('after_delete')::BIGINT
 )
 WHERE id = 102;
+INSERT INTO dl.main.runtime_boundary_inline
+VALUES (200, repeat('s', 45000));
+SELECT 'boundary_inline_current=' || count(*) || ',' || sum(id) || ',' ||
+       min(length(note))
+FROM dl.main.runtime_boundary_inline;
+SELECT 'boundary_inline_file_count=' || count(*)
+FROM glob('$tmp_dir/inline-data/**/*.parquet');
+INSERT INTO dl.main.runtime_oversized_inline
+VALUES (201, repeat('x', 65536));
+SELECT 'oversized_inline_current=' || count(*) || ',' || sum(id) || ',' ||
+       min(length(note))
+FROM dl.main.runtime_oversized_inline;
+SELECT 'oversized_inline_file_count=' || count(*)
+FROM glob('$tmp_dir/inline-data/**/*.parquet');
+UPDATE dl.main.runtime_oversized_inline
+SET note = repeat('y', 65537)
+WHERE id = 201;
+SELECT 'oversized_update_current=' || count(*) || ',' || sum(id) || ',' ||
+       min(length(note)) || ',' || min(substr(note, 1, 1))
+FROM dl.main.runtime_oversized_inline;
+CREATE TABLE dl.main.runtime_oversized_merge(id INTEGER, note VARCHAR);
+MERGE INTO dl.main.runtime_oversized_merge AS target
+USING (SELECT 301 AS id, repeat('m', 65536) AS note) AS source
+ON target.id = source.id
+WHEN MATCHED THEN UPDATE SET note = source.note
+WHEN NOT MATCHED THEN INSERT (id, note) VALUES (source.id, source.note);
+MERGE INTO dl.main.runtime_oversized_merge AS target
+USING (SELECT 301 AS id, repeat('n', 65538) AS note) AS source
+ON target.id = source.id
+WHEN MATCHED THEN UPDATE SET note = source.note
+WHEN NOT MATCHED THEN INSERT (id, note) VALUES (source.id, source.note);
+SELECT 'oversized_merge_current=' || count(*) || ',' || sum(id) || ',' ||
+       min(length(note)) || ',' || min(substr(note, 1, 1))
+FROM dl.main.runtime_oversized_merge;
+CREATE TABLE dl.main.runtime_oversized_ctas AS
+SELECT value::INTEGER AS id,
+       CASE WHEN value = 7 THEN repeat('c', 65539) ELSE 'small' END AS note
+FROM range(10) AS rows(value);
+SELECT 'oversized_ctas_current=' || count(*) || ',' || sum(id) || ',' ||
+       max(length(note)) || ',' || count(*) FILTER (WHERE note = 'small')
+FROM dl.main.runtime_oversized_ctas;
+SET VARIABLE before_aggregate_files = (
+    SELECT count(*) FROM glob('$tmp_dir/inline-data/**/*.parquet')
+);
+INSERT INTO dl.main.runtime_aggregate_inline
+SELECT value::INTEGER, repeat('a', 40000)
+FROM range(100) AS rows(value);
+SELECT 'aggregate_inline_current=' || count(*) || ',' || sum(id) || ',' ||
+       min(length(note))
+FROM dl.main.runtime_aggregate_inline;
+SELECT 'aggregate_inline_file_delta=' ||
+       (count(*) - getvariable('before_aggregate_files')::BIGINT)
+FROM glob('$tmp_dir/inline-data/**/*.parquet');
 SQL
 )"
 inline_status=$?
@@ -280,6 +336,15 @@ assert_contains "$inline_output" "inline_cdf_insert=2,203,2,2"
 assert_contains "$inline_output" "inline_after_delete=1,102,1,0"
 assert_contains "$inline_output" "inline_cdf_delete=1,101,1,1"
 assert_contains "$inline_output" "inline_cdf_unmatched_delete=0"
+assert_contains "$inline_output" "boundary_inline_current=1,200,45000"
+assert_contains "$inline_output" "boundary_inline_file_count=0"
+assert_contains "$inline_output" "oversized_inline_current=1,201,65536"
+assert_contains "$inline_output" "oversized_inline_file_count=1"
+assert_contains "$inline_output" "oversized_update_current=1,201,65537,y"
+assert_contains "$inline_output" "oversized_merge_current=1,301,65538,n"
+assert_contains "$inline_output" "oversized_ctas_current=10,45,65539,9"
+assert_contains "$inline_output" "aggregate_inline_current=100,4950,40000"
+assert_contains "$inline_output" "aggregate_inline_file_delta=1"
 
 set +e
 inline_reattach_output="$("$DUCKDB_BIN" -batch 2>&1 <<SQL
@@ -292,9 +357,29 @@ ATTACH 'ducklake:$tmp_dir/inline-metadata.duckdb' AS dl (
 );
 SELECT 'inline_reattach_current=' || count(*) || ',' || sum(id)
 FROM dl.main.runtime_inline;
+SET VARIABLE inline_reattach_snapshot = (SELECT id FROM ducklake_current_snapshot('dl'));
 SELECT 'inline_reattach_delete=' || count(*) || ',' || sum(id)
-FROM ducklake_table_changes('dl', 'main', 'runtime_inline', 3, 3)
-WHERE id = 101;
+FROM ducklake_table_changes(
+    'dl', 'main', 'runtime_inline',
+    1,
+    getvariable('inline_reattach_snapshot')::BIGINT
+)
+WHERE id = 101 AND change_type = 'delete';
+SELECT 'boundary_inline_reattach=' || count(*) || ',' || sum(id) || ',' ||
+       min(length(note))
+FROM dl.main.runtime_boundary_inline;
+SELECT 'oversized_inline_reattach=' || count(*) || ',' || sum(id) || ',' ||
+       min(length(note)) || ',' || min(substr(note, 1, 1))
+FROM dl.main.runtime_oversized_inline;
+SELECT 'oversized_merge_reattach=' || count(*) || ',' || sum(id) || ',' ||
+       min(length(note)) || ',' || min(substr(note, 1, 1))
+FROM dl.main.runtime_oversized_merge;
+SELECT 'oversized_ctas_reattach=' || count(*) || ',' || sum(id) || ',' ||
+       max(length(note)) || ',' || count(*) FILTER (WHERE note = 'small')
+FROM dl.main.runtime_oversized_ctas;
+SELECT 'aggregate_inline_reattach=' || count(*) || ',' || sum(id) || ',' ||
+       min(length(note))
+FROM dl.main.runtime_aggregate_inline;
 SQL
 )"
 inline_reattach_status=$?
@@ -305,6 +390,11 @@ printf '%s\n' "$inline_reattach_output"
 [[ "$inline_reattach_status" -eq 0 ]] || fail "expected aux_catalog inline reattach smoke to succeed"
 assert_contains "$inline_reattach_output" "inline_reattach_current=1,102"
 assert_contains "$inline_reattach_output" "inline_reattach_delete=1,101"
+assert_contains "$inline_reattach_output" "boundary_inline_reattach=1,200,45000"
+assert_contains "$inline_reattach_output" "oversized_inline_reattach=1,201,65537,y"
+assert_contains "$inline_reattach_output" "oversized_merge_reattach=1,301,65538,n"
+assert_contains "$inline_reattach_output" "oversized_ctas_reattach=10,45,65539,9"
+assert_contains "$inline_reattach_output" "aggregate_inline_reattach=100,4950,40000"
 if [[ -n "$metrics_path" ]]; then
     [[ -f "$metrics_path" ]] || fail "runtime metrics artifact was not written at $metrics_path"
     metrics_output="$(cat "$metrics_path")"

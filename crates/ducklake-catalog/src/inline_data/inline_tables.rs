@@ -10,9 +10,8 @@ use crate::runtime_metrics::RuntimeMetricStage;
 #[cfg(feature = "runtime-metrics")]
 use crate::runtime_metrics::record_runtime_method_elapsed;
 use crate::{
-    CatalogError, CatalogId, CatalogResult, DataFileRow, DuckLakeSnapshotId, KvBatch,
-    MutableCatalogKv, OrderedCatalogKv, RangeDirection, SchemaId, SnapshotRow, TableId, TableRow,
-    ValidityWindow, commit_append_data_files,
+    CatalogError, CatalogId, CatalogResult, DuckLakeSnapshotId, KvBatch, MutableCatalogKv,
+    OrderedCatalogKv, RangeDirection, SchemaId, SnapshotRow, TableId, TableRow, ValidityWindow,
     conflict_watermarks::{stage_max_catalog_id_watermark, stage_max_file_id_watermark},
     ids::{CatalogOrderId, CatalogOrderKind, RawSnapshotSequence, incomplete_fdb_order},
     inline_change_feed::{InlineRowChangeKind, stage_inline_row_changes_for_payload},
@@ -50,12 +49,6 @@ pub struct InlineTableChunkRow {
     pub chunk_index: u32,
     pub chunk_count: u32,
     pub payload: Vec<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InlineTablePayloadCommit {
-    Inlined(Vec<InlineTableChunkRow>),
-    FileBacked(Vec<DataFileRow>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -388,28 +381,6 @@ fn inline_commit_target(
         snapshot,
         stage_snapshot: true,
     })
-}
-
-pub fn route_inline_table_payload_or_data_file(
-    kv: &mut impl MutableCatalogKv,
-    catalog: CatalogId,
-    table_id: TableId,
-    schema_id: SchemaId,
-    payload: Vec<u8>,
-    fallback_file: DataFileRow,
-) -> CatalogResult<InlineTablePayloadCommit> {
-    if fallback_file.table_id != table_id {
-        return Err(CatalogError::InvalidMutation(format!(
-            "inline fallback file table {} does not match inline table {}",
-            fallback_file.table_id.0, table_id.0
-        )));
-    }
-    if validate_inline_table_rows_fit_fdb(&payload).is_ok() {
-        return register_inline_table_payload(kv, catalog, table_id, schema_id, payload)
-            .map(InlineTablePayloadCommit::Inlined);
-    }
-    commit_append_data_files(kv, catalog, vec![fallback_file])
-        .map(InlineTablePayloadCommit::FileBacked)
 }
 
 pub(crate) fn stage_flush_inline_table_payloads(
