@@ -1577,6 +1577,94 @@ mod tests {
 
     #[cfg(feature = "foundationdb")]
     #[test]
+    fn fdb_live_given_live_inline_row_when_replaced_then_current_and_historical_values_are_correct()
+    {
+        let _guard = crate::FDB_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if live_fdb_disabled() {
+            return;
+        }
+
+        let catalog = CatalogId(909);
+        let prefix = unique_prefix("commit-attempt-inline-replacement");
+        set_env("AUX_DUCKLAKE_FDB_PREFIX", &prefix);
+        let result = (|| -> CatalogResult<()> {
+            let kv = crate::FdbOrderedCatalogKv::open_default_with_prefix(prefix.as_bytes())?;
+            kv.initialize_catalog_if_absent_versionstamped(catalog)?;
+            commit_attempt(
+                RuntimeCatalogBackend::FoundationDb,
+                catalog,
+                b"commit_snapshot\t1\nread_snapshot\t0\nmetadata\tCreateTables\ntable\t1\t0\tusers-uuid\tusers\tmain/users/\t\ncolumn\t1\t1\temail\tVARCHAR\ttrue\t\t\t\tNULL\tliteral\n",
+            )?;
+            commit_attempt(
+                RuntimeCatalogBackend::FoundationDb,
+                catalog,
+                b"commit_snapshot\t2\nread_snapshot\t1\ninline\tRegisterInlineRows\ntable\t1\t0\tducklake_inlined_data_1_0\nrow\t0\ts:6f6c64\n",
+            )?;
+
+            commit_attempt(
+                RuntimeCatalogBackend::FoundationDb,
+                catalog,
+                b"commit_snapshot\t3\nread_snapshot\t2\ninline\tRegisterInlineRows\ntable\t1\t0\tducklake_inlined_data_1_0\nrow\t0\ts:6e6577\ninline\tDeleteInlineRows\ndelete\t1\tducklake_inlined_data_1_0\t0\n",
+            )?;
+
+            let current = read_inline_rows_payload(
+                &kv,
+                catalog,
+                ReadInlineRowsPayload {
+                    table_name: "ducklake_inlined_data_1_0".to_owned(),
+                    snapshot: Some(ReadSnapshot::new(DuckLakeSnapshotId(3))),
+                    include_flushed: false,
+                    include_deleted: false,
+                },
+            )?;
+            let current = String::from_utf8_lossy(&current);
+            assert!(
+                current.contains("row_change\t3\t\t0\ts:6e6577"),
+                "{current}"
+            );
+            assert!(!current.contains("s:6f6c64"), "{current}");
+
+            let historical = read_inline_rows_payload(
+                &kv,
+                catalog,
+                ReadInlineRowsPayload {
+                    table_name: "ducklake_inlined_data_1_0".to_owned(),
+                    snapshot: Some(ReadSnapshot::new(DuckLakeSnapshotId(2))),
+                    include_flushed: false,
+                    include_deleted: false,
+                },
+            )?;
+            let historical = String::from_utf8_lossy(&historical);
+            assert!(
+                historical.contains("row_change\t2\t\t0\ts:6f6c64"),
+                "{historical}"
+            );
+            assert!(!historical.contains("s:6e6577"), "{historical}");
+
+            let error = commit_attempt(
+                RuntimeCatalogBackend::FoundationDb,
+                catalog,
+                b"commit_snapshot\t4\nread_snapshot\t3\ninline\tRegisterInlineRows\ntable\t1\t0\tducklake_inlined_data_1_0\nrow\t0\ts:696e76616c6964\n",
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    CatalogError::InvalidMutation(ref message)
+                        if message.contains("inline row id 0 is already live")
+                ),
+                "{error}"
+            );
+            Ok(())
+        })();
+        remove_env("AUX_DUCKLAKE_FDB_PREFIX");
+        result.unwrap();
+    }
+
+    #[cfg(feature = "foundationdb")]
+    #[test]
     fn fdb_live_given_stale_created_table_id_remapped_when_inline_rows_committed_then_remapped_inline_table_is_readable()
      {
         let _guard = crate::FDB_ENV_LOCK
