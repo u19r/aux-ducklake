@@ -282,7 +282,7 @@ pub(crate) fn prepare_inline_table_mutation(
         .map(|payload| prepare_inline_payload(catalog, placeholder, payload))
         .collect::<CatalogResult<Vec<_>>>()?;
     let live_rows = load_inline_live_rows(kv, catalog, &payloads, &deletes)?;
-    reject_existing_inline_row_ids(&payloads, &live_rows)?;
+    reject_existing_inline_row_ids(&payloads, &deletes, &live_rows)?;
     let deletes = deletes
         .into_iter()
         .map(|delete| prepare_inline_delete(&live_rows, sequence, delete))
@@ -355,18 +355,30 @@ fn load_inline_live_rows(
 
 fn reject_existing_inline_row_ids(
     payloads: &[PreparedInlinePayload],
+    deletes: &[InlineTableDeletePayload],
     live_rows: &BTreeMap<(TableId, SchemaId, u64), Option<RawSnapshotSequence>>,
 ) -> CatalogResult<()> {
+    let replacements = deletes
+        .iter()
+        .flat_map(|delete| {
+            delete
+                .row_ids
+                .iter()
+                .map(|row_id| (delete.table_id, delete.schema_id, *row_id))
+        })
+        .collect::<BTreeSet<_>>();
     for payload in payloads {
         for row_id in payload
             .row_changes
             .iter()
             .filter_map(|change| change.row_id)
         {
-            if live_rows
-                .get(&(payload.table_id, payload.schema_id, row_id))
-                .and_then(|sequence| *sequence)
-                .is_some()
+            let identity = (payload.table_id, payload.schema_id, row_id);
+            if !replacements.contains(&identity)
+                && live_rows
+                    .get(&(payload.table_id, payload.schema_id, row_id))
+                    .and_then(|sequence| *sequence)
+                    .is_some()
             {
                 return Err(CatalogError::InvalidMutation(format!(
                     "inline row id {row_id} is already live for table {} schema {}",
@@ -480,6 +492,9 @@ pub(crate) fn stage_prepared_inline_mutation(
     for replacement in &prepared.replacements {
         stage_inline_table_replacement(kv, trx, catalog, replacement)?;
     }
+    for delete in &prepared.deletes {
+        stage_inline_delete(kv, trx, catalog, prepared.snapshot.order, delete, true)?;
+    }
     for payload in &prepared.payloads {
         stage_inline_payload(
             kv,
@@ -489,9 +504,6 @@ pub(crate) fn stage_prepared_inline_mutation(
             prepared.snapshot.sequence,
             payload,
         )?;
-    }
-    for delete in &prepared.deletes {
-        stage_inline_delete(kv, trx, catalog, prepared.snapshot.order, delete, true)?;
     }
     stage_fdb_max_file_id_watermark(kv, trx, catalog, prepared.snapshot.sequence.0);
     Ok(())
