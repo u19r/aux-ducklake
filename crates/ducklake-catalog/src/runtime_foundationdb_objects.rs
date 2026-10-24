@@ -110,7 +110,7 @@ fn reject_stale_object_commit(
         return Ok(());
     };
     let latest_public = public_snapshot_sequence_for_order(kv, catalog, latest.order)?
-        .map_or(DuckLakeSnapshotId(latest.sequence.0), |sequence| sequence);
+        .unwrap_or(DuckLakeSnapshotId(latest.sequence.0));
     if latest_public.0 > commit_snapshot.0 {
         return Err(crate::CatalogError::InvalidMutation(format!(
             "conflict during {operation}: proposed snapshot {} is stale after latest snapshot {}",

@@ -15,7 +15,7 @@ USAGE
 
 default_platforms() {
     case "$(uname -s)-$(uname -m)" in
-        Darwin-arm64) printf '%s\n' macos-arm64 ;;
+    Darwin-arm64) printf '%s\n' macos-arm64 ;;
     esac
     printf '%s\n' linux-amd64 linux-arm64
 }
@@ -34,25 +34,26 @@ fi
 macos_release_built=0
 for platform in "${platforms[@]}"; do
     case "$platform" in
-        linux-amd64 | linux-arm64)
-            "$ROOT_DIR/scripts/build_ducklake_linux_release.sh" "$platform"
-            ;;
-        macos-arm64)
-            if [[ "$(uname -s)-$(uname -m)" != "Darwin-arm64" ]]; then
-                echo "macos-arm64 release artifacts must be built on macOS arm64" >&2
-                exit 1
-            fi
-            if [[ "$macos_release_built" == "0" ]]; then
-                "$ROOT_DIR/scripts/build_ducklake_release.sh"
-                macos_release_built=1
-            fi
-            "$ROOT_DIR/scripts/package_ducklake_release.sh" macos-arm64
-            ;;
-        *)
-            echo "unsupported release platform: $platform" >&2
-            usage
+    linux-amd64 | linux-arm64)
+        "$ROOT_DIR/scripts/build_ducklake_linux_release.sh" "$platform"
+        ;;
+    macos-arm64)
+        if [[ "$(uname -s)-$(uname -m)" != "Darwin-arm64" ]]; then
+            echo "macos-arm64 release artifacts must be built on macOS arm64" >&2
             exit 1
-            ;;
+        fi
+        if [[ "$macos_release_built" == "0" ]]; then
+            "$ROOT_DIR/scripts/build_ducklake_release.sh"
+            macos_release_built=1
+        fi
+        "$ROOT_DIR/scripts/package_ducklake_release.sh" macos-arm64
+        python3 "$ROOT_DIR/scripts/ducklake-release-smoke.py" "$ROOT_DIR/build/release/macos-arm64"
+        ;;
+    *)
+        echo "unsupported release platform: $platform" >&2
+        usage
+        exit 1
+        ;;
     esac
 done
 

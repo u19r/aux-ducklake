@@ -37,7 +37,7 @@ assert_expected_output() {
             printf '%s\n' "$output" >&2
             fail "expected output to contain: $line"
         }
-    done < "$EXPECTED"
+    done <"$EXPECTED"
 }
 
 assert_failure_contains() {

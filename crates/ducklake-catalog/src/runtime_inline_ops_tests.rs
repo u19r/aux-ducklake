@@ -122,8 +122,7 @@ mod storage_contract_tests {
 mod tests {
     use super::super::{
         inline_file_deletions_for_flush_payload, inline_file_deletions_payload,
-        inline_flush_delete_positions_payload_values, inline_rows_payload, inline_rows_payloads,
-        read_inline_rows_for_flush_payload_values,
+        inline_rows_payload, inline_rows_payloads, read_inline_rows_for_flush_payload_values,
         read_inline_rows_for_global_stats_batch_payload_values, register_inlined_table,
     };
     use crate::{
@@ -164,19 +163,6 @@ mod tests {
             payload[1].snapshot.unwrap().public_id(),
             DuckLakeSnapshotId(9)
         );
-    }
-
-    #[test]
-    fn given_current_flush_delete_positions_payload_when_parsed_then_snapshot_and_table_are_preserved()
-     {
-        let payload = inline_flush_delete_positions_payload_values(
-            b"inlined_table_name=ducklake_inlined_data_1_1\nsnapshot_id=3\n",
-            "ListCurrentInlineFlushDeletePositions",
-        )
-        .unwrap();
-
-        assert_eq!(payload.table_name, "ducklake_inlined_data_1_1");
-        assert_eq!(payload.snapshot.public_id(), DuckLakeSnapshotId(3));
     }
 
     #[test]
@@ -241,13 +227,15 @@ mod tests {
         assert!(text.contains("inline_file_deletion_count=2\n"), "{text}");
         assert!(
             text.contains(
-                "inline_file_delete\t42\tmain/t/file.parquet\tfalse\t10\t3\t9\tmain/t/delete.parquet\tfalse\t2\tbase64-key\tPARQUET\n"
+                "inline_file_delete\t42\tmain/t/file.parquet\tfalse\t10\t3\t9\tmain/t/delete.\
+                 parquet\tfalse\t2\tbase64-key\tPARQUET\n"
             ),
             "{text}"
         );
         assert!(
             text.contains(
-                "inline_file_delete\t42\tmain/t/file.parquet\tfalse\t11\t3\t9\tmain/t/delete.parquet\tfalse\t2\tbase64-key\tPARQUET\n"
+                "inline_file_delete\t42\tmain/t/file.parquet\tfalse\t11\t3\t9\tmain/t/delete.\
+                 parquet\tfalse\t2\tbase64-key\tPARQUET\n"
             ),
             "{text}"
         );

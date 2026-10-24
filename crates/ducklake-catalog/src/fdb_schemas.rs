@@ -74,7 +74,7 @@ impl FdbOrderedCatalogKv {
                     &schema_object_key(catalog, schema.schema_id, placeholder),
                     schema_object_key_order_offset(catalog, schema.schema_id),
                 )?,
-                &versionstamped_value(&schema.encode(), SchemaRow::BEGIN_ORDER_BYTES_OFFSET)?,
+                &schema.encode(),
                 MutationType::SetVersionstampedKey,
             );
         }

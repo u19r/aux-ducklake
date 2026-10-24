@@ -36,14 +36,18 @@ pub(super) fn global_stats_for_snapshot_payload(
     snapshot_id: u64,
     requested_table_ids: &BTreeSet<TableId>,
 ) -> CatalogResult<Vec<u8>> {
-    let snapshot = stats_snapshot_for_request(kv, catalog, snapshot_id)?;
+    // Pin the complete stats operation once when a runtime read context is active. Worker
+    // threads receive this immutable view, so file membership and inline stats cannot straddle a
+    // concurrent flush.
+    let read_kv = crate::runtime_file_listing::runtime_read_snapshot_kv(kv)?;
+    let snapshot = stats_snapshot_for_request(&read_kv, catalog, snapshot_id)?;
     let resolved_snapshot_id = snapshot.sequence.0;
-    let tables = tables_for_global_stats(kv, catalog, snapshot.order, requested_table_ids)?;
+    let tables = tables_for_global_stats(&read_kv, catalog, snapshot.order, requested_table_ids)?;
     let table_ids = tables
         .iter()
         .map(|table| table.table_id)
         .collect::<Vec<_>>();
-    let allocated_next_row_ids = load_table_next_row_ids(kv, catalog, &table_ids)?;
+    let allocated_next_row_ids = load_table_next_row_ids(&read_kv, catalog, &table_ids)?;
     let mut stats_by_table = BTreeMap::new();
     let columns_by_table = tables
         .iter()
@@ -51,7 +55,7 @@ pub(super) fn global_stats_for_snapshot_payload(
         .collect::<BTreeMap<_, _>>();
     let mut data_files = BTreeMap::new();
     let rewrite_tables = snapshot_operation_table_ids_at(
-        kv,
+        &read_kv,
         catalog,
         snapshot.order,
         SnapshotOperationKind::RewriteDelete,
@@ -61,7 +65,7 @@ pub(super) fn global_stats_for_snapshot_payload(
         let results = std::thread::scope(|scope| {
             let mut handles = Vec::with_capacity(chunk.len());
             for table in chunk.iter().cloned() {
-                let kv = kv.clone();
+                let kv = read_kv.clone();
                 let rewrite = rewrite_tables.contains(&table.table_id);
                 let allocated_next_row_id = allocated_next_row_ids
                     .get(&table.table_id)
@@ -102,7 +106,7 @@ pub(super) fn global_stats_for_snapshot_payload(
     }
 
     let file_stats = crate::file_stats::list_file_column_stats_for_data_files(
-        kv,
+        &read_kv,
         catalog,
         &data_files.into_values().collect::<Vec<_>>(),
         &columns_by_table,
@@ -197,14 +201,17 @@ pub(super) fn global_stats_inputs_for_snapshot_payload(
     include_file_column_stats: bool,
     requested_table_ids: &BTreeSet<TableId>,
 ) -> CatalogResult<Vec<u8>> {
-    let snapshot = stats_snapshot_for_request(kv, catalog, snapshot_id)?;
+    // Keep file inputs, inline stats, and optional file-column stats at one read version. This is
+    // also the first-owner path for callers that ask for stats without listing files separately.
+    let read_kv = crate::runtime_file_listing::runtime_read_snapshot_kv(kv)?;
+    let snapshot = stats_snapshot_for_request(&read_kv, catalog, snapshot_id)?;
     let resolved_snapshot_id = snapshot.sequence.0;
-    let tables = tables_for_global_stats(kv, catalog, snapshot.order, requested_table_ids)?;
+    let tables = tables_for_global_stats(&read_kv, catalog, snapshot.order, requested_table_ids)?;
     let mut out = format!("global_stats_input_snapshot={snapshot_id}\n");
     let mut data_file_ids = BTreeSet::new();
     for table in &tables {
         let table_files = foundationdb_data_files_at_payload(
-            kv,
+            &read_kv,
             catalog,
             ListDataFilesAtPayload {
                 snapshot_id: resolved_snapshot_id,
@@ -219,7 +226,7 @@ pub(super) fn global_stats_inputs_for_snapshot_payload(
         if include_inline_stats {
             for inlined_table in &table.inlined_data_tables {
                 let inline_stats = read_foundationdb_inline_rows_global_stats_payload(
-                    kv,
+                    &read_kv,
                     catalog,
                     ReadInlineRowsPayload {
                         table_name: inlined_table.table_name.clone(),
@@ -235,7 +242,7 @@ pub(super) fn global_stats_inputs_for_snapshot_payload(
 
     if include_file_column_stats {
         let file_stats = list_file_column_stats_for_data_file_ids(
-            kv,
+            &read_kv,
             catalog,
             &data_file_ids.into_iter().collect::<Vec<_>>(),
         )?;

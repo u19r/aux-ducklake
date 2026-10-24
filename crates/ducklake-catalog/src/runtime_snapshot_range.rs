@@ -1,4 +1,4 @@
-use crate::{CatalogOrderId, CommitAttemptId, DuckLakeSnapshotId};
+use crate::{CommitAttemptId, DuckLakeSnapshotId};
 
 #[derive(Clone, Copy)]
 pub(crate) struct ReadSnapshot(DuckLakeSnapshotId);
@@ -41,32 +41,6 @@ impl SemanticDeleteCoverageBegin {
     }
 
     pub(crate) fn public_id(self) -> DuckLakeSnapshotId {
-        self.0
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct SnapshotWatermarkCutoffOrder(CatalogOrderId);
-
-impl SnapshotWatermarkCutoffOrder {
-    pub(crate) fn new(order: CatalogOrderId) -> Self {
-        Self(order)
-    }
-
-    pub(crate) fn catalog_order(self) -> CatalogOrderId {
-        self.0
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct SnapshotDataChangeOrder(CatalogOrderId);
-
-impl SnapshotDataChangeOrder {
-    pub(crate) fn new(order: CatalogOrderId) -> Self {
-        Self(order)
-    }
-
-    pub(crate) fn catalog_order(self) -> CatalogOrderId {
         self.0
     }
 }

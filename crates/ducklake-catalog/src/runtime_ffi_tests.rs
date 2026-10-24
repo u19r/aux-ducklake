@@ -1,15 +1,17 @@
 #![cfg_attr(not(feature = "foundationdb"), allow(unused_imports))]
 
+#[cfg(feature = "foundationdb")]
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use super::*;
 use crate::{
     CatalogId, CatalogOrderId, ColumnId, DataFileId, DataFileRow, DeleteFileId, DeleteFileRow,
-    FakeOrderedCatalogKv, FilePartitionValueRow, InlinedTableRow, KvBatch, MacroId,
-    PartitionKeyIndex, RawSnapshotSequence, SchemaId, SnapshotRow, TableColumnRow, TableId,
-    TableRow, list_data_files_at, load_macro_at, load_schema_at, load_table_at, load_view_at,
-    register_file_partition_value, runtime_protocol::RuntimeCatalogBackend, store::stage_snapshot,
+    FakeOrderedCatalogKv, FilePartitionValueRow, InlineTableFlush, InlinedTableRow, KvBatch,
+    MacroId, MetadataSettingRow, PartitionKeyIndex, RawSnapshotSequence, SchemaId, SnapshotRow,
+    TableColumnRow, TableId, TableRow, list_data_files_at, load_macro_at, load_schema_at,
+    load_table_at, load_view_at, register_file_partition_value,
+    runtime_protocol::RuntimeCatalogBackend, set_metadata_setting, store::stage_snapshot,
 };
-#[cfg(feature = "foundationdb")]
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn mutating_runtime_operation_rejects_page_continuation_before_execution() {
@@ -59,6 +61,36 @@ fn given_cached_read_context_when_mutation_fails_then_retry_reads_latest_snapsho
 
     let _retry = crate::store::begin_runtime_read_request(Some(read_context_id));
     assert_eq!(crate::latest_snapshot(&kv, catalog).unwrap(), Some(latest));
+}
+
+#[test]
+fn ending_runtime_read_context_allows_context_id_reuse_without_cached_reads() {
+    let context_id = 9_003_991;
+    {
+        let _request = crate::store::begin_runtime_read_request(Some(context_id));
+    }
+    {
+        let _request = crate::store::begin_runtime_read_request(Some(context_id));
+    }
+
+    let request = RuntimeRequest::new(
+        "ffi-end-runtime-read-context-reuse",
+        RuntimeCatalogBackend::FoundationDb,
+        "EndRuntimeReadContext",
+        Vec::new(),
+    )
+    .unwrap()
+    .with_read_context_id(context_id)
+    .unwrap();
+    let response = runtime_response_from_request(request).unwrap();
+    assert!(
+        String::from_utf8(response.payload)
+            .unwrap()
+            .contains("runtime_read_context_ended=9003991")
+    );
+
+    let mut reused = crate::store::begin_runtime_read_request(Some(context_id));
+    reused.end_context();
 }
 
 #[test]
@@ -691,7 +723,7 @@ fn ffi_create_schemas_mutates_live_foundationdb_catalog_when_enabled() {
         "ffi-fdb-create-schemas",
         RuntimeCatalogBackend::FoundationDb,
         "CreateSchemas",
-        "schema\t8\truntime-fdb-schema-uuid\truntime_fdb_schema\tmain/runtime_fdb_schema/\n"
+        "schema\t8\truntime-fdb-schema-uuid\truntime_fdb_schema\tmain/runtime_fdb_schema/\t\n"
             .to_owned(),
     );
 
@@ -703,7 +735,7 @@ fn ffi_create_schemas_mutates_live_foundationdb_catalog_when_enabled() {
         .unwrap();
     assert!(created.contains("created_schema_count=1"));
     assert!(created.contains(
-        "schema\t8\truntime-fdb-schema-uuid\truntime_fdb_schema\tmain/runtime_fdb_schema/"
+        "schema\t8\truntime-fdb-schema-uuid\truntime_fdb_schema\tmain/runtime_fdb_schema/\t"
     ));
     assert_eq!(schema.name, "runtime_fdb_schema");
 }
@@ -764,7 +796,7 @@ fn ffi_create_table_commit_snapshot_keeps_public_snapshot_id_when_enabled() {
         "ffi-fdb-public-create-schema",
         RuntimeCatalogBackend::FoundationDb,
         "CreateSchemas",
-        "commit_snapshot\t1\nschema\t0\truntime-fdb-public-main-uuid\tmain\tmain/\n".to_owned(),
+        "commit_snapshot\t1\nschema\t0\truntime-fdb-public-main-uuid\tmain\tmain/\t\n".to_owned(),
     );
     let created_table = runtime_request_payload(
         "ffi-fdb-public-create-table",
@@ -791,9 +823,7 @@ fn ffi_create_table_commit_snapshot_keeps_public_snapshot_id_when_enabled() {
         "ffi-fdb-public-register-inline-rows",
         RuntimeCatalogBackend::FoundationDb,
         "RegisterInlineRows",
-        "commit_snapshot\t1\n\
-         table\t14\t1\tducklake_inlined_data_14_1\n\
-         row\t1\ti:7\ts:736576656e\n"
+        "commit_snapshot\t1\ntable\t14\t1\tducklake_inlined_data_14_1\nrow\t1\ti:7\ts:736576656e\n"
             .to_owned(),
     );
     let read_rows = runtime_request_payload(
@@ -868,10 +898,7 @@ fn ffi_standalone_inline_insert_then_flush_moves_snapshot_insert_feed_to_file_wh
         RuntimeCatalogBackend::FoundationDb,
         "RegisterInlineRows",
         format!(
-            "commit_snapshot\t{inline_insert_snapshot}\n\
-             table\t15\t1\tducklake_inlined_data_15_1\n\
-             row\t3\tn:\n\
-             row\t4\ti:110\n"
+            "commit_snapshot\t{inline_insert_snapshot}\ntable\t15\t1\tducklake_inlined_data_15_1\nrow\t3\tn:\nrow\t4\ti:110\n"
         ),
     );
     let kv = crate::FdbOrderedCatalogKv::open_default_with_prefix(prefix.as_bytes()).unwrap();
@@ -887,9 +914,7 @@ fn ffi_standalone_inline_insert_then_flush_moves_snapshot_insert_feed_to_file_wh
         RuntimeCatalogBackend::FoundationDb,
         "ListInlineRowInsertions",
         format!(
-            "inlined_table_name=ducklake_inlined_data_15_1\n\
-             start_snapshot_id={public_inline_insert}\n\
-             end_snapshot_id={public_inline_insert}\n"
+            "inlined_table_name=ducklake_inlined_data_15_1\nstart_snapshot_id={public_inline_insert}\nend_snapshot_id={public_inline_insert}\n"
         ),
     );
     let latest_after_inline_rows = runtime_request_payload(
@@ -904,10 +929,7 @@ fn ffi_standalone_inline_insert_then_flush_moves_snapshot_insert_feed_to_file_wh
         RuntimeCatalogBackend::FoundationDb,
         "CommitDataMutation",
         format!(
-            "commit_snapshot\t{flush_snapshot}\n\
-             file\t30\t15\tmain/runtime/inline-flush.parquet\t2\t565\t3\t\t438\t{inline_insert_snapshot}\t{inline_insert_snapshot}\n\
-             file_column_stats\t30\t15\t1\t2\t0\t10\t110\t\n\
-             inline_table\tducklake_inlined_data_15_1\t{inline_insert_snapshot}\n"
+            "commit_snapshot\t{flush_snapshot}\nfile\t30\t15\tmain/runtime/inline-flush.parquet\t2\t565\t3\t\t438\t{inline_insert_snapshot}\t{inline_insert_snapshot}\nfile_column_stats\t30\t15\t1\t2\t0\t10\t110\t\ninline_table\tducklake_inlined_data_15_1\t{inline_insert_snapshot}\n"
         ),
     );
     let insertions_after_flush = runtime_request_payload(
@@ -915,9 +937,7 @@ fn ffi_standalone_inline_insert_then_flush_moves_snapshot_insert_feed_to_file_wh
         RuntimeCatalogBackend::FoundationDb,
         "ListInlineRowInsertions",
         format!(
-            "inlined_table_name=ducklake_inlined_data_15_1\n\
-             start_snapshot_id={public_inline_insert}\n\
-             end_snapshot_id={public_inline_insert}\n"
+            "inlined_table_name=ducklake_inlined_data_15_1\nstart_snapshot_id={public_inline_insert}\nend_snapshot_id={public_inline_insert}\n"
         ),
     );
     let files_after_flush = runtime_request_payload(
@@ -925,9 +945,7 @@ fn ffi_standalone_inline_insert_then_flush_moves_snapshot_insert_feed_to_file_wh
         RuntimeCatalogBackend::FoundationDb,
         "ListDataFileChanges",
         format!(
-            "table_id=15\n\
-             start_snapshot_id={public_inline_insert}\n\
-             end_snapshot_id={public_inline_insert}\n"
+            "table_id=15\nstart_snapshot_id={public_inline_insert}\nend_snapshot_id={public_inline_insert}\n"
         ),
     );
 
@@ -955,6 +973,273 @@ fn ffi_standalone_inline_insert_then_flush_moves_snapshot_insert_feed_to_file_wh
     assert!(
         files_after_flush.contains("change_count=1"),
         "after flush: {files_after_flush}"
+    );
+}
+
+#[cfg(feature = "foundationdb")]
+#[test]
+fn ffi_two_connections_keep_inline_rows_at_file_list_snapshot_during_flush_when_enabled() {
+    if live_fdb_disabled() {
+        return;
+    }
+    let _guard = crate::FDB_ENV_LOCK.lock().unwrap();
+    let prefix = format!(
+        "{}/",
+        unique_fdb_prefix("runtime-inline-flush-read-snapshot")
+    );
+    let _cleanup = FoundationDbPrefixCleanup::new(&prefix);
+    let catalog = CatalogId(1);
+    let table = TableId(16);
+    let schema = SchemaId(0);
+    let inline_table_name = "ducklake_inlined_data_16_0";
+    let mut reader =
+        crate::FdbOrderedCatalogKv::open_default_with_prefix(prefix.as_bytes()).unwrap();
+    reader
+        .initialize_catalog_if_absent_versionstamped(catalog)
+        .unwrap();
+    let created = reader
+        .create_table_versionstamped(
+            catalog,
+            inline_test_table(table, "runtime_fdb_inline_flush_read_snapshot", schema),
+            None,
+        )
+        .unwrap();
+    let mut with_inline = created;
+    with_inline
+        .inlined_data_tables
+        .push(InlinedTableRow::new(inline_table_name, schema.0));
+    set_metadata_setting(
+        &mut reader,
+        catalog,
+        MetadataSettingRow::global("data_inlining_row_limit", "100"),
+    )
+    .unwrap();
+    reader
+        .register_inline_table_payload_with_table_versionstamped(
+            catalog,
+            with_inline,
+            schema,
+            inline_rows_for_ids(0..100),
+        )
+        .unwrap();
+    let initial = crate::latest_snapshot(&reader, catalog).unwrap().unwrap();
+    let files = (0..99)
+        .map(|index| {
+            DataFileRow::new(
+                DataFileId(1_600 + index),
+                table,
+                format!("main/runtime/inline-read-{index}.parquet"),
+                1,
+                128,
+                initial.order,
+            )
+        })
+        .collect();
+    reader
+        .append_data_files_versionstamped(catalog, files)
+        .unwrap();
+    let query_snapshot = crate::latest_snapshot(&reader, catalog).unwrap().unwrap();
+    let flusher = crate::FdbOrderedCatalogKv::open_default_with_prefix(prefix.as_bytes()).unwrap();
+    let read_context_id = 16_001;
+
+    set_env("AUX_DUCKLAKE_FDB_PREFIX", &prefix);
+    remove_env("AUX_DUCKLAKE_FDB_CLUSTER_FILE");
+    let context_snapshot_before_capture = runtime_request_payload_for_catalog_with_context(
+        "ffi-fdb-inline-read-snapshot-prime-context",
+        RuntimeCatalogBackend::FoundationDb,
+        catalog,
+        "GetSnapshot",
+        read_context_id,
+        String::new(),
+    );
+    assert!(
+        context_snapshot_before_capture
+            .contains(&format!("snapshot_id={}", query_snapshot.sequence)),
+        "{context_snapshot_before_capture}"
+    );
+
+    flusher
+        .commit_data_mutation_versionstamped(
+            catalog,
+            None,
+            crate::FdbDataMutation::new(
+                vec![DataFileRow::new(
+                    DataFileId(1_699),
+                    table,
+                    "main/runtime/inline-read-flushed.parquet",
+                    100,
+                    12_800,
+                    query_snapshot.order,
+                )],
+                Vec::new(),
+                vec![InlineTableFlush::new(
+                    table,
+                    schema,
+                    query_snapshot.sequence,
+                )],
+                Vec::new(),
+                Vec::new(),
+            ),
+        )
+        .unwrap();
+    let latest_after_flush = crate::latest_snapshot(&flusher, catalog).unwrap().unwrap();
+
+    let files_before_flush = runtime_request_payload_for_catalog_with_context(
+        "ffi-fdb-inline-read-snapshot-files",
+        RuntimeCatalogBackend::FoundationDb,
+        catalog,
+        "ListDataFilesAt",
+        read_context_id,
+        format!(
+            "snapshot_id={}\ntable_id={}\n",
+            query_snapshot.sequence, table.0
+        ),
+    );
+    assert_eq!(
+        files_before_flush.matches("file\t").count(),
+        99,
+        "{files_before_flush}"
+    );
+
+    let inline_after_flush = runtime_request_payload_for_catalog_with_context(
+        "ffi-fdb-inline-read-snapshot-inline",
+        RuntimeCatalogBackend::FoundationDb,
+        catalog,
+        "ReadInlineRows",
+        read_context_id,
+        format!(
+            "inlined_table_name={inline_table_name}\nsnapshot_id={}\n",
+            query_snapshot.sequence
+        ),
+    );
+    let inline_replay_after_flush = runtime_request_payload_for_catalog_with_context(
+        "ffi-fdb-inline-read-snapshot-inline-replay",
+        RuntimeCatalogBackend::FoundationDb,
+        catalog,
+        "ReadInlineRows",
+        read_context_id,
+        format!(
+            "inlined_table_name={inline_table_name}\nsnapshot_id={}\n",
+            query_snapshot.sequence
+        ),
+    );
+    let inline_latest_without_context = runtime_request_payload_for_catalog(
+        "ffi-fdb-inline-read-snapshot-inline-latest",
+        RuntimeCatalogBackend::FoundationDb,
+        catalog,
+        "ReadInlineRows",
+        format!(
+            "inlined_table_name={inline_table_name}\nsnapshot_id={}\n",
+            latest_after_flush.sequence
+        ),
+    );
+    let inline_historical_after_flush_new_context =
+        runtime_request_payload_for_catalog_with_context(
+            "ffi-fdb-inline-read-snapshot-historical-new-context",
+            RuntimeCatalogBackend::FoundationDb,
+            catalog,
+            "ReadInlineRows",
+            read_context_id + 1,
+            format!(
+                "inlined_table_name={inline_table_name}\nsnapshot_id={}\n",
+                query_snapshot.sequence
+            ),
+        );
+    let historical_context_ended = runtime_request_payload_for_catalog_with_context(
+        "ffi-fdb-inline-read-snapshot-historical-end-context",
+        RuntimeCatalogBackend::FoundationDb,
+        catalog,
+        "EndRuntimeReadContext",
+        read_context_id + 1,
+        String::new(),
+    );
+    let ended = runtime_request_payload_for_catalog_with_context(
+        "ffi-fdb-inline-read-snapshot-end-context",
+        RuntimeCatalogBackend::FoundationDb,
+        catalog,
+        "EndRuntimeReadContext",
+        read_context_id,
+        String::new(),
+    );
+    let inline_after_end = runtime_request_payload_for_catalog_with_context(
+        "ffi-fdb-inline-read-snapshot-inline-after-end",
+        RuntimeCatalogBackend::FoundationDb,
+        catalog,
+        "ReadInlineRows",
+        read_context_id,
+        format!(
+            "inlined_table_name={inline_table_name}\nsnapshot_id={}\n",
+            query_snapshot.sequence
+        ),
+    );
+    let inline_latest_after_context_reuse = runtime_request_payload_for_catalog_with_context(
+        "ffi-fdb-inline-read-snapshot-inline-latest-after-reuse",
+        RuntimeCatalogBackend::FoundationDb,
+        catalog,
+        "ReadInlineRows",
+        read_context_id,
+        format!(
+            "inlined_table_name={inline_table_name}\nsnapshot_id={}\n",
+            latest_after_flush.sequence
+        ),
+    );
+    let reused_context_ended = runtime_request_payload_for_catalog_with_context(
+        "ffi-fdb-inline-read-snapshot-reuse-end-context",
+        RuntimeCatalogBackend::FoundationDb,
+        catalog,
+        "EndRuntimeReadContext",
+        read_context_id,
+        String::new(),
+    );
+    remove_env("AUX_DUCKLAKE_FDB_PREFIX");
+
+    assert_eq!(
+        inline_after_flush.matches("row_change\t").count(),
+        100,
+        "{inline_after_flush}"
+    );
+    assert_eq!(
+        inline_replay_after_flush.matches("row_change\t").count(),
+        100,
+        "{inline_replay_after_flush}"
+    );
+    assert_eq!(
+        inline_latest_without_context
+            .matches("row_change\t")
+            .count(),
+        0,
+        "{inline_latest_without_context}"
+    );
+    assert_eq!(
+        inline_historical_after_flush_new_context
+            .matches("row_change\t")
+            .count(),
+        100,
+        "{inline_historical_after_flush_new_context}"
+    );
+    assert!(
+        historical_context_ended.contains("runtime_read_context_ended=16002"),
+        "{historical_context_ended}"
+    );
+    assert!(
+        ended.contains("runtime_read_context_ended=16001"),
+        "{ended}"
+    );
+    assert_eq!(
+        inline_after_end.matches("row_change\t").count(),
+        100,
+        "{inline_after_end}"
+    );
+    assert_eq!(
+        inline_latest_after_context_reuse
+            .matches("row_change\t")
+            .count(),
+        0,
+        "{inline_latest_after_context_reuse}"
+    );
+    assert!(
+        reused_context_ended.contains("runtime_read_context_ended=16001"),
+        "{reused_context_ended}"
     );
 }
 
@@ -1552,7 +1837,8 @@ fn ffi_fdb_cleanup_preserves_reachable_delete_file_for_time_travel() {
     assert!(historical_files.contains("file_count=1"));
     assert!(
         historical_files.contains(&format!(
-            "file\t{}\t{}\tmain/runtime/fdb-delete-cleanup-data.parquet\t100\t8192\t0\t\t{}\tmain/runtime/fdb-delete-cleanup-delete-1.parquet\t50\t4096",
+            "file\t{}\t{}\tmain/runtime/fdb-delete-cleanup-data.parquet\t100\t8192\t0\t\t{}\tmain/\
+             runtime/fdb-delete-cleanup-delete-1.parquet\t50\t4096",
             data_file.data_file_id.0, table.0, first_delete_file.delete_file_id.0,
         )),
         "{historical_files}"
@@ -1624,7 +1910,8 @@ fn ffi_compaction_mutations_update_live_foundationdb_catalog_when_enabled() {
         RuntimeCatalogBackend::FoundationDb,
         "MergeAdjacentFiles",
         format!(
-            "source_file\t{}\t{}\nsource_file\t{}\t{}\nfile\t{}\t{}\tmain/runtime/fdb-merged.parquet\t22\t1024\t0\n",
+            "source_file\t{}\t{}\nsource_file\t{}\t{}\nfile\t{}\t{}\tmain/runtime/fdb-merged.\
+             parquet\t22\t1024\t0\n",
             table.0, left.data_file_id.0, table.0, right.data_file_id.0, 92, table.0
         ),
     );
@@ -1788,11 +2075,16 @@ fn inline_test_payload() -> Vec<u8> {
     b"row\t1\ti:7\ts:736576656e\nrow\t2\ti:8\ts:6569676874\n".to_vec()
 }
 
+#[cfg(feature = "foundationdb")]
+fn inline_rows_for_ids(ids: std::ops::Range<u64>) -> Vec<u8> {
+    ids.map(|row_id| format!("row\t{row_id}\ti:{row_id}\ts:726f77\n"))
+        .collect::<String>()
+        .into_bytes()
+}
+
 fn create_tables_runtime_payload(table_id: TableId, name: &str) -> String {
     format!(
-        "table\t{}\t0\t{}-uuid\t{}\tmain/{}\t\n\
-         column\t{}\t1\tid\tINTEGER\tfalse\t\t\t\tNULL\tliteral\n\
-         column\t{}\t2\tnote\tVARCHAR\ttrue\t\ttext note\t\t'new'\tliteral\n",
+        "table\t{}\t0\t{}-uuid\t{}\tmain/{}\t\ncolumn\t{}\t1\tid\tINTEGER\tfalse\t\t\t\tNULL\tliteral\ncolumn\t{}\t2\tnote\tVARCHAR\ttrue\t\ttext note\t\t'new'\tliteral\n",
         table_id.0, name, name, name, table_id.0, table_id.0
     )
 }
@@ -1803,10 +2095,7 @@ fn data_mutation_runtime_payload(
     row_id_start: u64,
 ) -> String {
     format!(
-        "commit_attempt\t9001\n\
-         file\t{}\t{}\tmain/runtime/data-mutation-{}.parquet\t7\t2048\t{}\t\t512\n\
-         file_partition\t{}\t{}\t1\teu\n\
-         inline_file_delete\t{}\t{}\t{}\n",
+        "commit_attempt\t9001\nfile\t{}\t{}\tmain/runtime/data-mutation-{}.parquet\t7\t2048\t{}\t\t512\nfile_partition\t{}\t{}\t1\teu\ninline_file_delete\t{}\t{}\t{}\n",
         data_file_id.0,
         table_id.0,
         data_file_id.0,
@@ -1828,7 +2117,8 @@ fn create_view_runtime_payload(view_id: TableId, name: &str) -> String {
 
 fn create_macro_runtime_payload(macro_id: MacroId, name: &str) -> String {
     format!(
-        "macro\t{}\t0\t{}\nmacro_impl\t{}\t0\tduckdb\tSELECT 1\tscalar\nmacro_param\t{}\t0\t0\tx\tINTEGER\tNULL\tliteral\n",
+        "macro\t{}\t0\t{}\nmacro_impl\t{}\t0\tduckdb\tSELECT \
+         1\tscalar\nmacro_param\t{}\t0\t0\tx\tINTEGER\tNULL\tliteral\n",
         macro_id.0, name, macro_id.0, macro_id.0
     )
 }
@@ -1846,15 +2136,6 @@ fn run_schema_change_sequence(
             format!("table_id={}\n", table_id.0),
         )
         .contains("next_column_id=3")
-    );
-    assert!(
-        runtime_request_payload(
-            &format!("ffi-{name_prefix}-created-with-table"),
-            backend,
-            "IsColumnCreatedWithTable",
-            format!("table_name={name_prefix}_table\ncolumn_name=id\n"),
-        )
-        .contains("created_with_table=true")
     );
     assert!(
         runtime_request_payload(
@@ -1879,15 +2160,6 @@ fn run_schema_change_sequence(
             format!("table_id={}\n", table_id.0),
         )
         .contains("next_column_id=4")
-    );
-    assert!(
-        runtime_request_payload(
-            &format!("ffi-{name_prefix}-added-column-not-created-with-table"),
-            backend,
-            "IsColumnCreatedWithTable",
-            format!("table_name={name_prefix}_table\ncolumn_name=status\n"),
-        )
-        .contains("created_with_table=false")
     );
     assert!(
         runtime_request_payload(
@@ -1992,7 +2264,8 @@ fn run_schema_change_sequence(
         schema_change_payload(
             10,
             &format!(
-                "table_comment\t{}\tvalue\tcomment for {name_prefix}\ncolumn_comment\t{}\t1\tvalue\tid comment for {name_prefix}\n",
+                "table_comment\t{}\tvalue\tcomment for \
+                 {name_prefix}\ncolumn_comment\t{}\t1\tvalue\tid comment for {name_prefix}\n",
                 table_id.0, table_id.0
             ),
         ),
@@ -2065,12 +2338,48 @@ fn runtime_request_payload_for_catalog(
     operation: &str,
     payload: String,
 ) -> String {
+    runtime_request_payload_for_catalog_with_optional_context(
+        request_id, backend, catalog, operation, payload, None,
+    )
+}
+
+#[cfg(feature = "foundationdb")]
+fn runtime_request_payload_for_catalog_with_context(
+    request_id: &str,
+    backend: RuntimeCatalogBackend,
+    catalog: CatalogId,
+    operation: &str,
+    read_context_id: u64,
+    payload: String,
+) -> String {
+    runtime_request_payload_for_catalog_with_optional_context(
+        request_id,
+        backend,
+        catalog,
+        operation,
+        payload,
+        Some(read_context_id),
+    )
+}
+
+fn runtime_request_payload_for_catalog_with_optional_context(
+    request_id: &str,
+    backend: RuntimeCatalogBackend,
+    catalog: CatalogId,
+    operation: &str,
+    payload: String,
+    read_context_id: Option<u64>,
+) -> String {
     let request = RuntimeRequest::new(request_id, backend, operation, payload.into_bytes())
         .unwrap()
         .with_catalog_id(catalog)
-        .unwrap()
-        .encode()
         .unwrap();
+    let request = match read_context_id {
+        Some(read_context_id) => request.with_read_context_id(read_context_id).unwrap(),
+        None => request,
+    }
+    .encode()
+    .unwrap();
     let mut out = DuckLakeRuntimeBuffer {
         ptr: std::ptr::null_mut(),
         len: 0,
@@ -2132,4 +2441,28 @@ fn unique_fdb_prefix(test_name: &str) -> String {
             .unwrap()
             .as_nanos()
     )
+}
+
+#[cfg(feature = "foundationdb")]
+struct FoundationDbPrefixCleanup {
+    prefix: String,
+}
+
+#[cfg(feature = "foundationdb")]
+impl FoundationDbPrefixCleanup {
+    fn new(prefix: &str) -> Self {
+        Self {
+            prefix: prefix.to_owned(),
+        }
+    }
+}
+
+#[cfg(feature = "foundationdb")]
+impl Drop for FoundationDbPrefixCleanup {
+    fn drop(&mut self) {
+        remove_env("AUX_DUCKLAKE_FDB_PREFIX");
+        if let Ok(database) = crate::fdb_runtime::shared_foundationdb_database(None) {
+            let _ = crate::clear_foundationdb_prefix(&database, self.prefix.as_bytes());
+        }
+    }
 }

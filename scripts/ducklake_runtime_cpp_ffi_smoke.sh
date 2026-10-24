@@ -26,8 +26,8 @@ assert_not_contains() {
 
 catalog_backend() {
     case "${1:-fdb}" in
-        fdb | foundationdb) printf 'foundationdb' ;;
-        *) fail "usage: $0 [fdb]" ;;
+    fdb | foundationdb) printf 'foundationdb' ;;
+    *) fail "usage: $0 [fdb]" ;;
     esac
 }
 
@@ -59,6 +59,8 @@ echo "e2e_step=build_modified_ducklake"
 if ! ducklake_reuse_debug_build_enabled; then
     AUX_DUCKLAKE_SKIP_FETCH=1 "$ROOT_DIR/scripts/build_ducklake_debug.sh"
 fi
+ducklake_validate_debug_artifacts "$ROOT_DIR" "$DUCKLAKE_DIR" ||
+    fail "debug DuckLake artifacts are stale or do not match the canonical source tree"
 [[ -x "$DUCKDB_BIN" ]] || fail "modified duckdb executable was not built"
 [[ -f "$DUCKLAKE_EXTENSION" ]] || fail "modified ducklake extension was not built"
 
@@ -78,13 +80,17 @@ else
     unset AUX_DUCKLAKE_BENCHMARK_RUNTIME_METRICS_PATH || true
 fi
 export AUX_DUCKLAKE_CATALOG_BACKEND="$backend"
-export AUX_DUCKLAKE_FDB_PREFIX="aux-ducklake/runtime-smoke/$catalog_run_id/main/"
-export AUX_DUCKLAKE_RUNTIME_CATALOG_IDENTITY="$AUX_DUCKLAKE_FDB_PREFIX"
+main_fdb_prefix="aux-ducklake/runtime-smoke/$catalog_run_id/main/"
+# This identity hashes to 10500608038259307444, above signed 64-bit range.
+main_catalog_identity="aux-ducklake/runtime-u64-high-bit-fixture"
+export AUX_DUCKLAKE_FDB_PREFIX="$main_fdb_prefix"
+export AUX_DUCKLAKE_RUNTIME_CATALOG_IDENTITY="$main_catalog_identity"
 mkdir -p "$tmp_dir/data"
-printf 'orphan\n' > "$tmp_dir/data/runtime-orphan.parquet"
+printf 'orphan\n' >"$tmp_dir/data/runtime-orphan.parquet"
 
 set +e
-output="$("$DUCKDB_BIN" -batch 2>&1 <<SQL
+output="$(
+    "$DUCKDB_BIN" -batch 2>&1 <<SQL
 LOAD '$DUCKLAKE_EXTENSION';
 ATTACH 'ducklake:$tmp_dir/metadata.duckdb' AS dl (
     DATA_PATH '$tmp_dir/data',
@@ -185,8 +191,53 @@ assert_contains "$output" "cdf_delete=1,10,1"
 assert_contains "$output" "old_cleanup_dry_run=0"
 assert_contains "$output" "orphan_cleanup_dry_run=1"
 
+export AUX_DUCKLAKE_FDB_PREFIX="aux-ducklake/runtime-smoke/$catalog_run_id/cleanup-union/"
+export AUX_DUCKLAKE_RUNTIME_CATALOG_IDENTITY="$AUX_DUCKLAKE_FDB_PREFIX"
+
 set +e
-reattach_output="$("$DUCKDB_BIN" -batch 2>&1 <<SQL
+cleanup_union_output="$(
+    "$DUCKDB_BIN" -batch 2>&1 <<SQL
+LOAD '$DUCKLAKE_EXTENSION';
+ATTACH 'ducklake:$tmp_dir/cleanup-union-metadata.duckdb' AS dl (
+    DATA_PATH '$tmp_dir/cleanup-union-data',
+    META_TYPE 'aux_catalog',
+    DATA_INLINING_ROW_LIMIT 0
+);
+CREATE TABLE dl.main.cleanup_union_probe(id INTEGER);
+INSERT INTO dl.main.cleanup_union_probe VALUES (1), (2), (3);
+CALL ducklake_flush_inlined_data('dl');
+DROP TABLE dl.main.cleanup_union_probe;
+CALL ducklake_expire_snapshots('dl', older_than => now());
+SELECT 'cleanup_union_candidates=' || count(*)
+FROM (
+    SELECT * FROM ducklake_cleanup_old_files('dl', cleanup_all => true)
+    UNION ALL
+    SELECT * FROM ducklake_cleanup_old_files(
+        'dl', older_than => TIMESTAMP '1970-01-01', dry_run => true
+    )
+) candidates;
+SELECT 'cleanup_union_remaining=' || count(*)
+FROM ducklake_cleanup_old_files('dl', cleanup_all => true, dry_run => true);
+SELECT 'cleanup_union_files=' || count(*)
+FROM glob('$tmp_dir/cleanup-union-data/**/*.parquet');
+SQL
+)"
+cleanup_union_status=$?
+set -e
+
+printf '%s\n' "$cleanup_union_output"
+
+[[ "$cleanup_union_status" -eq 0 ]] || fail "expected aux_catalog cleanup to survive multiple binds"
+assert_contains "$cleanup_union_output" "cleanup_union_candidates=1"
+assert_contains "$cleanup_union_output" "cleanup_union_remaining=0"
+assert_contains "$cleanup_union_output" "cleanup_union_files=0"
+
+export AUX_DUCKLAKE_FDB_PREFIX="$main_fdb_prefix"
+export AUX_DUCKLAKE_RUNTIME_CATALOG_IDENTITY="$main_catalog_identity"
+
+set +e
+reattach_output="$(
+    "$DUCKDB_BIN" -batch 2>&1 <<SQL
 LOAD '$DUCKLAKE_EXTENSION';
 ATTACH 'ducklake:$tmp_dir/metadata.duckdb' AS dl (
     DATA_PATH '$tmp_dir/data',
@@ -221,13 +272,18 @@ export AUX_DUCKLAKE_FDB_PREFIX="aux-ducklake/runtime-smoke/$catalog_run_id/inlin
 export AUX_DUCKLAKE_RUNTIME_CATALOG_IDENTITY="$AUX_DUCKLAKE_FDB_PREFIX"
 
 set +e
-inline_output="$("$DUCKDB_BIN" -batch 2>&1 <<SQL
+inline_output="$(
+    "$DUCKDB_BIN" -batch 2>&1 <<SQL
 LOAD '$DUCKLAKE_EXTENSION';
 ATTACH 'ducklake:$tmp_dir/inline-metadata.duckdb' AS dl (
     DATA_PATH '$tmp_dir/inline-data',
     META_TYPE 'aux_catalog',
     DATA_INLINING_ROW_LIMIT 100
 );
+CREATE TABLE dl.main.runtime_blob_probe(value BLOB);
+INSERT INTO dl.main.runtime_blob_probe VALUES (unhex('00015C7FFF'));
+SELECT 'runtime_blob_probe=' || hex(value) FROM dl.main.runtime_blob_probe;
+
 CREATE TABLE dl.main.runtime_inline(id INTEGER, note VARCHAR);
 CREATE TABLE dl.main.runtime_boundary_inline(id INTEGER, note VARCHAR);
 CREATE TABLE dl.main.runtime_oversized_inline(id INTEGER, note VARCHAR);
@@ -331,6 +387,7 @@ set -e
 printf '%s\n' "$inline_output"
 
 [[ "$inline_status" -eq 0 ]] || fail "expected aux_catalog inline runtime smoke to succeed"
+assert_contains "$inline_output" "runtime_blob_probe=00015C7FFF"
 assert_contains "$inline_output" "inline_current=2,203,2"
 assert_contains "$inline_output" "inline_cdf_insert=2,203,2,2"
 assert_contains "$inline_output" "inline_after_delete=1,102,1,0"
@@ -347,7 +404,8 @@ assert_contains "$inline_output" "aggregate_inline_current=100,4950,40000"
 assert_contains "$inline_output" "aggregate_inline_file_delta=1"
 
 set +e
-inline_reattach_output="$("$DUCKDB_BIN" -batch 2>&1 <<SQL
+inline_reattach_output="$(
+    "$DUCKDB_BIN" -batch 2>&1 <<SQL
 LOAD '$DUCKLAKE_EXTENSION';
 ATTACH 'ducklake:$tmp_dir/inline-metadata.duckdb' AS dl (
     DATA_PATH '$tmp_dir/inline-data',

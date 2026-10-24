@@ -70,12 +70,11 @@ SQL
 }
 
 case "${AUX_DUCKLAKE_BENCHMARK_BACKEND:-both}" in
-    both)
-        reset_foundationdb
-        reset_postgres
-        ;;
-    fdb) reset_foundationdb ;;
-    postgres) reset_postgres ;;
-    *) fail "AUX_DUCKLAKE_BENCHMARK_BACKEND must be both, fdb, or postgres" ;;
+both)
+    reset_foundationdb
+    reset_postgres
+    ;;
+fdb) reset_foundationdb ;;
+postgres) reset_postgres ;;
+*) fail "AUX_DUCKLAKE_BENCHMARK_BACKEND must be both, fdb, or postgres" ;;
 esac
-

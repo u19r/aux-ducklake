@@ -47,7 +47,6 @@ use crate::{
     },
     runtime_snapshots::ListSnapshotsPayload,
 };
-
 #[cfg(feature = "foundationdb")]
 use crate::{
     DataFileId, DataFileRow, DeleteFileRow, DuckLakeSnapshotId, FdbOrderedCatalogKv,
@@ -493,6 +492,16 @@ pub(crate) fn runtime_foundationdb_commit_data_mutation(
     mut mutation: RuntimeDataMutation,
 ) -> CatalogResult<(crate::DataMutationCommit, Vec<crate::TableId>)> {
     let kv = open_foundationdb_catalog()?;
+    if let Some(commit) = crate::fdb_data_mutations::recover_committed_mutation(
+        &kv,
+        catalog,
+        mutation.recovery_attempt_id,
+    )? {
+        return Ok((
+            commit,
+            crate::runtime_data_mutation_ops::affected_table_ids(&mutation)?,
+        ));
+    }
     crate::runtime_data_mutation_ops::resolve_data_file_visibility(&kv, catalog, &mut mutation)?;
     crate::runtime_data_mutation_ops::complete_inline_flushes_from_materialized_files(
         &kv,
@@ -535,6 +544,16 @@ pub(crate) fn runtime_foundationdb_commit_data_and_inline_mutation(
 ) -> CatalogResult<(crate::DataMutationCommit, Vec<crate::TableId>)> {
     let started = DataMutationMetricStage::start();
     let kv = open_foundationdb_catalog()?;
+    if let Some(commit) = crate::fdb_data_mutations::recover_committed_mutation(
+        &kv,
+        catalog,
+        mutation.recovery_attempt_id,
+    )? {
+        return Ok((
+            commit,
+            crate::runtime_data_mutation_ops::affected_table_ids(&mutation)?,
+        ));
+    }
     record_data_mutation_stage("Open", started);
     let started = DataMutationMetricStage::start();
     crate::runtime_data_mutation_ops::resolve_data_file_visibility(&kv, catalog, &mut mutation)?;
@@ -613,7 +632,10 @@ fn reject_stale_data_mutation(
         None
     };
     let Some(read_snapshot) = read_snapshot else {
-        return Ok(crate::fdb_data_mutations::FdbMutationReadContext::default());
+        return Ok(crate::fdb_data_mutations::FdbMutationReadContext {
+            snapshot_fence: mutation.snapshot_fence,
+            ..Default::default()
+        });
     };
     record_data_mutation_stage("RejectStaleResolveSnapshot", started);
     let started = DataMutationMetricStage::start();
@@ -651,6 +673,7 @@ fn reject_stale_data_mutation(
     )?;
     record_data_mutation_stage("RejectStaleDeletes", started);
     Ok(crate::fdb_data_mutations::FdbMutationReadContext {
+        snapshot_fence: mutation.snapshot_fence,
         order: Some(read_snapshot.order),
         data_files: preloaded_data_files,
         append_partitions,
@@ -757,7 +780,8 @@ fn reject_target_tables_changed_after_read(
             || read_table.partition != current_table.partition
         {
             return Err(crate::CatalogError::InvalidMutation(format!(
-                "conflict committing data mutation: another transaction has altered it; table {} changed after read snapshot",
+                "conflict committing data mutation: another transaction has altered it; table {} \
+                 changed after read snapshot",
                 table_id.0
             )));
         }

@@ -14,10 +14,10 @@ release_dir="$DUCKLAKE_DIR/build/release"
 
 default_platform() {
     case "$(uname -s)-$(uname -m)" in
-        Darwin-arm64) printf 'macos-arm64' ;;
-        Linux-x86_64) printf 'linux-amd64' ;;
-        Linux-aarch64 | Linux-arm64) printf 'linux-arm64' ;;
-        *) return 1 ;;
+    Darwin-arm64) printf 'macos-arm64' ;;
+    Linux-x86_64) printf 'linux-amd64' ;;
+    Linux-aarch64 | Linux-arm64) printf 'linux-arm64' ;;
+    *) return 1 ;;
     esac
 }
 
@@ -51,6 +51,7 @@ rm -rf "$bundle_root"
 mkdir -p "$duckdb_dir" "$runtime_dir"
 cp "$release_dir/duckdb" "$duckdb_dir/duckdb"
 cp "$DUCKLAKE_DIR/duckdb/src/include/duckdb.h" "$duckdb_dir/duckdb.h"
+cp "$DUCKLAKE_DIR/duckdb/src/include/duckdb_v2.h" "$duckdb_dir/duckdb_v2.h"
 cp "$runtime_library" "$runtime_dir/"
 
 for library in "$release_dir"/src/libduckdb.so* "$release_dir"/src/libduckdb*.dylib; do
@@ -58,6 +59,15 @@ for library in "$release_dir"/src/libduckdb.so* "$release_dir"/src/libduckdb*.dy
         cp -a "$library" "$duckdb_dir/"
     fi
 done
+
+if [[ -n "${AUX_DUCKLAKE_CURL_ROOT:-}" ]]; then
+    curl_libraries=("$AUX_DUCKLAKE_CURL_ROOT"/lib/libcurl.so*)
+    [[ -f "${curl_libraries[0]}" ]] || {
+        echo "missing release curl shared library" >&2
+        exit 1
+    }
+    cp -a "${curl_libraries[@]}" "$duckdb_dir/"
+fi
 
 while IFS= read -r library; do
     [[ -n "$library" ]] || continue

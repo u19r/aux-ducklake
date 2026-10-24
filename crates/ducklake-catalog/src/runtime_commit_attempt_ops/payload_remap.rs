@@ -6,11 +6,10 @@ use std::{
 use crate::{
     CatalogError, CatalogResult, RawSnapshotSequence, SnapshotCommitMetadata, TableColumnRow,
     TableId, TableRow,
+    runtime_commit_attempt_ops::*,
     runtime_snapshot_range::ProposedCommitSnapshot,
     runtime_tabular_payload::{TabularPayload, parse_u64_field},
 };
-
-use crate::runtime_commit_attempt_ops::*;
 pub(super) struct TableIntentTable {
     pub(super) previous: TableRow,
     pub(super) next: TableRow,
@@ -30,6 +29,13 @@ pub(super) fn payload_with_commit_header(
         commit_snapshot_u64(intent.proposed_commit_snapshot)?
     )
     .map_err(|error| CatalogError::Backend(format!("failed to render commit header: {error}")))?;
+    if operation == "CommitDataMutation"
+        && let Some(fence) = intent.snapshot_fence
+    {
+        writeln!(&mut out, "snapshot_fence\t{fence}").map_err(|error| {
+            CatalogError::Backend(format!("failed to render snapshot fence: {error}"))
+        })?;
+    }
     if operation == "CommitDataMutation"
         && let Some(recovery_attempt_id) = intent.recovery_attempt_id
     {

@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+#[cfg(not(test))]
+use crate::latest_snapshot;
 use crate::{
     CatalogId, CatalogResult, DataFileId, DataFileRow, DeleteFileId, DeleteFileRow,
     FileColumnStatsRow, FilePartitionValueRow, OrderedCatalogKv, RangeDirection,
@@ -9,13 +11,9 @@ use crate::{
         ScheduledDataFileCleanupRow, ScheduledDeleteFileCleanupRow,
         load_scheduled_data_file_cleanup_rows, load_scheduled_delete_file_cleanup_rows,
     },
+    runtime_metadata_ops::*,
     runtime_protocol::RuntimeCatalogBackend,
 };
-
-#[cfg(not(test))]
-use crate::latest_snapshot;
-
-use crate::runtime_metadata_ops::*;
 
 pub(crate) fn list_delete_file_rows(
     backend: RuntimeCatalogBackend,
@@ -227,7 +225,9 @@ pub(super) fn append_delete_file_mirror_inserts(
             row.validity.end_order,
         ));
         out.push_str(&format!(
-            "INSERT INTO {{METADATA_CATALOG}}.ducklake_delete_file VALUES ({}, (SELECT table_id FROM {{METADATA_CATALOG}}.ducklake_data_file WHERE data_file_id = {}), {}, {}, {}, {}, false, 'parquet', {}, {}, 0, {}, NULL, NULL);\n",
+            "INSERT INTO {{METADATA_CATALOG}}.ducklake_delete_file VALUES ({}, (SELECT table_id \
+             FROM {{METADATA_CATALOG}}.ducklake_data_file WHERE data_file_id = {}), {}, {}, {}, \
+             {}, false, 'parquet', {}, {}, 0, {}, NULL, NULL);\n",
             row.delete_file_id.0,
             row.data_file_id.0,
             begin_snapshot,
@@ -247,30 +247,41 @@ pub(super) fn bounded_append_mirror_sql(
     partition_rows: Vec<FilePartitionValueRow>,
     data_files: &[DataFileRow],
     file_stats: &[FileColumnStatsRow],
+    table_column_stats: &[TableColumnStatsMirrorRow],
     snapshots: &[crate::SnapshotRow],
 ) -> String {
     let ids = data_file_ids_sql(data_file_ids);
     let table_ids = table_ids_sql(affected_table_ids);
     let mut out = format!(
-        "DELETE FROM {{METADATA_CATALOG}}.ducklake_file_partition_value WHERE data_file_id IN ({ids});\n\
-DELETE FROM {{METADATA_CATALOG}}.ducklake_data_file WHERE data_file_id IN ({ids});\n\
-DELETE FROM {{METADATA_CATALOG}}.ducklake_file_column_stats WHERE data_file_id IN ({ids});\n"
+        "DELETE FROM {{METADATA_CATALOG}}.ducklake_file_partition_value WHERE data_file_id IN \
+         ({ids});\nDELETE FROM {{METADATA_CATALOG}}.ducklake_data_file WHERE data_file_id IN \
+         ({ids});\nDELETE FROM {{METADATA_CATALOG}}.ducklake_file_column_stats WHERE data_file_id \
+         IN ({ids});\n"
     );
     append_file_partition_values_mirror_inserts(&mut out, partition_rows);
     append_data_file_mirror_inserts(&mut out, data_files, snapshots);
     append_file_column_stats_mirror_inserts(&mut out, file_stats.to_vec());
     out.push_str(&format!(
-        "DELETE FROM {{METADATA_CATALOG}}.ducklake_table_column_stats \
-WHERE table_id IN ({table_ids});\n\
-INSERT INTO {{METADATA_CATALOG}}.ducklake_table_column_stats
-SELECT stats.table_id, stats.column_id, max(stats.null_count > 0), NULL, \
-min(stats.min_value), max(stats.max_value), NULL
-FROM {{METADATA_CATALOG}}.ducklake_file_column_stats stats
-JOIN {{METADATA_CATALOG}}.ducklake_data_file data USING (data_file_id)
-WHERE data.end_snapshot IS NULL AND stats.table_id IN ({table_ids})
-GROUP BY stats.table_id, stats.column_id;\n"
+        "DELETE FROM {{METADATA_CATALOG}}.ducklake_table_column_stats WHERE table_id IN \
+         ({table_ids});\n"
     ));
+    append_table_column_stats_mirror_inserts(&mut out, table_column_stats);
     out
+}
+
+fn append_table_column_stats_mirror_inserts(out: &mut String, rows: &[TableColumnStatsMirrorRow]) {
+    for row in rows {
+        out.push_str(&format!(
+            "INSERT INTO {{METADATA_CATALOG}}.ducklake_table_column_stats (table_id, column_id, \
+             contains_null, contains_nan, min_value, max_value, extra_stats) VALUES ({}, {}, {}, \
+             NULL, {}, {}, NULL);\n",
+            row.table_id.0,
+            row.column_id.0,
+            row.contains_null,
+            optional_sql_string(row.min_value.as_deref()),
+            optional_sql_string(row.max_value.as_deref())
+        ));
+    }
 }
 
 pub(super) fn bounded_delete_file_mirror_sql(
@@ -283,8 +294,8 @@ pub(super) fn bounded_delete_file_mirror_sql(
     let delete_ids = delete_file_ids_sql(delete_file_ids);
     let data_ids = data_file_ids_sql(data_file_ids);
     let mut out = format!(
-        "DELETE FROM {{METADATA_CATALOG}}.ducklake_delete_file \
-WHERE delete_file_id IN ({delete_ids}) OR data_file_id IN ({data_ids});\n"
+        "DELETE FROM {{METADATA_CATALOG}}.ducklake_delete_file WHERE delete_file_id IN \
+         ({delete_ids}) OR data_file_id IN ({data_ids});\n"
     );
     append_delete_file_mirror_inserts(&mut out, rows, semantic_begin_orders, snapshots);
     out
@@ -309,7 +320,8 @@ pub(super) fn scheduled_cleanup_delta_sql(
         String::new()
     } else {
         format!(
-            "DELETE FROM {{METADATA_CATALOG}}.ducklake_files_scheduled_for_deletion WHERE data_file_id IN ({ids});\n"
+            "DELETE FROM {{METADATA_CATALOG}}.ducklake_files_scheduled_for_deletion WHERE \
+             data_file_id IN ({ids});\n"
         )
     };
     append_scheduled_cleanup_inserts(&mut out, data_files, delete_files);
@@ -323,7 +335,8 @@ fn append_scheduled_cleanup_inserts(
 ) {
     for row in data_files {
         out.push_str(&format!(
-            "INSERT INTO {{METADATA_CATALOG}}.ducklake_files_scheduled_for_deletion VALUES ({}, {}, false, make_timestamptz({}));\n",
+            "INSERT INTO {{METADATA_CATALOG}}.ducklake_files_scheduled_for_deletion VALUES ({}, \
+             {}, false, make_timestamptz({}));\n",
             row.data_file.data_file_id.0,
             sql_string(&row.data_file.path),
             row.schedule_start_micros
@@ -331,7 +344,8 @@ fn append_scheduled_cleanup_inserts(
     }
     for row in delete_files {
         out.push_str(&format!(
-            "INSERT INTO {{METADATA_CATALOG}}.ducklake_files_scheduled_for_deletion VALUES ({}, {}, false, make_timestamptz({}));\n",
+            "INSERT INTO {{METADATA_CATALOG}}.ducklake_files_scheduled_for_deletion VALUES ({}, \
+             {}, false, make_timestamptz({}));\n",
             row.delete_file.delete_file_id.0,
             sql_string(&row.delete_file.path),
             row.schedule_start_micros

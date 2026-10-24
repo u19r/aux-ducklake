@@ -5,6 +5,9 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(debug_assertions)]
+use std::sync::{Barrier, Mutex, OnceLock};
+
 use foundationdb::{
     Database,
     options::{MutationType, TransactionOption},
@@ -14,6 +17,7 @@ use futures::executor::block_on;
 use crate::{
     CatalogCacheNamespace, CatalogError, CatalogResult, DataFileChangeKind, DataFileRow,
     MetadataSettingRow, SnapshotRow, ValidityWindow,
+    conflict_watermarks::stage_fdb_conflict_watermarks_initialized,
     fdb_data_mutation_staging::stage_data_file,
     fdb_runtime::{map_fdb_commit_error, map_fdb_error, shared_foundationdb_database},
     fdb_versionstamp::{
@@ -24,19 +28,20 @@ use crate::{
         table_data_file_change_key_order_offset, versionstamped_value,
     },
     keys::{
-        current_data_file_key, data_file_begin_key, data_file_end_key, data_file_key,
-        snapshot_data_file_change_key, snapshot_key, snapshot_timestamp_key,
-        table_data_file_change_key,
+        conflict_watermarks_initialized_key, current_data_file_key, data_file_begin_key,
+        data_file_end_key, data_file_key, snapshot_data_file_change_key, snapshot_key,
+        snapshot_timestamp_key, table_data_file_change_key,
     },
     kv::OrderedCatalogKv,
     metadata_settings::metadata_setting_key,
-    store::{latest_snapshot, stage_fdb_snapshot_indexes},
+    store::{latest_snapshot, latest_snapshot_uncached, stage_fdb_snapshot_indexes},
 };
 
 #[derive(Clone)]
 pub struct FdbOrderedCatalogKv {
     db: Arc<Database>,
     key_prefix: Vec<u8>,
+    read_version: Option<i64>,
 }
 
 impl FdbOrderedCatalogKv {
@@ -67,7 +72,21 @@ impl FdbOrderedCatalogKv {
         Self {
             db,
             key_prefix: key_prefix.into(),
+            read_version: None,
         }
+    }
+
+    pub(crate) fn with_read_version(&self) -> CatalogResult<Self> {
+        if self.read_version.is_some() {
+            return Ok(self.clone());
+        }
+        let transaction = self.create_transaction()?;
+        let read_version = block_on(transaction.get_read_version()).map_err(map_fdb_error)?;
+        Ok(Self {
+            db: Arc::clone(&self.db),
+            key_prefix: self.key_prefix.clone(),
+            read_version: Some(read_version),
+        })
     }
 
     #[must_use]
@@ -97,24 +116,55 @@ impl FdbOrderedCatalogKv {
         let trx = self.db.create_trx().map_err(map_fdb_error)?;
         trx.set_option(TransactionOption::Timeout(5_000))
             .map_err(map_fdb_error)?;
+        self.apply_read_version(&trx);
         Ok(trx)
+    }
+
+    pub(crate) fn reset_read_transaction_after_error(
+        &self,
+        transaction: foundationdb::Transaction,
+        error: foundationdb::FdbError,
+    ) -> CatalogResult<foundationdb::Transaction> {
+        let transaction = block_on(transaction.on_error(error)).map_err(map_fdb_error)?;
+        self.apply_read_version(&transaction);
+        Ok(transaction)
+    }
+
+    fn apply_read_version(&self, transaction: &foundationdb::Transaction) {
+        if let Some(read_version) = self.read_version {
+            transaction.set_read_version(read_version);
+        }
     }
 
     pub fn initialize_empty_catalog_versionstamped(
         &self,
         catalog: crate::CatalogId,
     ) -> CatalogResult<SnapshotRow> {
-        self.initialize_empty_catalog_with_metadata_versionstamped(catalog, &[])
+        match self.initialize_empty_catalog_with_metadata_versionstamped(catalog, &[])? {
+            SyncInitializeAttempt::Created(row) => Ok(row),
+            SyncInitializeAttempt::AlreadyInitialized => {
+                self.latest_snapshot_for_initialization(catalog)
+            }
+        }
     }
 
     fn initialize_empty_catalog_with_metadata_versionstamped(
         &self,
         catalog: crate::CatalogId,
         metadata: &[MetadataSettingRow],
-    ) -> CatalogResult<SnapshotRow> {
+    ) -> CatalogResult<SyncInitializeAttempt> {
         let placeholder = incomplete_order();
         let row = SnapshotRow::initial(placeholder);
         let trx = self.create_transaction()?;
+        if block_on(trx.get(
+            &self.namespaced_key(&conflict_watermarks_initialized_key(catalog)),
+            false,
+        ))
+        .map_err(map_fdb_error)?
+        .is_some()
+        {
+            return Ok(SyncInitializeAttempt::AlreadyInitialized);
+        }
         trx.atomic_op(
             &self.versionstamped_key(
                 &snapshot_key(catalog, placeholder),
@@ -132,6 +182,7 @@ impl FdbOrderedCatalogKv {
             MutationType::SetVersionstampedKey,
         );
         stage_fdb_snapshot_indexes(self, &trx, catalog, &row)?;
+        stage_fdb_conflict_watermarks_initialized(self, &trx, catalog);
         for setting in metadata {
             trx.set(
                 &self.namespaced_key(&metadata_setting_key(catalog, setting.scope, &setting.key)),
@@ -139,12 +190,12 @@ impl FdbOrderedCatalogKv {
             );
         }
         let versionstamp = trx.get_versionstamp();
+        wait_for_sync_initialize_commit_barrier(catalog);
         block_on(trx.commit()).map_err(map_fdb_commit_error)?;
+        inject_sync_initialize_commit_unknown(catalog)?;
         let order = committed_order(block_on(versionstamp).map_err(map_fdb_error)?.deref())?;
-        Ok(SnapshotRow::with_created_at_micros(
-            order,
-            row.sequence,
-            row.created_at_micros,
+        Ok(SyncInitializeAttempt::Created(
+            SnapshotRow::with_created_at_micros(order, row.sequence, row.created_at_micros),
         ))
     }
 
@@ -152,10 +203,7 @@ impl FdbOrderedCatalogKv {
         &self,
         catalog: crate::CatalogId,
     ) -> CatalogResult<SnapshotRow> {
-        match latest_snapshot(self, catalog)? {
-            Some(row) => Ok(row),
-            None => self.initialize_empty_catalog_versionstamped(catalog),
-        }
+        self.initialize_catalog_if_absent_with_metadata_versionstamped(catalog, &[])
     }
 
     pub(crate) fn initialize_catalog_with_metadata_if_absent_versionstamped(
@@ -163,10 +211,80 @@ impl FdbOrderedCatalogKv {
         catalog: crate::CatalogId,
         metadata: &[MetadataSettingRow],
     ) -> CatalogResult<SnapshotRow> {
-        match latest_snapshot(self, catalog)? {
-            Some(row) => Ok(row),
-            None => self.initialize_empty_catalog_with_metadata_versionstamped(catalog, metadata),
+        self.initialize_catalog_if_absent_with_metadata_versionstamped(catalog, metadata)
+    }
+
+    fn initialize_catalog_if_absent_with_metadata_versionstamped(
+        &self,
+        catalog: crate::CatalogId,
+        metadata: &[MetadataSettingRow],
+    ) -> CatalogResult<SnapshotRow> {
+        let mut last_retry_error = None;
+        for _ in 0..=crate::fdb_async::MAX_FDB_READ_RETRIES {
+            match self.try_initialize_catalog(catalog, metadata)? {
+                SyncInitializeOutcome::Complete(row) => return Ok(row),
+                SyncInitializeOutcome::Retry(error) => last_retry_error = Some(error),
+            }
         }
+        Err(last_retry_error.unwrap_or_else(|| {
+            CatalogError::InvalidMutation(
+                "foundationdb sync catalog initialization retry loop did not run".to_owned(),
+            )
+        }))
+    }
+
+    fn try_initialize_catalog(
+        &self,
+        catalog: crate::CatalogId,
+        metadata: &[MetadataSettingRow],
+    ) -> CatalogResult<SyncInitializeOutcome> {
+        match latest_snapshot_uncached(self, catalog).row {
+            Ok(Some(row)) => return Ok(SyncInitializeOutcome::Complete(row)),
+            Ok(None) => {}
+            Err(error) if crate::fdb_async::is_retryable_async_catalog_error(&error) => {
+                return Ok(SyncInitializeOutcome::Retry(error));
+            }
+            Err(error) => return Err(error),
+        }
+        let attempt =
+            match self.initialize_empty_catalog_with_metadata_versionstamped(catalog, metadata) {
+                Ok(attempt) => attempt,
+                Err(error) if crate::fdb_async::is_retryable_async_catalog_error(&error) => {
+                    return Ok(SyncInitializeOutcome::Retry(error));
+                }
+                Err(error) => return Err(error),
+            };
+        match attempt {
+            SyncInitializeAttempt::Created(row) => Ok(SyncInitializeOutcome::Complete(row)),
+            SyncInitializeAttempt::AlreadyInitialized => self.load_initialized_catalog(catalog),
+        }
+    }
+
+    fn load_initialized_catalog(
+        &self,
+        catalog: crate::CatalogId,
+    ) -> CatalogResult<SyncInitializeOutcome> {
+        match latest_snapshot_uncached(self, catalog).row {
+            Ok(Some(row)) => Ok(SyncInitializeOutcome::Complete(row)),
+            Ok(None) => Err(CatalogError::InvalidMutation(
+                "foundationdb initialization marker exists without a snapshot".to_owned(),
+            )),
+            Err(error) if crate::fdb_async::is_retryable_async_catalog_error(&error) => {
+                Ok(SyncInitializeOutcome::Retry(error))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn latest_snapshot_for_initialization(
+        &self,
+        catalog: crate::CatalogId,
+    ) -> CatalogResult<SnapshotRow> {
+        latest_snapshot_uncached(self, catalog).row?.ok_or_else(|| {
+            CatalogError::InvalidMutation(
+                "foundationdb initialization marker exists without a snapshot".to_owned(),
+            )
+        })
     }
 
     pub fn append_data_files_versionstamped(
@@ -322,3 +440,63 @@ impl FdbOrderedCatalogKv {
         Ok(key)
     }
 }
+
+enum SyncInitializeAttempt {
+    Created(SnapshotRow),
+    AlreadyInitialized,
+}
+
+enum SyncInitializeOutcome {
+    Complete(SnapshotRow),
+    Retry(CatalogError),
+}
+
+#[cfg(debug_assertions)]
+fn inject_sync_initialize_commit_unknown(catalog: crate::CatalogId) -> CatalogResult<()> {
+    let Ok(request) = std::env::var("AUX_DUCKLAKE_TEST_FDB_SYNC_INITIALIZE_UNKNOWN_ONCE") else {
+        return Ok(());
+    };
+    let Some(requested_catalog) = request
+        .strip_prefix("after:")
+        .and_then(|value| value.parse::<u64>().ok())
+    else {
+        return Ok(());
+    };
+    if requested_catalog != catalog.0 {
+        return Ok(());
+    }
+    let Ok(mut last_request) = LAST_SYNC_INITIALIZE_UNKNOWN_INJECTION.lock() else {
+        return Ok(());
+    };
+    if last_request.as_ref() == Some(&request) {
+        return Ok(());
+    }
+    *last_request = Some(request);
+    Err(map_fdb_error(foundationdb::FdbError::from_code(1021)))
+}
+
+#[cfg(not(debug_assertions))]
+const fn inject_sync_initialize_commit_unknown(_catalog: crate::CatalogId) -> CatalogResult<()> {
+    Ok(())
+}
+
+#[cfg(debug_assertions)]
+fn wait_for_sync_initialize_commit_barrier(catalog: crate::CatalogId) {
+    let barrier_catalog = std::env::var("AUX_DUCKLAKE_TEST_FDB_SYNC_INITIALIZE_BARRIER")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok());
+    if barrier_catalog == Some(catalog.0) {
+        SYNC_INITIALIZE_COMMIT_BARRIER
+            .get_or_init(|| Barrier::new(2))
+            .wait();
+    }
+}
+
+#[cfg(not(debug_assertions))]
+const fn wait_for_sync_initialize_commit_barrier(_catalog: crate::CatalogId) {}
+
+#[cfg(debug_assertions)]
+static LAST_SYNC_INITIALIZE_UNKNOWN_INJECTION: Mutex<Option<String>> = Mutex::new(None);
+
+#[cfg(debug_assertions)]
+static SYNC_INITIALIZE_COMMIT_BARRIER: OnceLock<Barrier> = OnceLock::new();

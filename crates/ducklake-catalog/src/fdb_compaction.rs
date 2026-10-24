@@ -1,12 +1,19 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+#[cfg(test)]
+use crate::fdb_cleanup::scan_range_all_with_kv_budget;
+use crate::typed_scalar::{
+    CatalogScalarType, compare_typed_scalars, normalize_catalog_scalar_type,
+    typed_extrema_are_invalid,
+};
 use crate::{
     CatalogError, CatalogId, CatalogOrderId, CatalogOrderKind, CatalogResult, ColumnId,
     DataCommitIntent, DataFileChange, DataFileChangeKind, DataFileId, DataFileRow, DeleteFileId,
     DeleteFileRow, FdbOrderedCatalogKv, FileColumnStatsRow, InlineFileDeletionRow,
-    MergeAdjacentCompaction, RewriteDeleteCompaction, TableId,
+    MergeAdjacentCompaction, RangeItem, RewriteDeleteCompaction, TableId,
     compaction_store::{merge_adjacent_file_column_stats, rewrite_delete_file_column_stats},
     conflict::reject_conflicts_since_base,
+    fdb_cleanup::{SyncFdbScanBudget, SyncFdbScanRequest, scan_range_all_with_budget},
     fdb_data_mutations::FdbExpiredDeleteFile,
     file_partitions::list_file_partition_values_for_data_files,
     file_stats::list_file_column_stats_for_data_file_ids,
@@ -18,6 +25,7 @@ use crate::{
     },
     kv::OrderedCatalogKv,
     store::latest_snapshot,
+    table_store::load_current_table_row,
 };
 
 impl FdbOrderedCatalogKv {
@@ -262,7 +270,7 @@ impl FdbOrderedCatalogKv {
             through_order,
             DataCommitIntent::RewriteOrDeleteFiles,
         )?;
-        reject_rewrite_source_delete_conflicts_since_base(
+        reject_rewrite_source_delete_conflicts_since_base_fdb(
             self,
             catalog,
             source_context.table_id(),
@@ -347,6 +355,7 @@ impl FdbOrderedCatalogKv {
         compactions: Vec<RewriteDeleteCompaction>,
     ) -> CatalogResult<()> {
         let mut mutation = crate::fdb_data_mutations::FdbRewriteDeleteMutation::default();
+        let mut scan_budget = SyncFdbScanBudget::new();
         for mut compaction in compactions {
             reject_rewrite_shape(&compaction)?;
             let source_context = RewriteSourceContext::load(
@@ -364,13 +373,14 @@ impl FdbOrderedCatalogKv {
                     through_order,
                     DataCommitIntent::RewriteOrDeleteFiles,
                 )?;
-                reject_rewrite_source_delete_conflicts_since_base(
+                reject_rewrite_source_delete_conflicts_since_base_fdb_with_budget(
                     self,
                     catalog,
                     source_context.table_id(),
                     base_order,
                     through_order,
                     &compaction.source_file_ids,
+                    &mut scan_budget,
                 )?;
             }
             let source_deletions = rewrite_source_deletions(
@@ -416,6 +426,7 @@ impl FdbOrderedCatalogKv {
     }
 }
 
+#[cfg(test)]
 fn reject_rewrite_source_delete_conflicts_since_base(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
@@ -424,44 +435,121 @@ fn reject_rewrite_source_delete_conflicts_since_base(
     through_order: CatalogOrderId,
     source_file_ids: &[DataFileId],
 ) -> CatalogResult<()> {
-    if through_order < base_order {
+    let request = RewriteSourceDeleteConflictRequest {
+        catalog,
+        table_id,
+        base_order,
+        through_order,
+        source_file_ids,
+    };
+    let mut budget = SyncFdbScanBudget::new();
+    reject_rewrite_source_delete_conflicts_with_scan(request, &mut budget, |request, budget| {
+        scan_range_all_with_kv_budget(kv, request, budget)
+    })
+}
+
+fn reject_rewrite_source_delete_conflicts_since_base_fdb(
+    kv: &FdbOrderedCatalogKv,
+    catalog: CatalogId,
+    table_id: TableId,
+    base_order: CatalogOrderId,
+    through_order: CatalogOrderId,
+    source_file_ids: &[DataFileId],
+) -> CatalogResult<()> {
+    let mut budget = SyncFdbScanBudget::new();
+    reject_rewrite_source_delete_conflicts_since_base_fdb_with_budget(
+        kv,
+        catalog,
+        table_id,
+        base_order,
+        through_order,
+        source_file_ids,
+        &mut budget,
+    )
+}
+
+fn reject_rewrite_source_delete_conflicts_since_base_fdb_with_budget(
+    kv: &FdbOrderedCatalogKv,
+    catalog: CatalogId,
+    table_id: TableId,
+    base_order: CatalogOrderId,
+    through_order: CatalogOrderId,
+    source_file_ids: &[DataFileId],
+    budget: &mut SyncFdbScanBudget,
+) -> CatalogResult<()> {
+    let request = RewriteSourceDeleteConflictRequest {
+        catalog,
+        table_id,
+        base_order,
+        through_order,
+        source_file_ids,
+    };
+    reject_rewrite_source_delete_conflicts_with_scan(request, budget, |request, budget| {
+        scan_range_all_with_budget(kv, request, budget)
+    })
+}
+
+#[derive(Clone, Copy)]
+struct RewriteSourceDeleteConflictRequest<'a> {
+    catalog: CatalogId,
+    table_id: TableId,
+    base_order: CatalogOrderId,
+    through_order: CatalogOrderId,
+    source_file_ids: &'a [DataFileId],
+}
+
+fn reject_rewrite_source_delete_conflicts_with_scan<Scan>(
+    request: RewriteSourceDeleteConflictRequest<'_>,
+    budget: &mut SyncFdbScanBudget,
+    mut scan: Scan,
+) -> CatalogResult<()>
+where
+    Scan: FnMut(SyncFdbScanRequest, &mut SyncFdbScanBudget) -> CatalogResult<Vec<RangeItem>>,
+{
+    if request.through_order < request.base_order {
         return Err(CatalogError::InvalidMutation(
             "rewrite-delete source conflict end order cannot precede base order".to_owned(),
         ));
     }
-    let order_kind = scan_order_kind(base_order, through_order);
-    let source_file_ids = source_file_ids.iter().copied().collect::<BTreeSet<_>>();
+    let order_kind = scan_order_kind(request.base_order, request.through_order);
+    let source_file_ids = request
+        .source_file_ids
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
     let mut seen = BTreeSet::new();
     let mut conflicting_changes = Vec::new();
     for data_file_id in source_file_ids {
         for order in source_delete_file_change_orders_since_base(
-            kv,
-            catalog,
+            &mut scan,
+            budget,
+            request.catalog,
             data_file_id,
-            base_order,
-            through_order,
+            request.base_order,
+            request.through_order,
             order_kind,
         )? {
             push_rewrite_source_delete_conflict(
                 &mut seen,
                 &mut conflicting_changes,
-                table_id,
+                request.table_id,
                 data_file_id,
                 order,
             );
         }
         for order in source_inline_delete_change_orders_since_base(
-            kv,
-            catalog,
-            table_id,
+            &mut scan,
+            budget,
+            request.catalog,
+            request.table_id,
             data_file_id,
-            base_order,
-            through_order,
+            request.base_order,
+            request.through_order,
         )? {
             push_rewrite_source_delete_conflict(
                 &mut seen,
                 &mut conflicting_changes,
-                table_id,
+                request.table_id,
                 data_file_id,
                 order,
             );
@@ -472,25 +560,29 @@ fn reject_rewrite_source_delete_conflicts_since_base(
         return Ok(());
     }
     Err(CatalogError::LogicalConflict {
-        table_id,
+        table_id: request.table_id,
         conflicting_changes,
     })
 }
 
-fn source_delete_file_change_orders_since_base(
-    kv: &impl OrderedCatalogKv,
+fn source_delete_file_change_orders_since_base<Scan>(
+    scan: &mut Scan,
+    budget: &mut SyncFdbScanBudget,
     catalog: CatalogId,
     data_file_id: DataFileId,
     base_order: CatalogOrderId,
     through_order: CatalogOrderId,
     order_kind: CatalogOrderKind,
-) -> CatalogResult<Vec<CatalogOrderId>> {
+) -> CatalogResult<Vec<CatalogOrderId>>
+where
+    Scan: FnMut(SyncFdbScanRequest, &mut SyncFdbScanBudget) -> CatalogResult<Vec<RangeItem>>,
+{
+    let start = delete_file_timeline_scan_end(catalog, data_file_id, base_order);
+    let end = delete_file_timeline_scan_end(catalog, data_file_id, through_order);
     let mut orders = Vec::new();
-    for item in kv.scan_range(
-        &delete_file_timeline_scan_end(catalog, data_file_id, base_order),
-        &delete_file_timeline_scan_end(catalog, data_file_id, through_order),
-        crate::RangeDirection::Forward,
-        usize::MAX,
+    for item in scan(
+        SyncFdbScanRequest::new(&start, &end, crate::RangeDirection::Forward),
+        budget,
     )? {
         let order =
             delete_file_timeline_order_from_key(catalog, data_file_id, &item.key, order_kind)?;
@@ -501,18 +593,25 @@ fn source_delete_file_change_orders_since_base(
     Ok(orders)
 }
 
-fn source_inline_delete_change_orders_since_base(
-    kv: &impl OrderedCatalogKv,
+fn source_inline_delete_change_orders_since_base<Scan>(
+    scan: &mut Scan,
+    budget: &mut SyncFdbScanBudget,
     catalog: CatalogId,
     table_id: TableId,
     data_file_id: DataFileId,
     base_order: CatalogOrderId,
     through_order: CatalogOrderId,
-) -> CatalogResult<Vec<CatalogOrderId>> {
+) -> CatalogResult<Vec<CatalogOrderId>>
+where
+    Scan: FnMut(SyncFdbScanRequest, &mut SyncFdbScanBudget) -> CatalogResult<Vec<RangeItem>>,
+{
     let start = inline_file_deletion_scan_end(catalog, table_id, data_file_id, base_order);
     let end = inline_file_deletion_scan_end(catalog, table_id, data_file_id, through_order);
     let mut orders = Vec::new();
-    for item in kv.scan_range(&start, &end, crate::RangeDirection::Forward, usize::MAX)? {
+    for item in scan(
+        SyncFdbScanRequest::new(&start, &end, crate::RangeDirection::Forward),
+        budget,
+    )? {
         let row = InlineFileDeletionRow::decode(&item.value)?;
         let order = inline_file_deletion_begin_order(catalog, &item.key, row.validity.begin_order)?;
         if base_order < order && order <= through_order {
@@ -785,6 +884,20 @@ fn derive_merge_replacement_stats(
         return Ok(Vec::new());
     }
     let source_files = source_context.sources();
+    let column_types = load_current_table_row(kv, catalog, source_context.table_id())?
+        .map(|table| {
+            table
+                .columns
+                .iter()
+                .map(|column| {
+                    (
+                        column.column_id,
+                        normalize_catalog_scalar_type(&column.column_type),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
     let source_file_ids = source_files
         .iter()
         .map(|source| source.data_file_id)
@@ -826,6 +939,7 @@ fn derive_merge_replacement_stats(
             &scoped_stats,
             sources,
             new_file,
+            &column_types,
         ));
     }
     Ok(out)
@@ -835,6 +949,7 @@ fn merge_stats_for_replacement(
     all_stats: &[FileColumnStatsRow],
     sources: &[&DataFileRow],
     new_file: &DataFileRow,
+    column_types: &BTreeMap<ColumnId, CatalogScalarType>,
 ) -> Vec<FileColumnStatsRow> {
     let mut rows = Vec::new();
     let source_record_counts = sources
@@ -860,6 +975,8 @@ fn merge_stats_for_replacement(
             .filter(|source| !files_with_stats.contains(&source.data_file_id))
             .map(|source| source.record_count)
             .sum::<u64>();
+        let scalar_type = column_types.get(&column_id).copied().unwrap_or_default();
+        let (min_value, max_value) = merge_stat_extrema(&source_stats, scalar_type);
         rows.push(FileColumnStatsRow {
             data_file_id: new_file.data_file_id,
             table_id: new_file.table_id,
@@ -867,20 +984,48 @@ fn merge_stats_for_replacement(
             value_count: Some(new_file.record_count),
             null_count: source_stats.iter().map(|row| row.null_count).sum::<u64>()
                 + missing_column_nulls,
-            min_value: source_stats
-                .iter()
-                .filter_map(|row| row.min_value.as_ref())
-                .min()
-                .cloned(),
-            max_value: source_stats
-                .iter()
-                .filter_map(|row| row.max_value.as_ref())
-                .max()
-                .cloned(),
+            min_value,
+            max_value,
             extra_stats: None,
         });
     }
     rows
+}
+
+fn merge_stat_extrema(
+    source_stats: &[&FileColumnStatsRow],
+    scalar_type: CatalogScalarType,
+) -> (Option<String>, Option<String>) {
+    let mut min_value = None;
+    let mut max_value = None;
+    for row in source_stats {
+        if typed_extrema_are_invalid(
+            scalar_type,
+            row.value_count,
+            row.null_count,
+            row.min_value.as_deref(),
+            row.max_value.as_deref(),
+        ) {
+            return (None, None);
+        }
+        if let Some(value) = row.min_value.as_ref()
+            && min_value.as_deref().is_none_or(|current| {
+                compare_typed_scalars(scalar_type, value, current)
+                    .is_some_and(|ordering| ordering.is_lt())
+            })
+        {
+            min_value = Some(value.clone());
+        }
+        if let Some(value) = row.max_value.as_ref()
+            && max_value.as_deref().is_none_or(|current| {
+                compare_typed_scalars(scalar_type, value, current)
+                    .is_some_and(|ordering| ordering.is_gt())
+            })
+        {
+            max_value = Some(value.clone());
+        }
+    }
+    (min_value, max_value)
 }
 
 fn derive_merge_replacement_row_ids(

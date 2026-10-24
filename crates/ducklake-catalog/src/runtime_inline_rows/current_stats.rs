@@ -5,9 +5,11 @@ use crate::{
     inline_column_types::inline_columns_payload,
     inline_data::{list_inline_current_rows, load_inline_next_row_id},
     latest_snapshot,
+    runtime_inline_rows::*,
+    runtime_inline_snapshot::capture::{
+        captured_inline_current_rows, captured_inline_current_rows_or_latest,
+    },
 };
-
-use crate::runtime_inline_rows::*;
 
 enum CurrentInlineStats {
     Unavailable,
@@ -58,12 +60,7 @@ fn read_current_inline_rows_payload(
         InlineStatsRequest::Conservative,
     )?
     .ok_or_else(|| crate::CatalogError::Decode("catalog snapshot does not exist".to_owned()))?;
-    let Some(latest) = latest_snapshot(kv, catalog)? else {
-        return Ok(None);
-    };
-    if snapshot.order != latest.order {
-        return Ok(None);
-    }
+    let snapshot_order = snapshot.order;
     let context = match InlineTableSnapshotContext::load_for_table_name(
         kv,
         catalog,
@@ -74,18 +71,45 @@ fn read_current_inline_rows_payload(
         Err(crate::CatalogError::NotFound(_)) => return Ok(None),
         Err(error) => return Err(error),
     };
-    let current_rows =
-        list_inline_current_rows(kv, catalog, context.table.table_id, context.schema_id)?;
-    let next_row_id =
-        load_inline_next_row_id(kv, catalog, context.table.table_id, context.schema_id)?;
+    let current_snapshot_capture_required =
+        crate::runtime_inline_snapshot::capture::capture_inline_current_rows_at_read_version(
+            kv,
+            catalog,
+            &context.table,
+            snapshot_order,
+        )?;
+    let current_rows = captured_inline_current_rows_or_latest(
+        captured_inline_current_rows(
+            kv,
+            catalog,
+            context.table.table_id,
+            context.schema_id,
+            snapshot_order,
+        ),
+        current_snapshot_capture_required,
+        || {
+            let Some(latest) = latest_snapshot(kv, catalog)? else {
+                return Ok(None);
+            };
+            if snapshot_order != latest.order {
+                return Ok(None);
+            }
+            Ok(Some((
+                list_inline_current_rows(kv, catalog, context.table.table_id, context.schema_id)?,
+                load_inline_next_row_id(kv, catalog, context.table.table_id, context.schema_id)?,
+            )))
+        },
+    )?;
+    let Some((current_rows, next_row_id)) = current_rows else {
+        return Ok(None);
+    };
     let mut out = inline_columns_payload(&context.schema_table)?;
     writeln!(out, "inline_payload_count={}", current_rows.len()).map_err(|error| {
         crate::CatalogError::Decode(format!(
             "failed to render current inline payload count: {error}"
         ))
     })?;
-    let mut catalog_stats =
-        InlineCatalogStats::for_inline_schema(&context.schema_table, &context.table);
+    let mut catalog_stats = InlineCatalogStats::for_inline_schema(&context.schema_table);
     catalog_stats.observe_next_row_id(next_row_id);
     for (row_id, row) in current_rows {
         catalog_stats.accumulate_current_row_payload(row_id, &row.payload)?;
@@ -185,12 +209,7 @@ fn load_current_inline_stats(
     }
     let snapshot = inline_read_snapshot(kv, catalog, payload.snapshot, InlineStatsRequest::Global)?
         .ok_or_else(|| crate::CatalogError::Decode("catalog snapshot does not exist".to_owned()))?;
-    let Some(latest) = latest_snapshot(kv, catalog)? else {
-        return Ok(CurrentInlineStats::Unavailable);
-    };
-    if snapshot.order != latest.order {
-        return Ok(CurrentInlineStats::Unavailable);
-    }
+    let snapshot_order = snapshot.order;
     let context = match InlineTableSnapshotContext::load_for_table_name(
         kv,
         catalog,
@@ -201,14 +220,41 @@ fn load_current_inline_stats(
         Err(crate::CatalogError::NotFound(_)) => return Ok(CurrentInlineStats::MissingTable),
         Err(error) => return Err(error),
     };
+    let current_snapshot_capture_required =
+        crate::runtime_inline_snapshot::capture::capture_inline_current_rows_at_read_version(
+            kv,
+            catalog,
+            &context.table,
+            snapshot_order,
+        )?;
     let started = RuntimeMetricStage::start();
-    let current_rows =
-        list_inline_current_rows(kv, catalog, context.table.table_id, context.schema_id)?;
-    let next_row_id =
-        load_inline_next_row_id(kv, catalog, context.table.table_id, context.schema_id)?;
+    let current_rows = captured_inline_current_rows_or_latest(
+        captured_inline_current_rows(
+            kv,
+            catalog,
+            context.table.table_id,
+            context.schema_id,
+            snapshot_order,
+        ),
+        current_snapshot_capture_required,
+        || {
+            let Some(latest) = latest_snapshot(kv, catalog)? else {
+                return Ok(None);
+            };
+            if snapshot_order != latest.order {
+                return Ok(None);
+            }
+            Ok(Some((
+                list_inline_current_rows(kv, catalog, context.table.table_id, context.schema_id)?,
+                load_inline_next_row_id(kv, catalog, context.table.table_id, context.schema_id)?,
+            )))
+        },
+    )?;
+    let Some((current_rows, next_row_id)) = current_rows else {
+        return Ok(CurrentInlineStats::Unavailable);
+    };
     record_inline_stage("ReadInlineRowsForCurrentStats", "Index", started);
-    let mut catalog_stats =
-        InlineCatalogStats::for_inline_schema(&context.schema_table, &context.table);
+    let mut catalog_stats = InlineCatalogStats::for_inline_schema(&context.schema_table);
     catalog_stats.observe_next_row_id(next_row_id);
     for (row_id, row) in &current_rows {
         catalog_stats.accumulate_current_row_payload(*row_id, &row.payload)?;

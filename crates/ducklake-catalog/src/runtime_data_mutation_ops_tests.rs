@@ -542,3 +542,31 @@ mod tests {
         (kv, snapshot)
     }
 }
+
+#[test]
+fn given_mutation_counts_when_encoded_then_every_protocol_field_has_its_own_line() {
+    let commit = crate::DataMutationCommit {
+        data_files: Vec::new(),
+        delete_files: Vec::new(),
+        partition_value_count: 2,
+        file_column_stats_count: 3,
+        flushed_inline_count: 4,
+        inline_file_deletion_count: 5,
+        dropped_data_file_count: 6,
+    };
+    let payload = super::data_mutation_payload(commit, &[crate::TableId(7)]);
+    assert_eq!(
+        payload,
+        concat!(
+            "appended_file_count=0\n",
+            "added_delete_file_count=0\n",
+            "inline_file_deletion_count=5\n",
+            "file_partition_value_count=2\n",
+            "file_column_stats_count=3\n",
+            "flushed_inline_table_count=4\n",
+            "dropped_data_file_count=6\n",
+            "affected_table_ids=7\n",
+        )
+        .as_bytes(),
+    );
+}

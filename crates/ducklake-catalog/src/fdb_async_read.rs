@@ -1,6 +1,10 @@
-use std::{collections::BTreeSet, ops::Deref};
+use std::{
+    collections::BTreeSet,
+    ops::Deref,
+    time::{Duration, Instant},
+};
 
-use foundationdb::RangeOption;
+use foundationdb::{RangeOption, options::TransactionOption};
 use futures::{
     TryStreamExt,
     future::{try_join, try_join_all},
@@ -8,15 +12,15 @@ use futures::{
 
 use crate::{
     AttachedDataFile, CatalogError, CatalogId, CatalogOrderId, CatalogOrderKind, CatalogResult,
-    DataFileId, DataFileRow, DeleteFileId, DeleteFileRow, FdbOrderedCatalogKv,
-    FoundationDbErrorClass, RangeDirection, RangeItem, TableId,
+    DataFileId, DataFileRow, DeleteFileId, DeleteFileRow, FdbOrderedCatalogKv, RangeDirection,
+    RangeItem, TableId,
     data_file_store::{
         attach_data_files_without_deletes, cache_delete_file_changed_tables_at,
         cache_table_delete_file_changes_exist_at, cached_delete_file_changed_tables_at,
         cached_table_delete_file_changes_exist_at, data_file_visible_at,
         delete_file_can_answer_snapshot,
     },
-    fdb_async::MAX_ASYNC_FDB_RETRIES,
+    fdb_async::{MAX_FDB_READ_RETRIES, is_retryable_fdb_read_error},
     fdb_runtime::map_fdb_error,
     fdb_versionstamp::incomplete_order,
     keys::{
@@ -29,6 +33,8 @@ use crate::{
 };
 
 const MAX_TABLE_SCOPED_DELETE_CHANGE_PROBES: usize = 8;
+const DEFAULT_ASYNC_SCAN_PAGE_SIZE: usize = 256;
+const ASYNC_SCAN_DEADLINE: Duration = Duration::from_secs(5);
 
 impl FdbOrderedCatalogKv {
     pub async fn list_current_data_files_async(
@@ -36,23 +42,10 @@ impl FdbOrderedCatalogKv {
         catalog: CatalogId,
         table: TableId,
     ) -> CatalogResult<Vec<DataFileRow>> {
-        let trx = self.create_transaction()?;
-        let index_items = scan_range_in_transaction(
-            self,
-            &trx,
-            &current_data_file_prefix(catalog, table),
-            &prefix_end(&current_data_file_prefix(catalog, table)),
-            RangeDirection::Forward,
-            usize::MAX,
-        )
-        .await?;
-        let mut rows = Vec::new();
-        for row in fetch_current_data_file_rows(self, &trx, catalog, index_items).await? {
-            if row.validity.end_order.is_none() {
-                rows.push(row);
-            }
-        }
-        Ok(rows)
+        Ok(self
+            .list_current_data_files_bounded_async(catalog, table, DEFAULT_ASYNC_SCAN_PAGE_SIZE)
+            .await?
+            .data_files)
     }
 
     pub async fn attach_delete_files_at_async(
@@ -127,25 +120,29 @@ impl FdbOrderedCatalogKv {
         let historical_end = data_file_begin_scan_end(catalog, table, snapshot_order);
         let current_start = current_data_file_prefix(catalog, table);
         let current_end = prefix_end(&current_start);
-        let (historical_scan, current_scan) = try_join(
-            scan_range_in_transaction(
-                self,
-                &trx,
+        let mut budget = ScanBudget::new();
+        let historical_scan = self
+            .scan_range_with_budget(
                 &historical_start,
                 &historical_end,
                 RangeDirection::Forward,
-                usize::MAX,
-            ),
-            scan_range_in_transaction(
-                self,
-                &trx,
+                ScanLimit::All,
+                DEFAULT_ASYNC_SCAN_PAGE_SIZE,
+                &mut budget,
+            )
+            .await?
+            .items;
+        let current_scan = self
+            .scan_range_with_budget(
                 &current_start,
                 &current_end,
                 RangeDirection::Forward,
-                usize::MAX,
-            ),
-        )
-        .await?;
+                ScanLimit::All,
+                DEFAULT_ASYNC_SCAN_PAGE_SIZE,
+                &mut budget,
+            )
+            .await?
+            .items;
 
         let mut seen = BTreeSet::new();
         let mut rows = Vec::new();
@@ -207,10 +204,10 @@ impl FdbOrderedCatalogKv {
 
     pub(crate) async fn get_async(&self, key: &[u8]) -> CatalogResult<Option<Vec<u8>>> {
         let mut last_retry_error = None;
-        for _ in 0..=MAX_ASYNC_FDB_RETRIES {
+        for _ in 0..=MAX_FDB_READ_RETRIES {
             match self.get_once_async(key).await {
                 Ok(value) => return Ok(value),
-                Err(error) if is_retryable_catalog_read_error(&error) => {
+                Err(error) if is_retryable_fdb_read_error(&error) => {
                     last_retry_error = Some(error);
                 }
                 Err(error) => return Err(error),
@@ -246,34 +243,16 @@ impl FdbOrderedCatalogKv {
         prefix: &[u8],
         chunk_size: usize,
     ) -> CatalogResult<BoundedScan> {
-        if chunk_size == 0 {
-            return Err(CatalogError::InvalidMutation(
-                "bounded async scan chunk size must be greater than zero".to_owned(),
-            ));
-        }
-        let end = prefix_end(prefix);
-        let mut start = prefix.to_vec();
-        let mut items = Vec::new();
-        let mut transaction_count = 0;
-        loop {
-            let chunk = self
-                .scan_range_async(&start, &end, RangeDirection::Forward, chunk_size)
-                .await?;
-            transaction_count += 1;
-            let Some(last) = chunk.last() else {
-                break;
-            };
-            start = key_after(&last.key);
-            let chunk_len = chunk.len();
-            items.extend(chunk);
-            if chunk_len < chunk_size {
-                break;
-            }
-        }
-        Ok(BoundedScan {
-            items,
-            transaction_count,
-        })
+        let mut budget = ScanBudget::new();
+        self.scan_range_with_budget(
+            prefix,
+            &prefix_end(prefix),
+            RangeDirection::Forward,
+            ScanLimit::All,
+            chunk_size,
+            &mut budget,
+        )
+        .await
     }
 
     pub(crate) async fn scan_range_async(
@@ -286,24 +265,93 @@ impl FdbOrderedCatalogKv {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let mut last_retry_error = None;
-        for _ in 0..=MAX_ASYNC_FDB_RETRIES {
+        let mut budget = ScanBudget::new();
+        let scan_limit = ScanLimit::from_legacy(limit);
+        Ok(self
+            .scan_range_with_budget(
+                start,
+                end,
+                direction,
+                scan_limit,
+                DEFAULT_ASYNC_SCAN_PAGE_SIZE,
+                &mut budget,
+            )
+            .await?
+            .items)
+    }
+
+    async fn scan_all_range_async(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        direction: RangeDirection,
+    ) -> CatalogResult<Vec<RangeItem>> {
+        let mut budget = ScanBudget::new();
+        Ok(self
+            .scan_range_with_budget(
+                start,
+                end,
+                direction,
+                ScanLimit::All,
+                DEFAULT_ASYNC_SCAN_PAGE_SIZE,
+                &mut budget,
+            )
+            .await?
+            .items)
+    }
+
+    async fn scan_range_with_budget(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        direction: RangeDirection,
+        limit: ScanLimit,
+        page_size: usize,
+        budget: &mut ScanBudget,
+    ) -> CatalogResult<BoundedScan> {
+        let mut cursor =
+            ScanCursor::new(start.to_vec(), end.to_vec(), direction, page_size, limit)?;
+        let mut transaction_count: usize = 0;
+        while cursor.wants_page() {
+            let page = self
+                .scan_range_page_with_budget(
+                    cursor.start(),
+                    cursor.end(),
+                    direction,
+                    cursor.page_size(),
+                    budget,
+                )
+                .await?;
+            transaction_count = transaction_count.saturating_add(1);
+            cursor.accept_page(page)?;
+        }
+        Ok(BoundedScan {
+            items: cursor.into_items(),
+            transaction_count,
+        })
+    }
+
+    async fn scan_range_page_with_budget(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        direction: RangeDirection,
+        limit: usize,
+        budget: &mut ScanBudget,
+    ) -> CatalogResult<Vec<RangeItem>> {
+        loop {
+            let timeout_ms = budget.begin_attempt()?;
             match self
-                .scan_range_once_async(start, end, direction, limit)
+                .scan_range_once_async(start, end, direction, limit, timeout_ms)
                 .await
             {
                 Ok(items) => return Ok(items),
-                Err(error) if is_retryable_catalog_read_error(&error) => {
-                    last_retry_error = Some(error);
+                Err(error) if is_retryable_fdb_read_error(&error) => {
+                    budget.record_retryable_failure(error)?;
                 }
                 Err(error) => return Err(error),
             }
         }
-        Err(last_retry_error.unwrap_or_else(|| {
-            CatalogError::InvalidMutation(
-                "foundationdb async range retry loop did not run".to_owned(),
-            )
-        }))
     }
 
     async fn scan_range_once_async(
@@ -312,12 +360,13 @@ impl FdbOrderedCatalogKv {
         end: &[u8],
         direction: RangeDirection,
         limit: usize,
+        timeout_ms: i32,
     ) -> CatalogResult<Vec<RangeItem>> {
         let trx = self.create_transaction()?;
+        trx.set_option(TransactionOption::Timeout(i64::from(timeout_ms)))
+            .map_err(map_fdb_error)?;
         let mut options = RangeOption::from(self.namespaced_key(start)..self.namespaced_key(end));
-        if limit != usize::MAX {
-            options.limit = Some(limit);
-        }
+        options.limit = Some(limit);
         if direction == RangeDirection::Reverse {
             options = options.rev();
         }
@@ -374,8 +423,7 @@ async fn delete_file_changes_exist_for_files_at(
             .any(|table_id| changed_tables.contains(table_id)));
     }
     if table_ids.len() > MAX_TABLE_SCOPED_DELETE_CHANGE_PROBES {
-        let changed_tables =
-            delete_file_changed_tables_at(kv, trx, catalog, snapshot_order).await?;
+        let changed_tables = delete_file_changed_tables_at(kv, catalog, snapshot_order).await?;
         return Ok(table_ids
             .iter()
             .any(|table_id| changed_tables.contains(table_id)));
@@ -397,7 +445,6 @@ fn materialized_partial_file_requires_delete_lookup(
 
 async fn delete_file_changed_tables_at(
     kv: &FdbOrderedCatalogKv,
-    trx: &foundationdb::Transaction,
     catalog: CatalogId,
     snapshot_order: CatalogOrderId,
 ) -> CatalogResult<BTreeSet<TableId>> {
@@ -407,15 +454,13 @@ async fn delete_file_changed_tables_at(
         return Ok(tables);
     }
     let prefix = order_delete_file_change_prefix(catalog);
-    let items = scan_range_in_transaction(
-        kv,
-        trx,
-        &prefix,
-        &order_delete_file_change_scan_end(catalog, snapshot_order),
-        RangeDirection::Forward,
-        usize::MAX,
-    )
-    .await?;
+    let items = kv
+        .scan_all_range_async(
+            &prefix,
+            &order_delete_file_change_scan_end(catalog, snapshot_order),
+            RangeDirection::Forward,
+        )
+        .await?;
     let mut tables = BTreeSet::new();
     for item in items {
         tables.insert(decode_order_delete_file_change_table_id(
@@ -479,9 +524,7 @@ async fn scan_range_in_transaction(
         return Ok(Vec::new());
     }
     let mut options = RangeOption::from(kv.namespaced_key(start)..kv.namespaced_key(end));
-    if limit != usize::MAX {
-        options.limit = Some(limit);
-    }
+    options.limit = Some(limit);
     if direction == RangeDirection::Reverse {
         options = options.rev();
     }
@@ -800,15 +843,194 @@ struct BoundedScan {
     transaction_count: usize,
 }
 
-fn is_retryable_catalog_read_error(error: &CatalogError) -> bool {
-    match error {
-        CatalogError::FoundationDb { class, .. } => {
-            matches!(
-                class,
-                FoundationDbErrorClass::RetryableNotCommitted | FoundationDbErrorClass::Retryable
-            )
+#[derive(Clone, Copy)]
+enum ScanLimit {
+    All,
+    AtMost(usize),
+}
+
+impl ScanLimit {
+    fn from_legacy(limit: usize) -> Self {
+        if limit == usize::MAX {
+            Self::All
+        } else {
+            Self::AtMost(limit)
         }
-        _ => false,
+    }
+}
+
+struct ScanCursor {
+    start: Vec<u8>,
+    end: Vec<u8>,
+    direction: RangeDirection,
+    page_size: usize,
+    remaining: Option<usize>,
+    done: bool,
+    items: Vec<RangeItem>,
+}
+
+impl ScanCursor {
+    fn new(
+        start: Vec<u8>,
+        end: Vec<u8>,
+        direction: RangeDirection,
+        page_size: usize,
+        limit: ScanLimit,
+    ) -> CatalogResult<Self> {
+        if page_size == 0 {
+            return Err(CatalogError::InvalidMutation(
+                "bounded async scan page size must be greater than zero".to_owned(),
+            ));
+        }
+        Ok(Self {
+            start,
+            end,
+            direction,
+            page_size,
+            remaining: match limit {
+                ScanLimit::All => None,
+                ScanLimit::AtMost(limit) => Some(limit),
+            },
+            done: matches!(limit, ScanLimit::AtMost(0)),
+            items: Vec::new(),
+        })
+    }
+
+    fn wants_page(&self) -> bool {
+        !self.done
+    }
+
+    fn page_size(&self) -> usize {
+        self.remaining
+            .map_or(self.page_size, |remaining| remaining.min(self.page_size))
+    }
+
+    fn start(&self) -> &[u8] {
+        &self.start
+    }
+
+    fn end(&self) -> &[u8] {
+        &self.end
+    }
+
+    fn into_items(self) -> Vec<RangeItem> {
+        self.items
+    }
+
+    fn accept_page(&mut self, page: Vec<RangeItem>) -> CatalogResult<bool> {
+        if page.is_empty() {
+            self.done = true;
+            return Ok(false);
+        }
+        let requested = self.page_size();
+        if page.len() > requested || !page_is_ordered(&page, self.direction) {
+            return Err(CatalogError::InvalidMutation(
+                "foundationdb async scan page violated its ordering or size bound".to_owned(),
+            ));
+        }
+        if let Some(previous) = self.items.last()
+            && !keys_are_ordered(previous, &page[0], self.direction)
+        {
+            return Err(CatalogError::InvalidMutation(
+                "foundationdb async scan continuation was not ordered".to_owned(),
+            ));
+        }
+        let should_continue = page.len() == requested
+            && self
+                .remaining
+                .is_none_or(|remaining| remaining > page.len());
+        if let Some(remaining) = &mut self.remaining {
+            *remaining -= page.len();
+        }
+        match self.direction {
+            RangeDirection::Forward => self.start = key_after(&page[page.len() - 1].key),
+            RangeDirection::Reverse => self.end = page[page.len() - 1].key.clone(),
+        }
+        self.items.extend(page);
+        self.done = !should_continue;
+        Ok(should_continue)
+    }
+}
+
+fn page_is_ordered(page: &[RangeItem], direction: RangeDirection) -> bool {
+    page.windows(2)
+        .all(|pair| keys_are_ordered(&pair[0], &pair[1], direction))
+}
+
+fn keys_are_ordered(previous: &RangeItem, next: &RangeItem, direction: RangeDirection) -> bool {
+    match direction {
+        RangeDirection::Forward => previous.key < next.key,
+        RangeDirection::Reverse => previous.key > next.key,
+    }
+}
+
+struct ScanBudget {
+    deadline: Instant,
+    retries_remaining: usize,
+    attempts: usize,
+    last_retry_error: Option<CatalogError>,
+}
+
+impl ScanBudget {
+    fn new() -> Self {
+        Self::with_limits(MAX_FDB_READ_RETRIES, Instant::now() + ASYNC_SCAN_DEADLINE)
+    }
+
+    fn with_limits(retries: usize, deadline: Instant) -> Self {
+        Self {
+            deadline,
+            retries_remaining: retries,
+            attempts: 0,
+            last_retry_error: None,
+        }
+    }
+
+    fn begin_attempt(&mut self) -> CatalogResult<i32> {
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(self.exhausted_error());
+        }
+        self.attempts = self.attempts.saturating_add(1);
+        let timeout_ms = remaining.as_millis().max(1);
+        Ok(i32::try_from(timeout_ms).unwrap_or(i32::MAX))
+    }
+
+    fn record_retryable_failure(&mut self, error: CatalogError) -> CatalogResult<()> {
+        self.last_retry_error = Some(error);
+        if self.retries_remaining == 0 {
+            return Err(self.exhausted_error());
+        }
+        self.retries_remaining -= 1;
+        Ok(())
+    }
+
+    fn exhausted_error(&self) -> CatalogError {
+        self.last_retry_error.as_ref().map_or_else(
+            || {
+                CatalogError::InvalidMutation(format!(
+                    "foundationdb async range scan deadline exhausted after {} attempt(s)",
+                    self.attempts
+                ))
+            },
+            |error| scan_retry_exhausted(self.attempts, error.clone()),
+        )
+    }
+}
+
+fn scan_retry_exhausted(attempts: usize, error: CatalogError) -> CatalogError {
+    match error {
+        CatalogError::FoundationDb {
+            code,
+            message,
+            class,
+        } => CatalogError::FoundationDbRetryExhausted {
+            operation: "scan_range",
+            attempts,
+            code,
+            message,
+            class,
+        },
+        other => other,
     }
 }
 
@@ -839,73 +1061,4 @@ fn key_after(key: &[u8]) -> Vec<u8> {
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::{CatalogOrderId, DataFileId, DataFileRow, TableId};
-
-    use super::materialized_partial_file_requires_delete_lookup;
-
-    #[test]
-    fn given_materialized_partial_file_at_begin_snapshot_when_prechecking_deletes_then_lookup_is_required()
-     {
-        let file = data_file(CatalogOrderId::uuid_v7(10))
-            .with_max_partial_order(Some(CatalogOrderId::uuid_v7(20)));
-
-        assert!(materialized_partial_file_requires_delete_lookup(
-            &file,
-            CatalogOrderId::uuid_v7(10)
-        ));
-        assert!(materialized_partial_file_requires_delete_lookup(
-            &file,
-            CatalogOrderId::uuid_v7(15)
-        ));
-        assert!(materialized_partial_file_requires_delete_lookup(
-            &file,
-            CatalogOrderId::uuid_v7(20)
-        ));
-    }
-
-    #[test]
-    fn given_materialized_partial_file_before_begin_snapshot_when_prechecking_deletes_then_lookup_is_not_forced()
-     {
-        let file = data_file(CatalogOrderId::uuid_v7(10))
-            .with_max_partial_order(Some(CatalogOrderId::uuid_v7(20)));
-
-        assert!(!materialized_partial_file_requires_delete_lookup(
-            &file,
-            CatalogOrderId::uuid_v7(9)
-        ));
-    }
-
-    #[test]
-    fn given_materialized_partial_file_after_partial_span_when_prechecking_deletes_then_lookup_is_still_required()
-     {
-        let file = data_file(CatalogOrderId::uuid_v7(10))
-            .with_max_partial_order(Some(CatalogOrderId::uuid_v7(20)));
-
-        assert!(materialized_partial_file_requires_delete_lookup(
-            &file,
-            CatalogOrderId::uuid_v7(21)
-        ));
-    }
-
-    #[test]
-    fn given_ordinary_file_when_prechecking_deletes_then_lookup_is_not_forced() {
-        let file = data_file(CatalogOrderId::uuid_v7(10));
-
-        assert!(!materialized_partial_file_requires_delete_lookup(
-            &file,
-            CatalogOrderId::uuid_v7(10)
-        ));
-    }
-
-    fn data_file(begin_order: CatalogOrderId) -> DataFileRow {
-        DataFileRow::new(
-            DataFileId(1),
-            TableId(10),
-            "main/t/file.parquet",
-            1,
-            128,
-            begin_order,
-        )
-    }
-}
+mod fdb_async_read_tests;

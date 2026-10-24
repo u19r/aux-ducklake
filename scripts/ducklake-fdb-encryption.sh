@@ -27,7 +27,8 @@ runtime_library="$(ducklake_build_debug_catalog_runtime "$root_dir" 1 foundation
 test_dir="$(mktemp -d)"
 trap 'rm -rf "$test_dir"' EXIT
 export AUX_DUCKLAKE_CATALOG_BACKEND=fdb
-export AUX_DUCKLAKE_FDB_PREFIX="aux-ducklake/e2e/encryption/$(date +%s)-$$/"
+AUX_DUCKLAKE_FDB_PREFIX="aux-ducklake/e2e/encryption/$(date +%s)-$$/"
+export AUX_DUCKLAKE_FDB_PREFIX
 export AUX_DUCKLAKE_RUNTIME_LIBRARY="$runtime_library"
 
 run_duckdb "

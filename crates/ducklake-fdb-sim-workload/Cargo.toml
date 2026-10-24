@@ -17,3 +17,6 @@ ducklake-catalog = { path = "../ducklake-catalog", default-features = false, fea
 ducklake-fdb-sim-model = { path = "../ducklake-fdb-sim-model" }
 foundationdb = { workspace = true }
 foundationdb-simulation = { workspace = true }
+
+[lints]
+workspace = true

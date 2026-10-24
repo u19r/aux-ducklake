@@ -5,12 +5,12 @@ default:
     @just _default
 
 # Install local development tools.
-setup:
+setup: setup-linux-linker
     @just _setup
 
-# Update sibling repositories to consume this release.
-update-aux-repos:
-    ./scripts/update-aux-repos.sh
+# Update an explicit analytics worktree to consume a published release.
+update-aux-repos analytics_worktree release_tag:
+    ./scripts/update-aux-repos.sh {{quote(analytics_worktree)}} {{quote(release_tag)}}
 
 # Build the primary local DuckLake debug artifact.
 build:
@@ -157,6 +157,9 @@ ducklake-runtime-ffi-check:
 ducklake-runtime-cpp-ffi-smoke:
     ./scripts/ducklake_runtime_cpp_ffi_smoke.sh
 
+ducklake-fdb-benchmark-preflight-test:
+    ./scripts/ducklake-fdb-benchmark-preflight-test.sh
+
 ducklake-fdb-runtime-smoke:
     ./scripts/ducklake_runtime_cpp_ffi_smoke.sh fdb
 
@@ -269,6 +272,10 @@ ducklake-package-release platform='':
         ./scripts/package_ducklake_release.sh
     fi
 
+# Verify a release bundle through the embedded C API and isolated FoundationDB catalogs.
+ducklake-release-smoke bundle_root:
+    python3 ./scripts/ducklake-release-smoke.py {{quote(bundle_root)}}
+
 ducklake-release platform='':
     #!/usr/bin/env bash
     set -euo pipefail
@@ -338,3 +345,9 @@ ducklake-cache-stats:
     if command -v ccache >/dev/null 2>&1; then
         ccache -s
     fi
+
+# Install the pinned Linux linker; no action is needed on macOS.
+setup-linux-linker:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  exec bash scripts/install-mold.sh

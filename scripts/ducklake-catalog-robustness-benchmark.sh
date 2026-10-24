@@ -25,7 +25,7 @@ run_backend() {
     local log="$target.log"
     if AUX_DUCKLAKE_BENCHMARK_BACKEND="$backend" \
         AUX_DUCKLAKE_BENCHMARK_OUTPUT_DIR="$benchmark_output_dir" \
-        "$benchmark" "$profile" > "$log" 2>&1; then
+        "$benchmark" "$profile" >"$log" 2>&1; then
         cat "$log"
         cp "$benchmark_output_dir/$backend-$profile-latest.json" "$target"
         return
@@ -35,7 +35,7 @@ run_backend() {
         --arg backend "$backend" \
         --arg profile "$profile" \
         '{artifact: "ducklake-catalog-robustness-failure", backend: $backend, profile: $profile, status: "failed", error: .}' \
-        "$log" > "$target"
+        "$log" >"$target"
 }
 
 run_paired() {
@@ -72,13 +72,13 @@ run_paired() {
             fdb: $f,
             postgres: $p
         }' \
-        >> "$tmp_dir/scenarios.jsonl"
+        >>"$tmp_dir/scenarios.jsonl"
 }
 
 run_varied_scenario() {
     local record="$1"
     local name schema tables rows payload batch preload_workers readers churn writers sequence target_bytes
-    IFS='|' read -r name schema tables rows payload batch preload_workers readers churn writers sequence <<< "$record"
+    IFS='|' read -r name schema tables rows payload batch preload_workers readers churn writers sequence <<<"$record"
     [[ -n "$name" && -n "$sequence" ]] || fail "invalid varied scenario: $record"
     target_bytes=$((tables * rows * payload))
     env \
@@ -92,13 +92,13 @@ run_varied_scenario() {
         AUX_DUCKLAKE_VARIED_PARALLEL_WORKERS="$readers" \
         AUX_DUCKLAKE_VARIED_CHURN_ROUNDS="$churn" \
         AUX_DUCKLAKE_VARIED_CONCURRENT_WRITERS="$writers" \
-        bash -c 'run_paired varied "$1" "$2"' _ "$name" "$sequence"
+        bash -c "run_paired varied \"\$1\" \"\$2\"" _ "$name" "$sequence"
 }
 
 run_inline_scenario() {
     local record="$1"
     local name flush_interval tables first_rows second_rows preload_tables sequence
-    IFS='|' read -r name flush_interval tables first_rows second_rows preload_tables sequence <<< "$record"
+    IFS='|' read -r name flush_interval tables first_rows second_rows preload_tables sequence <<<"$record"
     [[ -n "$name" && -n "$sequence" ]] || fail "invalid inline scenario: $record"
     env \
         AUX_DUCKLAKE_INLINE_FLUSH_INTERVAL="$flush_interval" \
@@ -108,19 +108,19 @@ run_inline_scenario() {
         AUX_DUCKLAKE_INLINE_DELETE_ROWS=1 \
         AUX_DUCKLAKE_INLINE_PRELOAD_TABLES="$preload_tables" \
         AUX_DUCKLAKE_INLINE_PRELOAD_ROWS=2 \
-        bash -c 'run_paired inline "$1" "$2"' _ "$name" "$sequence"
+        bash -c "run_paired inline \"\$1\" \"\$2\"" _ "$name" "$sequence"
 }
 
 write_artifact() {
     jq -s -f "$root_dir/scripts/ducklake-catalog-robustness-summary.jq" \
-        "$tmp_dir/scenarios.jsonl" > "$output"
+        "$tmp_dir/scenarios.jsonl" >"$output"
 }
 
 export -f run_backend run_paired
 export benchmark benchmark_output_dir tmp_dir
 require_environment
 mkdir -p "$benchmark_output_dir"
-: > "$tmp_dir/scenarios.jsonl"
+: >"$tmp_dir/scenarios.jsonl"
 
 varied_scenarios=(
     'narrow-tiny-batches|narrow|4|32|128|1|1|2|1|0|fdb-first'

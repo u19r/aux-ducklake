@@ -236,6 +236,76 @@ pub(crate) fn list_config_options(
     Ok(config_options_payload(&rows).into_bytes())
 }
 
+pub(crate) fn list_inlined_tables(catalog: CatalogId, payload: &[u8]) -> CatalogResult<Vec<u8>> {
+    let table_id = TableId(payload_u64_value(payload, "table_id", "missing table_id")?);
+    let kv = open_foundationdb_catalog()?;
+    // Registrations remain readable for retained snapshots after the table is
+    // dropped.
+    let table = crate::table_store::load_latest_table_version(&kv, catalog, table_id)?;
+    let mut out = String::new();
+    if let Some(table) = table {
+        for inlined in table.inlined_data_tables {
+            out.push_str(&format!("inlined_table\t{}\n", inlined.table_name));
+        }
+    }
+    Ok(out.into_bytes())
+}
+
+pub(crate) fn list_null_only_columns(catalog: CatalogId, payload: &[u8]) -> CatalogResult<Vec<u8>> {
+    let table_id = TableId(payload_u64_value(payload, "table_id", "missing table_id")?);
+    let snapshot = crate::DuckLakeSnapshotId(payload_u64_value(
+        payload,
+        "snapshot_id",
+        "missing snapshot_id",
+    )?);
+    let kv = open_foundationdb_catalog()?;
+    let columns = crate::runtime_column_values::list_null_only_columns(
+        &kv,
+        catalog,
+        crate::runtime_column_values::ColumnValuesRequest {
+            table_id,
+            snapshot_id: snapshot,
+            columns: payload_u64_values(payload, "column_id")?
+                .into_iter()
+                .map(crate::ColumnId)
+                .collect(),
+        },
+    )?;
+    Ok(columns
+        .into_iter()
+        .map(|column| format!("null_only_column\t{}\n", column.0))
+        .collect::<String>()
+        .into_bytes())
+}
+
+pub(crate) fn get_table_schema_versions(
+    catalog: CatalogId,
+    payload: &[u8],
+) -> CatalogResult<Vec<u8>> {
+    let table_id = TableId(payload_u64_value(payload, "table_id", "missing table_id")?);
+    let snapshot = crate::DuckLakeSnapshotId(payload_u64_value(
+        payload,
+        "snapshot_id",
+        "missing snapshot_id",
+    )?);
+    let kv = open_foundationdb_catalog()?;
+    let versions = crate::runtime_table_schema_versions::TableSchemaVersions::load(
+        &kv, catalog, table_id, snapshot,
+    )?;
+    Ok(format!(
+        "creation={}\nlast_change={}\n",
+        versions
+            .creation
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        versions
+            .last_change
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+    )
+    .into_bytes())
+}
+
 pub(crate) fn lookup_begin_snapshot_for_schema_version(
     _backend: RuntimeCatalogBackend,
     catalog: CatalogId,
@@ -321,7 +391,8 @@ pub(crate) use delete_files::*;
 #[cfg(test)]
 use file_stats::partition_value_request;
 pub(crate) use file_stats::{
-    commit_column_mappings, list_column_mapping_rows, list_current_metadata_file_column_stats_rows,
+    TableColumnStatsMirrorRow, commit_column_mappings, list_column_mapping_rows,
+    list_current_metadata_file_column_stats_rows,
     list_current_metadata_file_column_stats_rows_for_data_file_ids, list_file_column_stats_rows,
     list_file_partition_value_rows_for_data_file_ids, list_global_stats_for_snapshot,
     list_global_stats_inputs_for_snapshot, list_snapshot_stats_and_changes_inputs,

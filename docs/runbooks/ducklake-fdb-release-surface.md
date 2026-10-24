@@ -28,7 +28,6 @@ runtime code paths.
 - `AUX_DUCKLAKE_RELEASE_UPSTREAM_MODE`
 - `AUX_DUCKLAKE_RELEASE_VERSION`
 - `AUX_DUCKLAKE_PACKAGE_PLATFORM`
-- `AUX_DUCKLAKE_DUCKDB_GIT_DESCRIBE`
 - `AUX_DUCKLAKE_REUSE_DUCKLAKE_BUILD`
 - `AUX_DUCKLAKE_RUST_SCCACHE`
 - `AUX_DUCKLAKE_SKIP_FETCH`
@@ -172,8 +171,10 @@ artifacts/aux-ducklake-fdb-v<ducklake-commit>-<platform>.tar.gz.sha256
 The package contains:
 
 - `opt/duckdb/duckdb`
-- `opt/duckdb/duckdb.h`
+- `opt/duckdb/duckdb.h` (C API v1)
+- `opt/duckdb/duckdb_v2.h` (C API v2)
 - `opt/duckdb/libduckdb*`
+- `opt/duckdb/libcurl.so*` on Linux (curl 8.23.0 for HTTPFS)
 - `opt/aux-ducklake/lib/libducklake_catalog.{so,dylib}`
 - `opt/aux-ducklake/lib/libfdb_c*` when the platform package manager provides
   the FoundationDB client library at build time
@@ -197,5 +198,83 @@ Required release platforms:
 - `linux-arm64`
 - `macos-arm64`
 
-macOS x86_64 is not a required release target for this pass. Add it only if a
+macOS x86_64 is not a required release target. Add it only if a
 consumer is identified and the build is covered by the same release entrypoints.
+
+## DuckDB 2.0 / DuckLake 1.1 integration
+
+The release pins live in `scripts/ducklake-upstream-pins.sh`. DuckLake has no release tag;
+the pin is the commit selected by DuckDB v2.0.0's extension configuration. The shared host
+reports `v2.0.0` even when the source checkout is shallow. Both `duckdb.h` and `duckdb_v2.h`
+are packaged; existing consumers continue to use the v1 C API.
+
+`just ducklake-release-smoke build/release/macos-arm64` verifies the extracted shared
+library, built-in extensions, the 1.1 SQL catalog and FoundationDB catalog, inline
+updates/deletes, flush history, schema evolution, nested schemas, sorted Parquet output,
+encrypted analytics-style writes/deletes, and detach/reattach. `scripts/release.sh` runs
+this proof for macOS. Linux container builds
+start an isolated FoundationDB server and run the same proof before exporting packages.
+The test clears only its unique FoundationDB prefix. It does not reset a shared database.
+It also serves a local Parquet file over HTTP and reads it with the curl client.
+Linux builds use Clang and package a checksum-pinned curl 8.23.0 shared library,
+because the new HTTPFS code requires APIs absent from UBI 9’s system curl headers.
+
+Update analytics pins with an explicit linked worktree and release tag:
+
+```sh
+./scripts/update-aux-repos.sh /path/to/aux-analytics-worktree <published-release-tag>
+```
+
+Use a published release tag with verified assets for every required platform. For an
+unpublished build, configure the analytics downloader with the custom bundle URL and
+SHA-256 inputs. The Rust binding must match the DuckDB revision in the bundle.
+
+Existing catalogs created by the previous development pin can report `1.1-dev1`.
+Use `AUTOMATIC_MIGRATION TRUE` explicitly when attaching those catalogs with the new
+library; analytics already sets this option. The upgrade proof creates the catalog with
+the old native binaries, reopens it
+with the new binaries, then checks inline/file reads, nested schemas, added defaults,
+flush, historical reads, and a second reopen. Version-1 schema rows remain readable
+because they are an existing persisted format.
+
+The upgrade performance report is [DuckDB 2.0 upgrade](../benchmarks/duckdb-2-upgrade.md).
+
+### Complete a release draft
+
+The Linux workflow creates a draft and verifies the release tag identifies the built
+commit. It never replaces published assets. Before publishing, build macOS from a clean
+checkout of the same tag, run `scripts/release.sh macos-arm64`, and retain the successful
+shared-library smoke receipt with the tag commit and artifact SHA-256. Compare
+`git rev-parse HEAD` with `git rev-parse "$tag^{commit}"` before attaching it.
+
+```sh
+# Run from the tagged macOS checkout after its release command succeeds.
+(cd artifacts && shasum -a 256 -c *-macos-arm64.tar.gz.sha256)
+# The tag must still identify the recorded Linux and macOS source commit.
+gh release view "$tag" --json isDraft --jq .isDraft  # must print true
+gh release upload "$tag" artifacts/*-macos-arm64.tar.gz artifacts/*-macos-arm64.tar.gz.sha256
+gh release view "$tag" --json assets --jq '.assets[].name'
+```
+
+Verify exactly one archive and matching checksum for each required platform. Download
+all three archives from the draft and verify their checksums before promotion. Publish
+only after all platform smoke receipts identify that tag's source and package hashes:
+`gh release edit "$tag" --draft=false`. Publishing is a separate release action; local
+builds and this dependency update do not authorize it.
+
+### Known support limits
+
+FoundationDB view-column comments/tags introduced in DuckLake 1.1 are rejected before
+commit. Whole-view comments retain their existing support.
+
+Historical reads after DELETE and inline flush in the *same transaction* fail in the
+old base as well as this upgrade. Current rows remain correct. Commit deletes before
+flushing when historical snapshots are required. The non-gating regression fixture is
+`scripts/test-fixtures/inline-delete-flush-time-travel.test`; it expects the correct
+historical result and remains a known failure. The release smoke separately requires
+historical correctness when deletes commit before flush.
+
+Changing the partition specification while old inline rows remain also fails flush in
+the old base and in this upgrade. Flush existing inline rows before changing the
+partition specification. The non-gating regression fixture is
+`scripts/test-fixtures/inline-partition-evolution.test`.

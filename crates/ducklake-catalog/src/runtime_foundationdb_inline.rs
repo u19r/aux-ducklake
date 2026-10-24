@@ -1,13 +1,11 @@
 #[cfg(feature = "foundationdb")]
 use std::collections::BTreeMap;
-#[cfg(all(feature = "foundationdb", not(test)))]
+#[cfg(feature = "foundationdb")]
 use std::sync::OnceLock;
 
-#[cfg(all(feature = "foundationdb", not(test)))]
-use crate::{
-    CatalogCacheNamespace,
-    bounded_cache::{BoundedCache, static_bounded_cache},
-};
+use crate::CatalogCacheNamespace;
+#[cfg(feature = "foundationdb")]
+use crate::bounded_cache::{BoundedCache, static_bounded_cache};
 
 use crate::{
     CatalogId, CatalogResult, InlineRowChangeKind, InlineTableChunkRow,
@@ -33,7 +31,8 @@ pub(crate) fn runtime_foundationdb_read_inline_rows(
     payload: ReadInlineRowsPayload,
 ) -> CatalogResult<Vec<u8>> {
     let kv = open_foundationdb_catalog()?;
-    read_foundationdb_inline_rows_payload(&kv, catalog, payload)
+    let read_kv = crate::runtime_file_listing::runtime_read_snapshot_kv(&kv)?;
+    read_foundationdb_inline_rows_payload(&read_kv, catalog, payload)
 }
 
 #[cfg(feature = "foundationdb")]
@@ -42,7 +41,8 @@ pub(crate) fn runtime_foundationdb_read_inline_rows_global_stats(
     payload: ReadInlineRowsPayload,
 ) -> CatalogResult<Vec<u8>> {
     let kv = open_foundationdb_catalog()?;
-    read_foundationdb_inline_rows_global_stats_payload(&kv, catalog, payload)
+    let read_kv = crate::runtime_file_listing::runtime_read_snapshot_kv(&kv)?;
+    read_foundationdb_inline_rows_global_stats_payload(&read_kv, catalog, payload)
 }
 
 #[cfg(feature = "foundationdb")]
@@ -51,7 +51,8 @@ pub(crate) fn runtime_foundationdb_read_inline_rows_aggregate_stats(
     payload: ReadInlineRowsPayload,
 ) -> CatalogResult<Vec<u8>> {
     let kv = open_foundationdb_catalog()?;
-    read_foundationdb_inline_rows_aggregate_stats_payload(&kv, catalog, payload)
+    let read_kv = crate::runtime_file_listing::runtime_read_snapshot_kv(&kv)?;
+    read_foundationdb_inline_rows_aggregate_stats_payload(&read_kv, catalog, payload)
 }
 
 #[cfg(feature = "foundationdb")]
@@ -60,10 +61,10 @@ pub(crate) fn runtime_foundationdb_read_inline_rows_global_stats_batch(
     payloads: Vec<ReadInlineRowsPayload>,
 ) -> CatalogResult<Vec<u8>> {
     let kv = open_foundationdb_catalog()?;
-    #[cfg(not(test))]
+    let read_kv = crate::runtime_file_listing::runtime_read_snapshot_kv(&kv)?;
     if crate::store::runtime_read_context_enabled() {
         let key = InlineGlobalStatsBatchCacheKey {
-            namespace: kv.catalog_cache_namespace(),
+            namespace: read_kv.catalog_cache_namespace(),
             catalog,
             requests: payloads
                 .iter()
@@ -79,14 +80,14 @@ pub(crate) fn runtime_foundationdb_read_inline_rows_global_stats_batch(
         if let Some(payload) = cache.get_ref(&key) {
             return Ok(payload);
         }
-        let result = read_inline_rows_global_stats_batch_payload(kv, catalog, payloads)?;
+        let result = read_inline_rows_global_stats_batch_payload(read_kv, catalog, payloads)?;
         cache.insert(key, result.clone());
         return Ok(result);
     }
-    read_inline_rows_global_stats_batch_payload(kv, catalog, payloads)
+    read_inline_rows_global_stats_batch_payload(read_kv, catalog, payloads)
 }
 
-#[cfg(all(feature = "foundationdb", not(test)))]
+#[cfg(feature = "foundationdb")]
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct InlineGlobalStatsBatchCacheKey {
     namespace: CatalogCacheNamespace,
@@ -94,15 +95,37 @@ struct InlineGlobalStatsBatchCacheKey {
     requests: Vec<(String, Option<crate::DuckLakeSnapshotId>)>,
 }
 
-#[cfg(all(feature = "foundationdb", not(test)))]
+#[cfg(feature = "foundationdb")]
 static INLINE_GLOBAL_STATS_BATCH_CACHE: OnceLock<
     BoundedCache<InlineGlobalStatsBatchCacheKey, Vec<u8>>,
 > = OnceLock::new();
 
-#[cfg(all(feature = "foundationdb", not(test)))]
+#[cfg(feature = "foundationdb")]
 fn inline_global_stats_batch_cache()
 -> &'static BoundedCache<InlineGlobalStatsBatchCacheKey, Vec<u8>> {
     static_bounded_cache(&INLINE_GLOBAL_STATS_BATCH_CACHE, 256)
+}
+
+#[cfg(feature = "foundationdb")]
+pub(crate) fn end_inline_global_stats_batch_read_context(
+    namespace: CatalogCacheNamespace,
+    catalog: CatalogId,
+    read_context_id: u64,
+) {
+    let namespace = namespace
+        .without_read_context()
+        .with_read_context(Some(read_context_id));
+    if let Some(cache) = INLINE_GLOBAL_STATS_BATCH_CACHE.get() {
+        cache.retain(|key, _| key.catalog != catalog || key.namespace != namespace);
+    }
+}
+
+#[cfg(not(feature = "foundationdb"))]
+pub(crate) fn end_inline_global_stats_batch_read_context(
+    _namespace: CatalogCacheNamespace,
+    _catalog: CatalogId,
+    _read_context_id: u64,
+) {
 }
 
 #[cfg(feature = "foundationdb")]
@@ -112,7 +135,8 @@ pub(crate) fn runtime_foundationdb_list_inline_row_changes(
     kind: InlineRowChangeKind,
 ) -> CatalogResult<Vec<u8>> {
     let kv = open_foundationdb_catalog()?;
-    inline_row_changes_payload(&kv, catalog, payload, kind)
+    let read_kv = crate::runtime_file_listing::runtime_read_snapshot_kv(&kv)?;
+    inline_row_changes_payload(&read_kv, catalog, payload, kind)
 }
 
 #[cfg(feature = "foundationdb")]

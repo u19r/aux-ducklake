@@ -1,4 +1,6 @@
 use std::ops::Deref;
+#[cfg(debug_assertions)]
+use std::sync::{Barrier, Mutex, OnceLock};
 
 use foundationdb::options::MutationType;
 
@@ -7,6 +9,7 @@ use crate::{
     CommitAttemptRow, DataFileId, DataFileRow, DataMutationCommit, FdbOrderedCatalogKv,
     FoundationDbErrorClass, RangeDirection, SnapshotRow, ValidityWindow,
     conflict::commit_attempt_key,
+    conflict_watermarks::stage_fdb_conflict_watermarks_initialized,
     fdb_data_mutation_staging::{
         stage_data_file, stage_expired_data_file_after_partition_lookup_cleanup,
         stage_partition_value_lookup_clears, stage_snapshot,
@@ -16,10 +19,13 @@ use crate::{
         committed_order, estimate_versionstamped_expire_bytes, incomplete_order,
         versionstamped_value,
     },
-    keys::{data_file_key, file_partition_value_prefix, snapshot_prefix},
+    keys::{
+        conflict_watermarks_initialized_key, data_file_key, file_partition_value_prefix,
+        snapshot_prefix,
+    },
 };
 
-pub(crate) const MAX_ASYNC_FDB_RETRIES: usize = 8;
+pub(crate) const MAX_FDB_READ_RETRIES: usize = 8;
 
 impl FdbOrderedCatalogKv {
     pub async fn initialize_catalog_if_absent_versionstamped_async(
@@ -27,7 +33,7 @@ impl FdbOrderedCatalogKv {
         catalog: CatalogId,
     ) -> CatalogResult<SnapshotRow> {
         let mut last_retry_error = None;
-        for _ in 0..=MAX_ASYNC_FDB_RETRIES {
+        for _ in 0..=MAX_FDB_READ_RETRIES {
             match self.latest_snapshot_async(catalog).await {
                 Ok(Some(row)) => return Ok(row),
                 Ok(None) => {}
@@ -41,7 +47,22 @@ impl FdbOrderedCatalogKv {
                 .initialize_empty_catalog_versionstamped_async(catalog)
                 .await
             {
-                Ok(row) => return Ok(row),
+                Ok(AsyncInitializeAttempt::Created(row)) => return Ok(row),
+                Ok(AsyncInitializeAttempt::AlreadyInitialized) => {
+                    match self.latest_snapshot_async(catalog).await {
+                        Ok(Some(row)) => return Ok(row),
+                        Ok(None) => {
+                            return Err(CatalogError::InvalidMutation(
+                                "foundationdb initialization marker exists without a snapshot"
+                                    .to_owned(),
+                            ));
+                        }
+                        Err(error) if is_retryable_async_catalog_error(&error) => {
+                            last_retry_error = Some(error);
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
                 Err(error) if is_retryable_async_catalog_error(&error) => {
                     last_retry_error = Some(error);
                 }
@@ -65,7 +86,7 @@ impl FdbOrderedCatalogKv {
             return Ok(DataMutationCommit::default());
         }
         let mut last_retry_error = None;
-        for _ in 0..=MAX_ASYNC_FDB_RETRIES {
+        for _ in 0..=MAX_FDB_READ_RETRIES {
             match self
                 .try_commit_data_files_versionstamped_async(catalog, attempt_id, data_files.clone())
                 .await?
@@ -150,7 +171,7 @@ impl FdbOrderedCatalogKv {
         data_file_id: DataFileId,
     ) -> CatalogResult<DataFileRow> {
         let mut last_retry_error = None;
-        for _ in 0..=MAX_ASYNC_FDB_RETRIES {
+        for _ in 0..=MAX_FDB_READ_RETRIES {
             match self
                 .try_expire_data_file_versionstamped_async(catalog, data_file_id)
                 .await?
@@ -219,18 +240,30 @@ impl FdbOrderedCatalogKv {
     async fn initialize_empty_catalog_versionstamped_async(
         &self,
         catalog: CatalogId,
-    ) -> CatalogResult<SnapshotRow> {
+    ) -> CatalogResult<AsyncInitializeAttempt> {
         let placeholder = incomplete_order();
         let row = SnapshotRow::initial(placeholder);
         let trx = self.create_transaction()?;
+        if trx
+            .get(
+                &self.namespaced_key(&conflict_watermarks_initialized_key(catalog)),
+                false,
+            )
+            .await
+            .map_err(map_fdb_error)?
+            .is_some()
+        {
+            return Ok(AsyncInitializeAttempt::AlreadyInitialized);
+        }
         stage_snapshot(self, &trx, catalog, &row)?;
+        stage_fdb_conflict_watermarks_initialized(self, &trx, catalog);
         let versionstamp = trx.get_versionstamp();
+        wait_for_initialize_commit_barrier(catalog);
         trx.commit().await.map_err(map_fdb_commit_error)?;
+        inject_initialize_commit_unknown(catalog)?;
         let order = committed_order(versionstamp.await.map_err(map_fdb_error)?.deref())?;
-        Ok(SnapshotRow::with_created_at_micros(
-            order,
-            row.sequence,
-            row.created_at_micros,
+        Ok(AsyncInitializeAttempt::Created(
+            SnapshotRow::with_created_at_micros(order, row.sequence, row.created_at_micros),
         ))
     }
 
@@ -261,9 +294,64 @@ impl FdbOrderedCatalogKv {
     }
 }
 
+#[cfg(debug_assertions)]
+fn inject_initialize_commit_unknown(catalog: CatalogId) -> CatalogResult<()> {
+    let Ok(request) = std::env::var("AUX_DUCKLAKE_TEST_FDB_INITIALIZE_UNKNOWN_ONCE") else {
+        return Ok(());
+    };
+    let Some(requested_catalog) = request
+        .strip_prefix("after:")
+        .and_then(|value| value.parse::<u64>().ok())
+    else {
+        return Ok(());
+    };
+    if requested_catalog != catalog.0 {
+        return Ok(());
+    }
+    let Ok(mut last_request) = LAST_INITIALIZE_UNKNOWN_INJECTION.lock() else {
+        return Ok(());
+    };
+    if last_request.as_ref() == Some(&request) {
+        return Ok(());
+    }
+    *last_request = Some(request);
+    Err(map_fdb_error(foundationdb::FdbError::from_code(1021)))
+}
+
+#[cfg(not(debug_assertions))]
+const fn inject_initialize_commit_unknown(_catalog: CatalogId) -> CatalogResult<()> {
+    Ok(())
+}
+
+#[cfg(debug_assertions)]
+static LAST_INITIALIZE_UNKNOWN_INJECTION: Mutex<Option<String>> = Mutex::new(None);
+
+#[cfg(debug_assertions)]
+static INITIALIZE_COMMIT_BARRIER: OnceLock<Barrier> = OnceLock::new();
+
+#[cfg(debug_assertions)]
+fn wait_for_initialize_commit_barrier(catalog: CatalogId) {
+    let barrier_catalog = std::env::var("AUX_DUCKLAKE_TEST_FDB_INITIALIZE_BARRIER")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok());
+    if barrier_catalog == Some(catalog.0) {
+        INITIALIZE_COMMIT_BARRIER
+            .get_or_init(|| Barrier::new(2))
+            .wait();
+    }
+}
+
+#[cfg(not(debug_assertions))]
+const fn wait_for_initialize_commit_barrier(_catalog: CatalogId) {}
+
 enum AsyncCommitAttempt {
     Done(DataMutationCommit),
     Retry(CatalogError),
+}
+
+enum AsyncInitializeAttempt {
+    Created(SnapshotRow),
+    AlreadyInitialized,
 }
 
 enum AsyncExpireAttempt {
@@ -289,6 +377,17 @@ pub(crate) fn is_retryable_async_catalog_error(error: &CatalogError) -> bool {
         ),
         _ => false,
     }
+}
+
+pub(crate) fn is_retryable_fdb_read_error(error: &CatalogError) -> bool {
+    matches!(
+        error,
+        CatalogError::FoundationDb {
+            class: FoundationDbErrorClass::RetryableNotCommitted
+                | FoundationDbErrorClass::Retryable,
+            ..
+        }
+    )
 }
 
 fn decode_snapshot_item(

@@ -1,6 +1,11 @@
 # aux-ducklake
 
+For working procedure, follow the [shared Aux guidance](../AGENTS.md).
+
 Follow the mandatory cross-repository contract in `../aux-infra/docs/code-style.md`.
+
+Before running Cargo, claim an APFS target slot using
+[the Cargo target-slot guide](../aux-infra/docs/cargo-target-slots.md).
 
 ## Boundaries
 

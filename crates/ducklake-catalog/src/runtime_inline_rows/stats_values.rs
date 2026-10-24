@@ -1,8 +1,6 @@
-use std::{cmp::Ordering, collections::BTreeMap};
+use std::collections::BTreeMap;
 
-use crate::CatalogResult;
-
-use crate::runtime_inline_rows::*;
+use crate::{CatalogResult, runtime_inline_rows::*};
 
 pub(super) fn accumulate_child_inline_stats(
     stats: &mut BTreeMap<u64, LiveColumnStats>,
@@ -15,18 +13,29 @@ pub(super) fn accumulate_child_inline_stats(
     let value = match decode_inline_stats_value(encoded)? {
         InlineStatsValue::Null => {
             for child in &column.children {
-                stats.entry(child.column_id).or_default().accumulate_null();
+                stats
+                    .entry(child.column_id)
+                    .or_insert_with(|| LiveColumnStats::new(child.scalar_type))
+                    .accumulate_null();
             }
             return Ok(());
         }
-        InlineStatsValue::Opaque => return Ok(()),
+        InlineStatsValue::Opaque => {
+            for child in &column.children {
+                stats
+                    .entry(child.column_id)
+                    .or_insert_with(|| LiveColumnStats::new(child.scalar_type))
+                    .accumulate_unknown();
+            }
+            return Ok(());
+        }
         InlineStatsValue::Comparable(value) => value,
     };
     let type_name = column.column_type.to_ascii_lowercase();
     if type_name == "list" || type_name.ends_with("[]") {
         if let Some(child) = column.children.first() {
             for item in parse_inline_list_values(&value) {
-                accumulate_inline_text_value(stats, child.column_id, item);
+                accumulate_inline_text_value(stats, child, item);
             }
         }
         return Ok(());
@@ -35,8 +44,11 @@ pub(super) fn accumulate_child_inline_stats(
         let fields = parse_inline_struct_values(&value);
         for child in &column.children {
             match fields.iter().find(|(name, _)| name == &child.name) {
-                Some((_, value)) => accumulate_inline_text_value(stats, child.column_id, value),
-                None => stats.entry(child.column_id).or_default().accumulate_null(),
+                Some((_, value)) => accumulate_inline_text_value(stats, child, value),
+                None => stats
+                    .entry(child.column_id)
+                    .or_insert_with(|| LiveColumnStats::new(child.scalar_type))
+                    .accumulate_null(),
             }
         }
     }
@@ -45,17 +57,20 @@ pub(super) fn accumulate_child_inline_stats(
 
 pub(super) fn accumulate_inline_text_value(
     stats: &mut BTreeMap<u64, LiveColumnStats>,
-    column_id: u64,
+    column: &InlineStatsChildColumn,
     value: &str,
 ) {
     let value = value.trim();
     if value.eq_ignore_ascii_case("NULL") {
-        stats.entry(column_id).or_default().accumulate_null();
+        stats
+            .entry(column.column_id)
+            .or_insert_with(|| LiveColumnStats::new(column.scalar_type))
+            .accumulate_null();
         return;
     }
     stats
-        .entry(column_id)
-        .or_default()
+        .entry(column.column_id)
+        .or_insert_with(|| LiveColumnStats::new(column.scalar_type))
         .accumulate_comparable(unquote_inline_scalar(value));
 }
 
@@ -139,10 +154,7 @@ pub(super) fn decode_inline_stats_value(encoded: &str) -> CatalogResult<InlineSt
     if let Some(value) = encoded.strip_prefix("v:") {
         return Ok(InlineStatsValue::Comparable(hex_decode(value)?));
     }
-    if let Some(value) = encoded.strip_prefix("x:") {
-        return Ok(InlineStatsValue::Comparable(hex_decode(value)?));
-    }
-    if encoded.starts_with("d:") {
+    if encoded.starts_with("x:") || encoded.starts_with("d:") {
         return Ok(InlineStatsValue::Opaque);
     }
     match encoded {
@@ -161,8 +173,7 @@ pub(super) fn hex_decode(value: &str) -> CatalogResult<String> {
         ));
     }
     let mut bytes = Vec::with_capacity(value.len() / 2);
-    let mut chars = value.as_bytes().chunks_exact(2);
-    for chunk in &mut chars {
+    for chunk in value.as_bytes().as_chunks::<2>().0 {
         let high = hex_nibble(chunk[0])?;
         let low = hex_nibble(chunk[1])?;
         bytes.push((high << 4) | low);
@@ -180,12 +191,5 @@ pub(super) fn hex_nibble(byte: u8) -> CatalogResult<u8> {
         _ => Err(crate::CatalogError::Decode(
             "inline stats payload has invalid hex".to_owned(),
         )),
-    }
-}
-
-pub(super) fn stats_value_cmp(left: &str, right: &str) -> Ordering {
-    match (left.parse::<i64>(), right.parse::<i64>()) {
-        (Ok(left), Ok(right)) => left.cmp(&right),
-        _ => left.cmp(right),
     }
 }

@@ -13,6 +13,19 @@ For normal use, prefer the packaged full DuckDB build. DuckLake is compiled into
 The aux FoundationDB catalog is opt-in. A patched DuckLake build behaves like regular DuckLake until
 you attach with `META_TYPE 'aux_catalog'` and provide the aux runtime environment.
 
+## Embedded Host Provenance
+
+An embedded consumer must link to the `libduckdb.{dylib,so}` built from the same patched
+`third_party/ducklake/` checkout as `ducklake.duckdb_extension`, and must pair both with the matching
+`libducklake_catalog` runtime. Verify the process maps that declared DuckDB library before attaching;
+then prove the pair with a full `ATTACH ... META_TYPE 'aux_catalog'` against FoundationDB. A successful
+`LOAD` alone does not prove the aux catalog is active.
+
+Do not use stock or prebuilt DuckDB hosts for aux-catalog embedding. In particular, the current
+aux-duckdb bundle statically links upstream DuckLake and does not provide the patched `aux_catalog`
+manager; a `LOAD`-only check there is not valid parity evidence. Use the matching patched DuckDB
+host/library, extension, and runtime from one aux-ducklake build instead.
+
 ## Pick A Runtime Shape
 
 Use the packaged full DuckDB build when:
@@ -69,6 +82,27 @@ set an explicit value for shared or long-lived catalogs so they do not collide w
 Set `AUX_DUCKLAKE_RUNTIME_CATALOG_IDENTITY` only when the metadata path, database, and schema should
 not define the stable catalog identity.
 
+## Catalog Snapshot Fences
+
+For a FoundationDB catalog attached with `META_TYPE 'aux_catalog'`, a transaction can
+require the catalog snapshot to remain unchanged until commit:
+
+```sql
+BEGIN;
+CALL ducklake_set_transaction_fence('dl');
+INSERT INTO dl.main.items VALUES (3, 'gamma');
+COMMIT;
+```
+
+The function captures the transaction's catalog snapshot. If another transaction advances
+that catalog snapshot before this transaction commits, the fenced commit fails with a
+snapshot-fence conflict and publishes no partial mutation. Retry the complete transaction
+against a fresh snapshot.
+
+Fenced transactions support atomic data and inline-row mutations. Schema changes,
+configuration changes, and maintenance operations are rejected. Enable the fence before
+performing the mutations it protects.
+
 ## Release Artifacts
 
 Release archives are written under `artifacts/`:
@@ -83,7 +117,9 @@ The archive contains:
 ```text
 opt/duckdb/duckdb
 opt/duckdb/duckdb.h
+opt/duckdb/duckdb_v2.h
 opt/duckdb/libduckdb*
+opt/duckdb/libcurl.so*           # Linux HTTPFS runtime
 opt/aux-ducklake/lib/libducklake_catalog.{so,dylib}
 opt/aux-ducklake/lib/libfdb_c*    # when available to the platform package build
 ```
@@ -248,7 +284,8 @@ target/debug/libducklake_catalog.dylib
 target/debug/libducklake_catalog.so
 ```
 
-The safest host shell is the debug DuckDB binary built from the same checkout:
+The safest host shell is the debug DuckDB binary built from the same checkout. For embedded consumers,
+link its sibling `third_party/ducklake/build/debug/src/libduckdb.{dylib,so}` as well:
 
 ```sh
 export AUX_DUCKLAKE_CATALOG_BACKEND=fdb
@@ -266,7 +303,7 @@ Inside that matching shell, load DuckLake:
 LOAD ducklake;
 ```
 
-From another compatible DuckDB binary, load the extension by absolute path:
+From an embedded host built from that same patched checkout, load the extension by absolute path:
 
 ```sql
 LOAD '/absolute/path/to/ducklake.duckdb_extension';
@@ -287,8 +324,10 @@ SELECT * FROM dl.main.items ORDER BY id;
 ```
 
 Do not copy a standalone extension to an unrelated DuckDB installation unless the host DuckDB ABI,
-platform, extension signing policy, and extension-loading policy are known to match. If extension
-loading fails, retry with `third_party/ducklake/build/debug/duckdb` before changing anything else.
+platform, extension signing policy, and extension-loading policy are known to match. For an embedded
+consumer, matching the extension ABI is not enough: the mapped host library must also come from the
+same patched build. If extension loading fails, retry with
+`third_party/ducklake/build/debug/duckdb` before changing anything else.
 
 If you want release-mode performance, use the combined release DuckDB binary instead of a standalone
 extension:
@@ -433,9 +472,11 @@ cluster, and `AUX_DUCKLAKE_FDB_PREFIX` is set to the expected catalog-owned pref
 
 `META_TYPE 'aux_catalog'` is not recognized:
 
-The loaded DuckLake extension is not the patched aux-ducklake build. Use the packaged DuckDB binary
-or load `third_party/ducklake/build/debug/extension/ducklake/ducklake.duckdb_extension` into a
-compatible DuckDB binary.
+The loaded DuckLake extension or host is not the patched aux-ducklake build. Use the packaged DuckDB
+binary, or link the matching `third_party/ducklake/build/debug/src/libduckdb.{dylib,so}` and load
+`third_party/ducklake/build/debug/extension/ducklake/ducklake.duckdb_extension`. The aux-duckdb
+upstream bundle is not a valid aux-catalog host. Confirm the mapped library and complete a full
+`ATTACH ... META_TYPE 'aux_catalog'` probe; `LOAD` alone is insufficient.
 
 Extension load errors:
 

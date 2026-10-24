@@ -54,7 +54,7 @@ mod perf_tests {
         assert_eq!(table_sum, 999_000);
         assert_eq!(column_sum, 0);
         let report = guard.finish();
-        emit_report(&report);
+        emit_report(&report).expect("emit allocation report");
     }
 
     #[test]

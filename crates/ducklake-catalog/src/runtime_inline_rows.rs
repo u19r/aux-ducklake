@@ -5,11 +5,11 @@ use std::sync::OnceLock;
 use crate::CatalogCacheNamespace;
 #[cfg(not(test))]
 use crate::bounded_cache::{BoundedCache, static_bounded_cache};
-use crate::runtime_metrics::RuntimeMetricStage;
 use crate::{
     CatalogId, CatalogResult, OrderedCatalogKv, SchemaId, SnapshotRow, TableRow,
     inline_data::{InlineTablePayloadRow, list_unflushed_inline_table_payloads_at},
     inline_read_schema::table_row_for_inline_schema,
+    runtime_metrics::RuntimeMetricStage,
     runtime_snapshot_range::{ChangeFeedEndSnapshot, ChangeFeedStartSnapshot, ReadSnapshot},
 };
 
@@ -29,16 +29,6 @@ pub(crate) struct InlineRowChangesPayload {
     pub(crate) table_name: String,
     pub(crate) start_snapshot: ChangeFeedStartSnapshot,
     pub(crate) end_snapshot: ChangeFeedEndSnapshot,
-}
-
-#[derive(Clone)]
-pub(crate) struct InlineFlushDeletePositionsPayload {
-    pub(crate) table_name: String,
-    pub(crate) snapshot: ReadSnapshot,
-    pub(crate) file_order: Option<String>,
-    pub(crate) partition_filter: Option<String>,
-    pub(crate) position_start: Option<u64>,
-    pub(crate) position_end: Option<u64>,
 }
 
 pub(crate) fn read_inline_rows_payload(
@@ -308,10 +298,9 @@ mod change_feed;
 mod current_stats;
 #[cfg(all(test, feature = "foundationdb"))]
 mod current_stats_tests;
-mod flush_deletions;
-mod flush_partition;
-mod flush_sort;
+mod deletion_index;
 mod geometry_stats;
+mod global_stats;
 mod read_payload;
 mod stats_accumulator;
 mod stats_values;
@@ -320,10 +309,9 @@ mod table_resolution;
 pub(crate) use change_feed::*;
 #[cfg(feature = "foundationdb")]
 pub(crate) use current_stats::*;
-pub(crate) use flush_deletions::*;
-use flush_partition::*;
-use flush_sort::*;
+use deletion_index::*;
 use geometry_stats::*;
+use global_stats::*;
 use read_payload::*;
 use stats_accumulator::*;
 use stats_values::*;

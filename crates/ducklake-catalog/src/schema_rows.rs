@@ -7,6 +7,7 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaRow {
     pub schema_id: SchemaId,
+    pub parent_schema_id: Option<SchemaId>,
     pub uuid: String,
     pub name: String,
     pub path: String,
@@ -14,7 +15,7 @@ pub struct SchemaRow {
 }
 
 impl SchemaRow {
-    const VERSION: u8 = 1;
+    const VERSION: u8 = 2;
     #[cfg(feature = "foundationdb")]
     pub(crate) const BEGIN_ORDER_BYTES_OFFSET: usize = 1 + 8 + 1;
     #[cfg(feature = "foundationdb")]
@@ -31,6 +32,7 @@ impl SchemaRow {
     ) -> Self {
         Self {
             schema_id,
+            parent_schema_id: None,
             uuid: uuid.into(),
             name: name.into(),
             path: path.into(),
@@ -59,12 +61,19 @@ impl SchemaRow {
         encode_string(&mut out, &self.uuid);
         encode_string(&mut out, &self.name);
         encode_string(&mut out, &self.path);
+        match self.parent_schema_id {
+            Some(parent) => {
+                out.push(1);
+                out.extend_from_slice(&parent.0.to_be_bytes());
+            }
+            None => out.push(0),
+        }
         out
     }
 
     pub fn decode(bytes: &[u8]) -> CatalogResult<Self> {
         match bytes.first().copied() {
-            Some(Self::VERSION) => {}
+            Some(1 | Self::VERSION) => {}
             Some(other) => {
                 return Err(CatalogError::Decode(format!(
                     "unsupported schema row version {other}"
@@ -75,37 +84,67 @@ impl SchemaRow {
 
         let mut cursor = 1;
         let schema_id = SchemaId(decode_fixed_u64(bytes, &mut cursor, "schema_id")?);
-        let begin_order = decode_stored_order(
-            read_bytes(bytes, &mut cursor, STORED_ORDER_LEN)?,
-            "begin_order",
-        )?;
-        let has_end = *read_bytes(bytes, &mut cursor, 1)?
-            .first()
-            .ok_or_else(|| CatalogError::Decode("missing schema end marker".to_owned()))?;
-        let decoded_end = decode_stored_order(
-            read_bytes(bytes, &mut cursor, STORED_ORDER_LEN)?,
-            "end_order",
-        )?;
-        let end_order = match has_end {
-            0 => None,
-            1 => Some(decoded_end),
-            other => {
-                return Err(CatalogError::Decode(format!(
-                    "invalid schema end marker {other}"
-                )));
-            }
-        };
+        let validity = decode_schema_validity(bytes, &mut cursor)?;
         let uuid = decode_string(bytes, &mut cursor, "schema uuid")?;
         let name = decode_string(bytes, &mut cursor, "schema name")?;
         let path = decode_string(bytes, &mut cursor, "schema path")?;
+        let parent_schema_id = decode_parent_schema(bytes, &mut cursor)?;
         Ok(Self {
             schema_id,
+            parent_schema_id,
             uuid,
             name,
             path,
-            validity: ValidityWindow::new(begin_order, end_order),
+            validity,
         })
     }
+}
+
+fn decode_schema_validity(bytes: &[u8], cursor: &mut usize) -> CatalogResult<ValidityWindow> {
+    let begin_order =
+        decode_stored_order(read_bytes(bytes, cursor, STORED_ORDER_LEN)?, "begin_order")?;
+    let has_end = *read_bytes(bytes, cursor, 1)?
+        .first()
+        .ok_or_else(|| CatalogError::Decode("missing schema end marker".to_owned()))?;
+    let decoded_end =
+        decode_stored_order(read_bytes(bytes, cursor, STORED_ORDER_LEN)?, "end_order")?;
+    let end_order = match has_end {
+        0 => None,
+        1 => Some(decoded_end),
+        other => {
+            return Err(CatalogError::Decode(format!(
+                "invalid schema end marker {other}"
+            )));
+        }
+    };
+    Ok(ValidityWindow::new(begin_order, end_order))
+}
+
+fn decode_parent_schema(bytes: &[u8], cursor: &mut usize) -> CatalogResult<Option<SchemaId>> {
+    // Version 1 is the existing persisted top-level schema format.
+    let parent_schema_id = if bytes[0] == 1 {
+        None
+    } else {
+        match read_bytes(bytes, cursor, 1)?[0] {
+            0 => None,
+            1 => Some(SchemaId(decode_fixed_u64(
+                bytes,
+                cursor,
+                "parent schema id",
+            )?)),
+            other => {
+                return Err(CatalogError::Decode(format!(
+                    "invalid parent schema marker {other}"
+                )));
+            }
+        }
+    };
+    // Existing v1 FDB key mutations also stored the unused value-offset trailer.
+    let has_legacy_offset = bytes[0] == 1 && bytes[*cursor..] == 10_u32.to_le_bytes();
+    if *cursor != bytes.len() && !has_legacy_offset {
+        return Err(CatalogError::Decode("trailing schema row bytes".to_owned()));
+    }
+    Ok(parent_schema_id)
 }
 
 fn encode_string(out: &mut Vec<u8>, value: &str) {

@@ -35,6 +35,7 @@ mod tests {
     #[cfg(feature = "foundationdb")]
     use super::super::{
         PartitionBatchFileIndex, PartitionPruneComparison, matching_partition_values,
+        partition_value_matches,
     };
 
     #[cfg(feature = "foundationdb")]
@@ -337,6 +338,191 @@ mod tests {
             buckets.into_iter().collect::<BTreeSet<_>>(),
             BTreeSet::from(["2".to_owned(), "10".to_owned()])
         );
+    }
+
+    #[cfg(feature = "foundationdb")]
+    #[test]
+    fn given_distinct_high_precision_decimals_when_pruning_for_equality_then_only_exact_value_matches()
+     {
+        let catalog = CatalogId(1);
+        let table_id = TableId(10);
+        let mut kv = FakeOrderedCatalogKv::new();
+        for (data_file_id, partition_value) in [
+            (DataFileId(7), "9007199254740992"),
+            (DataFileId(8), "9007199254740993"),
+        ] {
+            let data_file = DataFileRow::new(
+                data_file_id,
+                table_id,
+                format!("main/orders/{partition_value}.parquet"),
+                1,
+                1024,
+                CatalogOrderId::uuid_v7(0),
+            );
+            let partition = FilePartitionValueRow::new(
+                data_file_id,
+                table_id,
+                PartitionKeyIndex(0),
+                partition_value,
+            );
+            let mut batch = KvBatch::new();
+            stage_file_partition_value(&mut batch, catalog, &partition, &data_file);
+            kv.commit(batch).unwrap();
+        }
+
+        let matches = matching_partition_values(
+            &kv,
+            catalog,
+            table_id,
+            PartitionKeyIndex(0),
+            "DECIMAL(38, 0)",
+            PartitionPruneComparison::Equal,
+            "9007199254740992",
+        )
+        .unwrap();
+
+        assert_eq!(matches, vec!["9007199254740992"]);
+    }
+
+    #[cfg(feature = "foundationdb")]
+    #[test]
+    fn given_adjacent_high_precision_fractional_decimals_when_pruning_then_all_orderings_are_exact()
+    {
+        for column_type in ["DECIMAL(38, 17)", "NUMERIC(38, 17)"] {
+            assert!(partition_value_matches(
+                "1.00000000000000001",
+                column_type,
+                PartitionPruneComparison::LessThan,
+                "1.00000000000000002",
+            ));
+            assert!(partition_value_matches(
+                "1.00000000000000001",
+                column_type,
+                PartitionPruneComparison::LessThanOrEqual,
+                "1.00000000000000002",
+            ));
+            assert!(!partition_value_matches(
+                "1.00000000000000001",
+                column_type,
+                PartitionPruneComparison::GreaterThan,
+                "1.00000000000000002",
+            ));
+            assert!(!partition_value_matches(
+                "1.00000000000000001",
+                column_type,
+                PartitionPruneComparison::GreaterThanOrEqual,
+                "1.00000000000000002",
+            ));
+            assert!(partition_value_matches(
+                "1.00000000000000002",
+                column_type,
+                PartitionPruneComparison::GreaterThan,
+                "1.00000000000000001",
+            ));
+            assert!(partition_value_matches(
+                "1.00000000000000002",
+                column_type,
+                PartitionPruneComparison::GreaterThanOrEqual,
+                "1.00000000000000001",
+            ));
+            assert!(!partition_value_matches(
+                "1.00000000000000002",
+                column_type,
+                PartitionPruneComparison::LessThan,
+                "1.00000000000000001",
+            ));
+            assert!(!partition_value_matches(
+                "1.00000000000000002",
+                column_type,
+                PartitionPruneComparison::LessThanOrEqual,
+                "1.00000000000000001",
+            ));
+            assert!(!partition_value_matches(
+                "1.00000000000000001",
+                column_type,
+                PartitionPruneComparison::Equal,
+                "1.00000000000000002",
+            ));
+            assert!(!partition_value_matches(
+                "1.00000000000000002",
+                column_type,
+                PartitionPruneComparison::Equal,
+                "1.00000000000000001",
+            ));
+        }
+    }
+
+    #[cfg(feature = "foundationdb")]
+    #[test]
+    fn given_high_precision_decimals_when_pruning_ranges_then_exact_order_is_preserved() {
+        for (candidate, comparison, boundary) in [
+            (
+                "9007199254740993",
+                PartitionPruneComparison::GreaterThan,
+                "9007199254740992",
+            ),
+            (
+                "-9007199254740993",
+                PartitionPruneComparison::LessThan,
+                "-9007199254740992",
+            ),
+            ("0.001", PartitionPruneComparison::LessThan, "0.01"),
+            ("10", PartitionPruneComparison::GreaterThan, "9.999"),
+            ("-0.001", PartitionPruneComparison::LessThan, "0"),
+            ("1e100", PartitionPruneComparison::GreaterThan, "9e99"),
+            ("1e-100", PartitionPruneComparison::GreaterThan, "9e-101"),
+        ] {
+            assert!(partition_value_matches(
+                candidate,
+                "DECIMAL(38, 10)",
+                comparison,
+                boundary,
+            ));
+        }
+    }
+
+    #[cfg(feature = "foundationdb")]
+    #[test]
+    fn given_equivalent_decimal_spellings_when_pruning_for_equality_then_values_match() {
+        for candidate in ["1.2", "1.20", "+01.200e0", "0.12E1"] {
+            assert!(partition_value_matches(
+                candidate,
+                "DECIMAL(38, 10)",
+                PartitionPruneComparison::Equal,
+                "1.2000",
+            ));
+        }
+        assert!(partition_value_matches(
+            "-0.000",
+            "DECIMAL(38, 10)",
+            PartitionPruneComparison::Equal,
+            "0",
+        ));
+    }
+
+    #[cfg(feature = "foundationdb")]
+    #[test]
+    fn given_unparseable_numeric_partition_when_pruning_then_candidate_is_retained() {
+        for column_type in ["BIGINT", "DECIMAL(38, 10)", "DOUBLE"] {
+            assert!(partition_value_matches(
+                "not-a-number",
+                column_type,
+                PartitionPruneComparison::LessThan,
+                "10",
+            ));
+            assert!(partition_value_matches(
+                "10",
+                column_type,
+                PartitionPruneComparison::GreaterThan,
+                "not-a-number",
+            ));
+        }
+        assert!(partition_value_matches(
+            "NaN",
+            "DOUBLE",
+            PartitionPruneComparison::Equal,
+            "NaN",
+        ));
     }
 
     #[test]

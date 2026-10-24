@@ -34,16 +34,16 @@ SQL
 realistic_row_tail_sql() {
     local payload_bytes="$1" payload_repeats="$2" column
     case "${varied_schema:-legacy}" in
-        narrow)
-            cat <<SQL
+    narrow)
+        cat <<SQL
     i % 2 = 0,
     DATE '2020-01-01' + (i % 365)::INTEGER,
     i::DOUBLE / 7.0,
     left(repeat(md5((($table_index::BIGINT * 1000000000::BIGINT) + i::BIGINT)::VARCHAR), $payload_repeats), $payload_bytes)
 SQL
-            ;;
-        mixed)
-            cat <<SQL
+        ;;
+    mixed)
+        cat <<SQL
     i % 2 = 0,
     DATE '2020-01-01' + (i % 365)::INTEGER,
     TIMESTAMP '2020-01-01 00:00:00' + i * INTERVAL 1 SECOND,
@@ -53,19 +53,19 @@ SQL
     'note_' || (i % 97)::VARCHAR,
     left(repeat(md5((($table_index::BIGINT * 1000000000::BIGINT) + i::BIGINT)::VARCHAR), $payload_repeats), $payload_bytes)
 SQL
-            ;;
-        wide)
-            for ((column = 4; column < 47; column++)); do
-                printf '    i + %s,\n' "$column"
-            done
-            printf '    left(repeat(md5(((%s::BIGINT * 1000000000::BIGINT) + i::BIGINT)::VARCHAR), %s), %s)\n' "$table_index" "$payload_repeats" "$payload_bytes"
-            ;;
-        legacy)
-            for ((column = 1; column <= 19; column++)); do
-                printf '    i + %s,\n' "$column"
-            done
-            printf '    left(repeat(md5(((%s::BIGINT * 1000000000::BIGINT) + i::BIGINT)::VARCHAR), %s), %s)\n' "$table_index" "$payload_repeats" "$payload_bytes"
-            ;;
+        ;;
+    wide)
+        for ((column = 4; column < 47; column++)); do
+            printf '    i + %s,\n' "$column"
+        done
+        printf '    left(repeat(md5(((%s::BIGINT * 1000000000::BIGINT) + i::BIGINT)::VARCHAR), %s), %s)\n' "$table_index" "$payload_repeats" "$payload_bytes"
+        ;;
+    legacy)
+        for ((column = 1; column <= 19; column++)); do
+            printf '    i + %s,\n' "$column"
+        done
+        printf '    left(repeat(md5(((%s::BIGINT * 1000000000::BIGINT) + i::BIGINT)::VARCHAR), %s), %s)\n' "$table_index" "$payload_repeats" "$payload_bytes"
+        ;;
     esac
 }
 
@@ -82,7 +82,7 @@ CREATE TABLE dl.main.$table_name(
 $(realistic_schema_tail_sql)
 );
 SQL
-        if [[ "$profile" == "varied" ]]; then
+        if [[ "${profile:?benchmark profile is required}" == "varied" ]]; then
             cat <<SQL
 ALTER TABLE dl.main.$table_name SET PARTITIONED BY (bucket);
 ALTER TABLE dl.main.$table_name SET SORTED BY (id ASC NULLS FIRST);
@@ -94,16 +94,16 @@ SQL
 realistic_schema_tail_sql() {
     local column
     case "${varied_schema:-legacy}" in
-        narrow)
-            cat <<'SQL'
+    narrow)
+        cat <<'SQL'
     is_active BOOLEAN,
     event_date DATE,
     score DOUBLE,
     payload VARCHAR
 SQL
-            ;;
-        mixed)
-            cat <<'SQL'
+        ;;
+    mixed)
+        cat <<'SQL'
     is_active BOOLEAN,
     event_date DATE,
     event_at TIMESTAMP,
@@ -113,28 +113,28 @@ SQL
     note VARCHAR,
     payload VARCHAR
 SQL
-            ;;
-        wide)
-            for ((column = 4; column < 47; column++)); do
-                printf '    c%02d BIGINT,\n' "$column"
-            done
-            printf '    payload VARCHAR\n'
-            ;;
-        legacy)
-            for ((column = 3; column <= 21; column++)); do
-                printf '    c%02d BIGINT,\n' "$column"
-            done
-            printf '    payload VARCHAR\n'
-            ;;
+        ;;
+    wide)
+        for ((column = 4; column < 47; column++)); do
+            printf '    c%02d BIGINT,\n' "$column"
+        done
+        printf '    payload VARCHAR\n'
+        ;;
+    legacy)
+        for ((column = 3; column <= 21; column++)); do
+            printf '    c%02d BIGINT,\n' "$column"
+        done
+        printf '    payload VARCHAR\n'
+        ;;
     esac
 }
 
 realistic_schema_column_count() {
     case "${varied_schema:-legacy}" in
-        narrow) printf '8\n' ;;
-        mixed) printf '12\n' ;;
-        wide) printf '48\n' ;;
-        legacy) printf '24\n' ;;
+    narrow) printf '8\n' ;;
+    mixed) printf '12\n' ;;
+    wide) printf '48\n' ;;
+    legacy) printf '24\n' ;;
     esac
 }
 
@@ -363,7 +363,7 @@ INSERT INTO dl.main.$table_name
 SELECT i::INTEGER, $table::INTEGER, 'inline_' || i::VARCHAR
 FROM range(1, $((first_rows + 1))) t(i);
 SQL
-    if [[ "$inline_flush_interval" == "each_batch" ]]; then
+    if [[ "${inline_flush_interval:?inline flush interval is required}" == "each_batch" ]]; then
         printf "CALL ducklake_flush_inlined_data('dl', table_name => '%s');\n" "$table_name"
     fi
     cat <<SQL
@@ -371,7 +371,7 @@ INSERT INTO dl.main.$table_name
 SELECT i::INTEGER, $table::INTEGER, 'inline_' || i::VARCHAR
 FROM range($((first_rows + 1)), $((first_rows + second_rows + 1))) t(i);
 SQL
-    if [[ "$inline_flush_interval" == "each_batch" ]]; then
+    if [[ "${inline_flush_interval:?inline flush interval is required}" == "each_batch" ]]; then
         printf "CALL ducklake_flush_inlined_data('dl', table_name => '%s');\n" "$table_name"
     fi
     cat <<SQL
@@ -405,48 +405,49 @@ inline_micro_step_sql() {
     local table_name
     table_name="inline_$(realistic_table_name "$table")"
     case "$step" in
-        create)
-            cat <<SQL
+    create)
+        cat <<SQL
 CREATE TABLE dl.main.$table_name(id INTEGER, table_index INTEGER, note VARCHAR);
 SELECT 'inline_micro_step=' || '$table_name' || ',create';
 SQL
-            ;;
-        insert_first)
-            cat <<SQL
+        ;;
+    insert_first)
+        cat <<SQL
 INSERT INTO dl.main.$table_name
 SELECT i::INTEGER, $table::INTEGER, 'inline_' || i::VARCHAR
 FROM range(1, $((first_rows + 1))) t(i);
 SELECT 'inline_micro_step=' || '$table_name' || ',insert_first';
 SQL
-            ;;
-        insert_second)
-            cat <<SQL
+        ;;
+    insert_second)
+        cat <<SQL
 INSERT INTO dl.main.$table_name
 SELECT i::INTEGER, $table::INTEGER, 'inline_' || i::VARCHAR
 FROM range($((first_rows + 1)), $((first_rows + second_rows + 1))) t(i);
 SELECT 'inline_micro_step=' || '$table_name' || ',insert_second';
 SQL
-            ;;
-        delete)
-            cat <<SQL
+        ;;
+    delete)
+        cat <<SQL
 DELETE FROM dl.main.$table_name WHERE id <= $delete_rows;
 SELECT 'inline_micro_step=' || '$table_name' || ',delete';
 SQL
-            ;;
-        flush_read)
-            cat <<SQL
+        ;;
+    flush_read)
+        cat <<SQL
 CALL ducklake_flush_inlined_data('dl', table_name => '$table_name');
 SELECT 'inline_micro_table=' || '$table_name' || ',' || count(*) || ',' || coalesce(sum(id), 0)
 FROM dl.main.$table_name;
 SQL
-            ;;
-        *) fail "unknown inline micro step $step" ;;
+        ;;
+    *) fail "unknown inline micro step $step" ;;
     esac
 }
 
 realistic_compaction_sql() {
     local count="$1"
-    local batch_size="${2:-$(default_varied_tables_per_transaction "$count")}"
+    local batch_size
+    batch_size="${2:-$(default_varied_tables_per_transaction "$count")}"
     local table table_name
     for ((table = 0; table < count; table++)); do
         if ((table % batch_size == 0)); then

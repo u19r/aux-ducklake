@@ -635,7 +635,7 @@ fn decode_inline_row_change_key(
     })
 }
 
-fn decode_schema_kind_inline_row_change_key(
+pub(crate) fn decode_schema_kind_inline_row_change_key(
     table_id: TableId,
     schema_id: SchemaId,
     kind: InlineRowChangeKind,

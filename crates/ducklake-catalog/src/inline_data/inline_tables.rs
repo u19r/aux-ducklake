@@ -879,7 +879,7 @@ pub(crate) fn inline_chunk_visible_at(
         && end_order.is_none_or(|end_order| snapshot_order < end_order)
 }
 
-fn decode_inline_end_marker(
+pub(crate) fn decode_inline_end_marker(
     prefix: &[u8],
     key: &[u8],
     snapshot_order: CatalogOrderId,

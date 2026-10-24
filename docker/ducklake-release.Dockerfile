@@ -1,13 +1,19 @@
 # syntax=docker/dockerfile:1.7
 
-FROM registry.access.redhat.com/ubi9/ubi:9.8@sha256:50701171b9917ed51048b614924598d45b00bce9a64b73860c057922fc13bec2 AS builder
+FROM registry.access.redhat.com/ubi9/ubi:9.8@sha256:217dd5692d369799d34d09ffb6f5f3404efebc7900834490fdf9ae92fd6721d4 AS builder
 
 ARG FDB_VERSION=7.4.6
-ARG CROARING_VERSION=4.3.12
-ARG POSTGRES_VERSION=18.3
+ARG CROARING_VERSION=5.3.2
+ARG POSTGRES_VERSION=18.6
 ARG DUCKDB_PLATFORM=linux_amd64
 ARG AUX_DUCKLAKE_PACKAGE_PLATFORM=linux-amd64
 ARG AUX_DUCKLAKE_RELEASE_VERSION
+
+COPY --chmod=755 scripts/install-mold.sh /usr/local/bin/install-mold.sh
+ENV RUSTFLAGS="-C link-arg=-B/opt/aux-mold-3.0.0/libexec/mold -C link-arg=-fuse-ld=bfd"
+ENV LDFLAGS="-B/opt/aux-mold-3.0.0/libexec/mold"
+ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/opt/aux-mold-3.0.0/bin/mold-cc
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/opt/aux-mold-3.0.0/bin/mold-cc
 
 RUN set -eux; \
     arch="$(uname -m)"; \
@@ -41,8 +47,11 @@ RUN set -eux; \
         which \
         xz; \
     dnf install -y "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-clients-${FDB_VERSION}-1.el9.${fdb_arch}.rpm"; \
+    dnf install -y "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-server-${FDB_VERSION}-1.el9.${fdb_arch}.rpm"; \
     dnf clean all; \
     rm -rf /var/cache/dnf
+
+RUN /usr/local/bin/install-mold.sh
 
 RUN set -eux; \
     curl -fsSL "https://github.com/RoaringBitmap/CRoaring/archive/refs/tags/v${CROARING_VERSION}.tar.gz" | tar -xz -C /tmp; \
@@ -88,18 +97,44 @@ RUN set -eux; \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 ENV PATH="/root/.cargo/bin:/opt/postgresql/bin:${PATH}"
 
+ARG CURL_VERSION=8.23.0
+ARG CURL_SHA256=8dadd7d2536a314f982ad05a651b713f426bf7d02cc2c76cffb9796f2218e6c5
+RUN set -eux; \
+    dnf install -y libnghttp2-devel zlib-devel; \
+    dnf clean all; \
+    curl -fsSLo /tmp/curl.tar.xz "https://curl.se/download/curl-${CURL_VERSION}.tar.xz"; \
+    printf '%s  %s\n' "$CURL_SHA256" /tmp/curl.tar.xz | sha256sum -c -; \
+    tar -xf /tmp/curl.tar.xz -C /tmp; \
+    cmake -G Ninja -S "/tmp/curl-${CURL_VERSION}" -B /tmp/curl-build \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/opt/curl \
+        -DCMAKE_INSTALL_LIBDIR=lib -DBUILD_SHARED_LIBS=ON \
+        -DBUILD_CURL_EXE=OFF -DBUILD_TESTING=OFF -DHTTP_ONLY=ON \
+        -DCURL_USE_OPENSSL=ON -DCURL_USE_LIBPSL=OFF -DUSE_NGHTTP2=ON; \
+    cmake --build /tmp/curl-build --parallel 4; \
+    cmake --install /tmp/curl-build; \
+    rm -rf /tmp/curl.tar.xz "/tmp/curl-${CURL_VERSION}" /tmp/curl-build
+
 WORKDIR /workspace
 COPY . .
 
 ENV AUX_DUCKLAKE_SKIP_FETCH=1
 ENV DUCKDB_PLATFORM=${DUCKDB_PLATFORM}
 ENV GEN=ninja
+ENV CC=/usr/bin/clang
+ENV CXX=/usr/bin/clang++
 ENV CMAKE_PREFIX_PATH=/opt/croaring
+ENV AUX_DUCKLAKE_CURL_ROOT=/opt/curl
+ENV PKG_CONFIG_PATH=/opt/curl/lib/pkgconfig
 ENV CARGO_TARGET_DIR=/workspace/target/docker-release
 ENV AUX_DUCKLAKE_RELEASE_VERSION=${AUX_DUCKLAKE_RELEASE_VERSION}
 
-RUN ./scripts/build_ducklake_release.sh
-RUN ./scripts/package_ducklake_release.sh "${AUX_DUCKLAKE_PACKAGE_PLATFORM}"
+RUN --mount=type=cache,id=aux-ducklake-rust-${DUCKDB_PLATFORM},target=/workspace/target/docker-release \
+    --mount=type=cache,id=aux-ducklake-cpp-clang-${DUCKDB_PLATFORM},target=/workspace/third_party/ducklake/build \
+    --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    ./scripts/build_ducklake_release.sh && \
+    ./scripts/package_ducklake_release.sh "${AUX_DUCKLAKE_PACKAGE_PLATFORM}" && \
+    bash ./scripts/ducklake-release-container-smoke.sh "build/release/${AUX_DUCKLAKE_PACKAGE_PLATFORM}"
 
 FROM scratch AS export
 COPY --from=builder /workspace/artifacts/ /artifacts/

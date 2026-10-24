@@ -20,10 +20,11 @@ use ducklake_catalog::{
     commit_change_table_partition, commit_change_table_sort, commit_drop_table_columns,
     commit_rename_table_columns, commit_rename_tables, expire_data_file, expire_snapshots,
     keys::{
-        conflict_fence_key, current_delete_file_key, current_schema_version_key, delete_file_key,
-        inline_live_row_key,
+        conflict_fence_key, conflict_max_catalog_id_key, conflict_max_file_id_key,
+        conflict_watermarks_initialized_key, current_delete_file_key, current_schema_version_key,
+        delete_file_key, inline_live_row_key,
     },
-    latest_snapshot, list_current_data_files,
+    latest_snapshot, list_all_snapshots, list_current_data_files,
     list_current_data_files_for_partition_scan_with_deletes, list_current_data_files_with_deletes,
     list_data_file_changes, list_data_file_changes_since_base, list_data_files_at,
     list_data_files_with_deletes_at, list_inline_file_deletions_at,
@@ -35,6 +36,209 @@ use ducklake_catalog::{
     remove_old_data_files, remove_old_delete_files, remove_old_inline_table_payloads,
     snapshot_by_public_sequence,
 };
+
+#[test]
+fn given_fdb_empty_catalog_when_initialized_then_conflict_watermarks_marker_is_staged() {
+    if live_fdb_disabled() {
+        return;
+    }
+
+    let catalog = CatalogId(91);
+    let kv = FdbOrderedCatalogKv::open_default_with_prefix(
+        unique_prefix("conflict-watermarks-initializer").into_bytes(),
+    )
+    .unwrap();
+
+    kv.initialize_catalog_if_absent_versionstamped(catalog)
+        .unwrap();
+
+    assert_eq!(
+        kv.get(&conflict_watermarks_initialized_key(catalog))
+            .unwrap(),
+        Some(vec![1])
+    );
+    assert_eq!(
+        kv.get(&conflict_max_catalog_id_key(catalog)).unwrap(),
+        Some(0_u64.to_be_bytes().to_vec())
+    );
+    assert_eq!(kv.get(&conflict_max_file_id_key(catalog)).unwrap(), None);
+}
+
+#[test]
+fn given_async_fdb_empty_catalog_when_initialized_then_conflict_watermarks_marker_is_staged() {
+    if live_fdb_disabled() {
+        return;
+    }
+
+    let catalog = CatalogId(92);
+    let kv = FdbOrderedCatalogKv::open_default_with_prefix(
+        unique_prefix("conflict-watermarks-async-initializer").into_bytes(),
+    )
+    .unwrap();
+
+    futures::executor::block_on(kv.initialize_catalog_if_absent_versionstamped_async(catalog))
+        .unwrap();
+
+    assert_eq!(
+        kv.get(&conflict_watermarks_initialized_key(catalog))
+            .unwrap(),
+        Some(vec![1])
+    );
+    assert_eq!(
+        kv.get(&conflict_max_catalog_id_key(catalog)).unwrap(),
+        Some(0_u64.to_be_bytes().to_vec())
+    );
+    assert_eq!(kv.get(&conflict_max_file_id_key(catalog)).unwrap(), None);
+}
+
+#[test]
+fn given_concurrent_async_initialization_commits_before_1021_when_retried_then_snapshot_is_written_once()
+ {
+    if live_fdb_disabled() {
+        return;
+    }
+
+    let catalog = CatalogId(94);
+    let prefix = unique_prefix("async-initializer-maybe-committed");
+    let kv = FdbOrderedCatalogKv::open_default_with_prefix(prefix.into_bytes()).unwrap();
+    unsafe {
+        std::env::set_var(
+            "AUX_DUCKLAKE_TEST_FDB_INITIALIZE_BARRIER",
+            catalog.0.to_string(),
+        );
+        std::env::set_var(
+            "AUX_DUCKLAKE_TEST_FDB_INITIALIZE_UNKNOWN_ONCE",
+            format!("after:{}", catalog.0),
+        );
+    }
+
+    let first_kv = kv.clone();
+    let first = std::thread::spawn(move || {
+        futures::executor::block_on(
+            first_kv.initialize_catalog_if_absent_versionstamped_async(catalog),
+        )
+    });
+    let second_kv = kv.clone();
+    let second = std::thread::spawn(move || {
+        futures::executor::block_on(
+            second_kv.initialize_catalog_if_absent_versionstamped_async(catalog),
+        )
+    });
+    let first = first.join().unwrap().unwrap();
+    let second = second.join().unwrap().unwrap();
+
+    unsafe {
+        std::env::remove_var("AUX_DUCKLAKE_TEST_FDB_INITIALIZE_BARRIER");
+        std::env::remove_var("AUX_DUCKLAKE_TEST_FDB_INITIALIZE_UNKNOWN_ONCE");
+    }
+    let snapshots = list_all_snapshots(&kv, catalog).unwrap();
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "initialization published duplicate snapshots"
+    );
+    assert_eq!(first, snapshots[0]);
+    assert_eq!(second, snapshots[0]);
+    assert_eq!(
+        kv.get(&conflict_watermarks_initialized_key(catalog))
+            .unwrap(),
+        Some(vec![1])
+    );
+}
+
+#[test]
+fn given_concurrent_sync_initialization_commits_before_1021_when_retried_then_snapshot_is_written_once()
+ {
+    if live_fdb_disabled() {
+        return;
+    }
+
+    let catalog = CatalogId(9_500);
+    let prefix = unique_prefix("sync-initializer-maybe-committed");
+    let kv = FdbOrderedCatalogKv::open_default_with_prefix(prefix.into_bytes()).unwrap();
+    unsafe {
+        std::env::set_var(
+            "AUX_DUCKLAKE_TEST_FDB_SYNC_INITIALIZE_BARRIER",
+            catalog.0.to_string(),
+        );
+        std::env::set_var(
+            "AUX_DUCKLAKE_TEST_FDB_SYNC_INITIALIZE_UNKNOWN_ONCE",
+            format!("after:{}", catalog.0),
+        );
+    }
+
+    let first_kv = kv.clone();
+    let first =
+        std::thread::spawn(move || first_kv.initialize_catalog_if_absent_versionstamped(catalog));
+    let second_kv = kv.clone();
+    let second =
+        std::thread::spawn(move || second_kv.initialize_catalog_if_absent_versionstamped(catalog));
+    let first = first.join().unwrap();
+    let second = second.join().unwrap();
+
+    unsafe {
+        std::env::remove_var("AUX_DUCKLAKE_TEST_FDB_SYNC_INITIALIZE_BARRIER");
+        std::env::remove_var("AUX_DUCKLAKE_TEST_FDB_SYNC_INITIALIZE_UNKNOWN_ONCE");
+    }
+    let first = first.unwrap();
+    let second = second.unwrap();
+    let snapshots = list_all_snapshots(&kv, catalog).unwrap();
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "initialization published duplicate snapshots"
+    );
+    assert_eq!(first, snapshots[0]);
+    assert_eq!(second, snapshots[0]);
+    assert_eq!(
+        kv.get(&conflict_watermarks_initialized_key(catalog))
+            .unwrap(),
+        Some(vec![1])
+    );
+}
+
+#[test]
+fn given_direct_fdb_append_when_committed_then_max_file_id_watermark_advances() {
+    if live_fdb_disabled() {
+        return;
+    }
+
+    let catalog = CatalogId(93);
+    let table = TableId(93);
+    let kv = FdbOrderedCatalogKv::open_default_with_prefix(
+        unique_prefix("conflict-watermarks-append").into_bytes(),
+    )
+    .unwrap();
+    kv.initialize_catalog_if_absent_versionstamped(catalog)
+        .unwrap();
+    let base_order = latest_snapshot(&kv, catalog).unwrap().unwrap().order;
+
+    let AppendCommitResult::Committed(row) = kv
+        .commit_append_data_file_versionstamped(
+            catalog,
+            CommitAttemptId(93),
+            base_order,
+            base_order,
+            DataFileRow::new(
+                DataFileId(7),
+                table,
+                "conflict-watermarks-append.parquet",
+                1,
+                64,
+                base_order,
+            ),
+        )
+        .unwrap()
+    else {
+        panic!("direct FDB append should publish");
+    };
+
+    assert_eq!(row.data_file_id, DataFileId(7));
+    assert_eq!(
+        kv.get(&conflict_max_file_id_key(catalog)).unwrap(),
+        Some(7u64.to_be_bytes().to_vec())
+    );
+}
 
 #[test]
 fn given_data_file_max_partial_is_current_commit_when_committed_then_stored_order_is_versionstamped()
@@ -854,6 +1058,145 @@ fn fdb_live_implicit_main_schema_and_first_table_share_public_snapshot_when_enab
         public_snapshot_sequence_for_order(&kv, catalog, created.validity.begin_order).unwrap(),
         Some(DuckLakeSnapshotId(1))
     );
+}
+
+#[test]
+fn given_fresh_fdb_catalog_when_main_and_runtime_objects_are_reopened_then_schema_ids_remain_distinct()
+ {
+    if live_fdb_disabled() {
+        return;
+    }
+
+    let catalog = CatalogId(95);
+    let main_table = TableId(95);
+    let runtime_table = TableId(96);
+    let runtime_view = TableId(97);
+    let prefix = unique_prefix("schema-id-reopen");
+    let kv = FdbOrderedCatalogKv::open_default_with_prefix(prefix.clone().into_bytes()).unwrap();
+    let initial = kv
+        .initialize_catalog_if_absent_versionstamped(catalog)
+        .unwrap();
+    let max_catalog_id_bytes: [u8; 8] = kv
+        .get(&conflict_max_catalog_id_key(catalog))
+        .unwrap()
+        .expect("fresh catalog must reserve implicit main schema id")
+        .try_into()
+        .unwrap();
+    let runtime_schema_id = SchemaId(u64::from_be_bytes(max_catalog_id_bytes) + 1);
+    assert_eq!(runtime_schema_id, SchemaId(1));
+
+    kv.create_schemas_versionstamped(
+        catalog,
+        vec![SchemaRow::new(
+            runtime_schema_id,
+            "runtime-schema-uuid",
+            "runtime_schema",
+            "runtime_schema/",
+            initial.order,
+        )],
+        None,
+    )
+    .unwrap();
+    kv.create_table_versionstamped(
+        catalog,
+        TableRow::with_catalog_metadata(
+            main_table,
+            SchemaId(0),
+            "main-table-uuid",
+            "main_qualified",
+            "main/main_qualified",
+            vec![TableColumnRow::new(
+                ColumnId(1),
+                "id",
+                "INTEGER",
+                false,
+                None,
+            )],
+            initial.order,
+        ),
+        None,
+    )
+    .unwrap();
+    kv.create_table_versionstamped(
+        catalog,
+        TableRow::with_catalog_metadata(
+            runtime_table,
+            runtime_schema_id,
+            "runtime-table-uuid",
+            "runtime_ctas",
+            "runtime_schema/runtime_ctas",
+            vec![TableColumnRow::new(
+                ColumnId(1),
+                "id",
+                "INTEGER",
+                false,
+                None,
+            )],
+            initial.order,
+        ),
+        None,
+    )
+    .unwrap();
+    kv.create_view_versionstamped(
+        catalog,
+        ViewRow::new(
+            runtime_view,
+            runtime_schema_id,
+            ducklake_catalog::ViewDefinition::new(
+                "runtime-view-uuid",
+                "runtime_view",
+                "duckdb",
+                "SELECT 1 AS id",
+                vec!["id".to_owned()],
+            ),
+            initial.order,
+        ),
+    )
+    .unwrap();
+
+    let latest = latest_snapshot(&kv, catalog).unwrap().unwrap();
+    let assert_catalog_state = |kv: &FdbOrderedCatalogKv| {
+        let latest = latest_snapshot(kv, catalog).unwrap().unwrap();
+        let schemas = list_schemas_at(kv, catalog, latest.order).unwrap();
+        assert_eq!(
+            schemas
+                .iter()
+                .map(|schema| schema.schema_id)
+                .collect::<Vec<_>>(),
+            vec![runtime_schema_id]
+        );
+        let tables = list_tables_at(kv, catalog, latest.order).unwrap();
+        assert_eq!(
+            tables
+                .iter()
+                .find(|table| table.table_id == main_table)
+                .unwrap()
+                .schema_id,
+            SchemaId(0)
+        );
+        assert_eq!(
+            tables
+                .iter()
+                .find(|table| table.table_id == runtime_table)
+                .unwrap()
+                .schema_id,
+            runtime_schema_id
+        );
+        let views = list_views_at(kv, catalog, latest.order).unwrap();
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].view_id, runtime_view);
+        assert_eq!(views[0].schema_id, runtime_schema_id);
+        assert_eq!(
+            kv.get(&conflict_max_catalog_id_key(catalog)).unwrap(),
+            Some(runtime_view.0.to_be_bytes().to_vec())
+        );
+    };
+    assert_eq!(latest.sequence.0, 4);
+    assert_catalog_state(&kv);
+    drop(kv);
+
+    let reopened = FdbOrderedCatalogKv::open_default_with_prefix(prefix.into_bytes()).unwrap();
+    assert_catalog_state(&reopened);
 }
 
 #[test]

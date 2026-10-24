@@ -47,14 +47,24 @@ pub(crate) fn create_schemas_payload_values(
                 )?));
             }
             ["read_snapshot", _] => {}
-            ["schema", id, uuid, name, path] => {
-                schemas.push(SchemaRow::new(
+            ["schema", id, uuid, name, path, parent] => {
+                let mut schema = SchemaRow::new(
                     SchemaId(parse_u64_field(CREATE_SCHEMAS, id, "schema id")?),
                     *uuid,
                     *name,
                     *path,
                     CatalogOrderId::uuid_v7(0),
-                ));
+                );
+                schema.parent_schema_id = if parent.is_empty() {
+                    None
+                } else {
+                    Some(SchemaId(parse_u64_field(
+                        CREATE_SCHEMAS,
+                        parent,
+                        "parent schema id",
+                    )?))
+                };
+                schemas.push(schema);
             }
             _ => return Err(row.invalid()),
         }
@@ -66,8 +76,15 @@ fn create_schemas_payload(created: Vec<SchemaRow>) -> Vec<u8> {
     let mut out = format!("created_schema_count={}\n", created.len());
     for schema in created {
         out.push_str(&format!(
-            "schema\t{}\t{}\t{}\t{}\n",
-            schema.schema_id.0, schema.uuid, schema.name, schema.path
+            "schema\t{}\t{}\t{}\t{}\t{}\n",
+            schema.schema_id.0,
+            schema.uuid,
+            schema.name,
+            schema.path,
+            schema
+                .parent_schema_id
+                .map(|id| id.0.to_string())
+                .unwrap_or_default()
         ));
     }
     out.into_bytes()

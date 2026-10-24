@@ -15,6 +15,7 @@ use crate::{
     inline_read_schema::table_row_for_inline_schema,
     latest_snapshot, list_current_data_files_with_deletes, list_data_files_with_deletes_at,
     list_inline_row_payload_changes, list_snapshots, public_snapshot_sequence_for_order,
+    runtime_inline_rows::*,
     runtime_snapshot_range::{ChangeFeedEndSnapshot, ChangeFeedStartSnapshot},
     runtime_snapshots::{
         ducklake_snapshot_order_span as cached_ducklake_snapshot_order_span,
@@ -22,8 +23,6 @@ use crate::{
     },
     snapshot_by_public_sequence,
 };
-
-use crate::runtime_inline_rows::*;
 
 pub(crate) fn inline_row_changes_payload(
     kv: &impl OrderedCatalogKv,
@@ -351,9 +350,16 @@ pub(super) fn append_snapshot_aware_rows(
         if matches!(input.stats_mode, InlineStatsMode::ExactVisible) {
             catalog_stats.accumulate_visible_row(row_id, &fields[2..])?;
         }
+        let end_snapshot = input
+            .render_context
+            .deleted_rows
+            .end_snapshot_for(row_id, begin_snapshot)
+            .map(|snapshot| snapshot.to_string())
+            .unwrap_or_default();
         out.push_str(&format!(
-            "row_change\t{}\t\t{}\t{}\n",
+            "row_change\t{}\t{}\t{}\t{}\n",
             begin_snapshot,
+            end_snapshot,
             fields[1],
             fields[2..].join("\t")
         ));

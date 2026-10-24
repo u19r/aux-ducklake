@@ -29,15 +29,15 @@ USAGE
 keep_tmp=0
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
-        --keep-tmp) keep_tmp=1 ;;
-        -h | --help)
-            usage
-            exit 0
-            ;;
-        *)
-            usage >&2
-            fail "unknown argument: $1"
-            ;;
+    --keep-tmp) keep_tmp=1 ;;
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    *)
+        usage >&2
+        fail "unknown argument: $1"
+        ;;
     esac
     shift
 done
@@ -50,6 +50,8 @@ echo "drill_step=build_ducklake"
 if ! ducklake_reuse_debug_build_enabled; then
     AUX_DUCKLAKE_SKIP_FETCH=1 "$ROOT_DIR/scripts/build_ducklake_debug.sh"
 fi
+ducklake_validate_debug_artifacts "$ROOT_DIR" "$DUCKLAKE_DIR" ||
+    fail "debug DuckLake artifacts are stale or do not match the canonical source tree"
 [[ -x "$DUCKDB_BIN" ]] || fail "modified duckdb executable was not built"
 
 tmp_dir="$(mktemp -d)"
@@ -73,7 +75,8 @@ export AUX_DUCKLAKE_RUNTIME_CATALOG_IDENTITY="$runtime_catalog_identity"
 
 echo "drill_step=seed_source_catalog"
 set +e
-source_output="$("$DUCKDB_BIN" -batch 2>&1 <<SQL
+source_output="$(
+    "$DUCKDB_BIN" -batch 2>&1 <<SQL
 LOAD ducklake;
 ATTACH 'ducklake:$tmp_dir/source-metadata.duckdb' AS dl (
     DATA_PATH '$data_dir',
@@ -118,12 +121,13 @@ assert_contains "$clone_output" "copied_key_count="
 
 copied_key_count="$(awk -F= '/^copied_key_count=/ { print $2 }' <<<"$clone_output")"
 [[ "$copied_key_count" =~ ^[0-9]+$ ]] || fail "missing copied key count"
-(( copied_key_count > 0 )) || fail "expected copied key count to be non-zero"
+((copied_key_count > 0)) || fail "expected copied key count to be non-zero"
 
 echo "drill_step=read_restored_catalog"
 export AUX_DUCKLAKE_FDB_PREFIX="$restored_prefix"
 set +e
-restored_output="$("$DUCKDB_BIN" -batch 2>&1 <<SQL
+restored_output="$(
+    "$DUCKDB_BIN" -batch 2>&1 <<SQL
 LOAD ducklake;
 ATTACH 'ducklake:$tmp_dir/restored-metadata.duckdb' AS dl (
     DATA_PATH '$data_dir',

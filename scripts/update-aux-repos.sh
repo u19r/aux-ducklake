@@ -1,77 +1,63 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-workspace_dir="$(cd "$script_dir/../.." && pwd)"
+if [[ "$#" != 2 ]]; then
+    echo "usage: scripts/update-aux-repos.sh <analytics-worktree> <release-tag>" >&2
+    exit 1
+fi
 
-previous_release_tag="v0.1.4"
-release_tag="v0.1.5"
-release_build="v2856687c"
+root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+analytics_dir="$(cd "$1" && pwd)"
+release_tag="$2"
+. "$root_dir/scripts/ducklake-upstream-pins.sh"
+release_build="v${DUCKLAKE_COMMIT:0:8}"
 
-require_literal() {
-    local relative_path="$1"
-    local value="$2"
-    local path="$workspace_dir/$relative_path"
-
-    if [[ ! -f "$path" ]]; then
-        echo "Missing release consumer: $path" >&2
-        return 1
-    fi
-    if ! grep -Fq "$value" "$path"; then
-        echo "Expected release pin not found in $path: $value" >&2
-        return 1
-    fi
+[[ -f "$analytics_dir/.git" ]] || {
+    echo "analytics must be a linked Git worktree: $analytics_dir" >&2
+    exit 1
+}
+[[ "$release_tag" =~ ^v[0-9]+[.][0-9]+[.][0-9]+$ ]] || {
+    echo "release tag must have the form v0.1.7" >&2
+    exit 1
 }
 
-replace_literal() {
-    local relative_path="$1"
-    local old_value="$2"
-    local new_value="$3"
-    local path="$workspace_dir/$relative_path"
-
-    if [[ -f "$path" ]] && grep -Fq "$old_value" "$path"; then
-        AUX_UPDATE_OLD="$old_value" AUX_UPDATE_NEW="$new_value" perl -0pi -e '
-            BEGIN {
-                $old = $ENV{"AUX_UPDATE_OLD"};
-                $new = $ENV{"AUX_UPDATE_NEW"};
-            }
-            s/\Q$old\E/$new/g;
-        ' "$path"
-        echo "Updated $relative_path"
-    fi
-    require_literal "$relative_path" "$new_value"
+consumer="$analytics_dir/scripts/download-duckdb-bundle.sh"
+previous_tag="$(sed -n 's/.*AUX_DUCKLAKE_RELEASE_TAG:=\([^}]*\)}.*/\1/p' "$consumer")"
+previous_build="$(sed -n 's/.*AUX_DUCKLAKE_RELEASE_BUILD:=\([^}]*\)}.*/\1/p' "$consumer")"
+[[ -n "$previous_tag" && -n "$previous_build" ]] || {
+    echo "missing analytics bundle release pins: $consumer" >&2
+    exit 1
 }
 
-for relative_path in \
-    aux-fn/docker-bake.hcl \
-    aux-fn/docker/Dockerfile \
-    aux-fn/docker/aux-fn-compose.Dockerfile \
-    aux-fn/docker/test.Dockerfile \
-    aux-fn/docker/scripts/download_duckdb_bundle.sh \
-    aux-analytics/docker-bake.hcl \
-    aux-analytics/docker/aux-analytics.Dockerfile \
-    aux-analytics/docker/analytics-canary.Dockerfile \
-    aux-analytics/docker/scripts/download_duckdb_bundle.sh; do
-    replace_literal "$relative_path" "$previous_release_tag" "$release_tag"
-    require_literal "$relative_path" "$release_build"
+consumers=(
+    docker-bake.hcl
+    docker/aux-analytics.Dockerfile
+    docker/analytics-canary.Dockerfile
+    scripts/download-duckdb-bundle.sh
+    docker/README.md
+)
+for consumer in "${consumers[@]}"; do
+    if ! grep -Fq "$previous_tag" "$analytics_dir/$consumer" ||
+        ! grep -Fq "$previous_build" "$analytics_dir/$consumer"; then
+        echo "inconsistent analytics release tag: $consumer" >&2
+        exit 1
+    fi
 done
 
-replace_literal \
-    aux-analytics/docker/README.md \
-    "release \`$previous_release_tag\`" \
-    "release \`$release_tag\`"
+for consumer in "${consumers[@]}"; do
+    AUX_UPDATE_OLD_TAG="$previous_tag" AUX_UPDATE_OLD_BUILD="$previous_build" \
+        AUX_UPDATE_TAG="$release_tag" AUX_UPDATE_BUILD="$release_build" \
+        perl -0pi -e '
+            s/\Q$ENV{AUX_UPDATE_OLD_TAG}\E/$ENV{AUX_UPDATE_TAG}/g;
+            s/\Q$ENV{AUX_UPDATE_OLD_BUILD}\E/$ENV{AUX_UPDATE_BUILD}/g;
+        ' "$analytics_dir/$consumer"
+done
 
-replace_literal \
-    aux-infra/crates/infra-ops/src/github_runners.rs \
-    "AUX_DUCKLAKE_RELEASE_TAG: &str = \"$previous_release_tag\"" \
-    "AUX_DUCKLAKE_RELEASE_TAG: &str = \"$release_tag\""
-require_literal \
-    aux-infra/crates/infra-ops/src/github_runners.rs \
-    "AUX_DUCKLAKE_RELEASE_BUILD: &str = \"$release_build\""
-replace_literal \
-    aux-infra/crates/infra-ops/src/github_runners_tests.rs \
-    "AUX_DUCKLAKE_RELEASE_TAG=$previous_release_tag" \
-    "AUX_DUCKLAKE_RELEASE_TAG=$release_tag"
-require_literal \
-    aux-infra/crates/infra-ops/src/github_runners_tests.rs \
-    "AUX_DUCKLAKE_RELEASE_BUILD=$release_build"
+for consumer in "${consumers[@]}"; do
+    grep -Fq "$release_tag" "$analytics_dir/$consumer"
+    grep -Fq "$release_build" "$analytics_dir/$consumer"
+done
+
+echo "analytics_release_tag=$release_tag"
+echo "analytics_release_build=$release_build"
+echo "analytics_worktree=$analytics_dir"

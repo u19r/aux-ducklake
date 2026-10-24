@@ -33,7 +33,7 @@ mod perf_tests {
             );
         }
         let report = guard.finish();
-        emit_report(&report);
+        emit_report(&report).expect("emit allocation report");
     }
 
     #[test]

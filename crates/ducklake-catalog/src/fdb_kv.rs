@@ -1,16 +1,15 @@
 use std::ops::Deref;
 
-use foundationdb::{
-    RangeOption,
-    options::{ConflictRangeType, TransactionOption},
-};
-use futures::{TryStreamExt, executor::block_on, future::try_join_all};
+use foundationdb::options::ConflictRangeType;
+use futures::{executor::block_on, future::try_join_all};
 
 use crate::runtime_metrics::RuntimeMetricStage;
 use crate::{
     CatalogError, CatalogId, CatalogOrderId, CatalogResult, FdbOrderedCatalogKv, KvBatch,
     MutableCatalogKv, OrderedCatalogKv, RangeDirection, RangeItem, RawSnapshotSequence,
     TableVersionReplacement,
+    fdb_async::{MAX_FDB_READ_RETRIES, is_retryable_fdb_read_error},
+    fdb_cleanup::{SyncFdbScanBudget, SyncFdbScanRequest, scan_range_all_with_budget},
     fdb_runtime::{decode_fence_version, map_fdb_commit_error, map_fdb_error},
     fdb_versionstamp::batch_exceeds_commit_limit,
     keys::prefix_end,
@@ -65,6 +64,38 @@ macro_rules! record_range_result {
 }
 
 impl FdbOrderedCatalogKv {
+    fn retry_sync_fdb_read<T, State, Read, Reset>(
+        operation: &'static str,
+        mut state: State,
+        mut read: Read,
+        mut reset: Reset,
+    ) -> CatalogResult<T>
+    where
+        Read: FnMut(&State) -> Result<T, foundationdb::FdbError>,
+        Reset: FnMut(State, foundationdb::FdbError) -> CatalogResult<State>,
+    {
+        for attempt_index in 0..=MAX_FDB_READ_RETRIES {
+            match read(&state) {
+                Ok(value) => return Ok(value),
+                Err(error) => {
+                    let catalog_error = map_fdb_error(error);
+                    if !is_retryable_fdb_read_error(&catalog_error) {
+                        return Err(catalog_error);
+                    }
+                    if attempt_index == MAX_FDB_READ_RETRIES {
+                        return Err(sync_fdb_read_retry_exhausted(
+                            operation,
+                            attempt_index.saturating_add(1),
+                            catalog_error,
+                        ));
+                    }
+                    state = reset(state, error)?;
+                }
+            }
+        }
+        unreachable!("foundationdb sync read retry loop did not run")
+    }
+
     fn commit_batch(&self, batch: KvBatch) -> CatalogResult<()> {
         let started = RuntimeMetricStage::start();
         let mutation_bytes = batch.estimated_mutation_bytes();
@@ -149,10 +180,17 @@ impl OrderedCatalogKv for FdbOrderedCatalogKv {
 
     fn get(&self, key: &[u8]) -> CatalogResult<Option<Vec<u8>>> {
         let started = RuntimeMetricStage::start();
+        let namespaced = self.namespaced_key(key);
         let trx = self.create_transaction()?;
-        let result = block_on(trx.get(&self.namespaced_key(key), false))
-            .map_err(map_fdb_error)
-            .map(|value| value.map(|bytes| bytes.deref().to_vec()));
+        let result = Self::retry_sync_fdb_read(
+            "get",
+            trx,
+            |trx| {
+                block_on(trx.get(&namespaced, false))
+                    .map(|value| value.map(|bytes| bytes.deref().to_vec()))
+            },
+            |trx, error| self.reset_read_transaction_after_error(trx, error),
+        );
         record_kv_result!(
             "get",
             key,
@@ -167,17 +205,22 @@ impl OrderedCatalogKv for FdbOrderedCatalogKv {
     fn batch_get(&self, keys: &[Vec<u8>]) -> CatalogResult<Vec<Option<Vec<u8>>>> {
         let started = RuntimeMetricStage::start();
         let trx = self.create_transaction()?;
-        let trx = &trx;
-        let reads = keys.iter().map(|key| {
-            let namespaced = self.namespaced_key(key);
-            async move {
-                trx.get(&namespaced, false)
-                    .await
-                    .map_err(map_fdb_error)
-                    .map(|value| value.map(|bytes| bytes.deref().to_vec()))
-            }
-        });
-        let result = block_on(try_join_all(reads));
+        let result = Self::retry_sync_fdb_read(
+            "batch_get",
+            trx,
+            |trx| {
+                let reads = keys.iter().map(|key| {
+                    let namespaced = self.namespaced_key(key);
+                    async move {
+                        trx.get(&namespaced, false)
+                            .await
+                            .map(|value| value.map(|bytes| bytes.deref().to_vec()))
+                    }
+                });
+                block_on(try_join_all(reads))
+            },
+            |trx, error| self.reset_read_transaction_after_error(trx, error),
+        );
         record_batch_get_result!(keys, result.as_ref(), started);
         result
     }
@@ -206,43 +249,41 @@ impl OrderedCatalogKv for FdbOrderedCatalogKv {
     }
 }
 
+fn sync_fdb_read_retry_exhausted(
+    operation: &'static str,
+    attempts: usize,
+    error: CatalogError,
+) -> CatalogError {
+    let CatalogError::FoundationDb {
+        code,
+        message,
+        class,
+    } = error
+    else {
+        return error;
+    };
+    CatalogError::FoundationDbRetryExhausted {
+        operation,
+        attempts,
+        code,
+        message,
+        class,
+    }
+}
+
 impl FdbOrderedCatalogKv {
     fn scan_range_with_operation(
         &self,
-        operation: &str,
+        operation: &'static str,
         start: &[u8],
         end: &[u8],
         direction: RangeDirection,
         limit: usize,
     ) -> CatalogResult<Vec<RangeItem>> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
         let started = RuntimeMetricStage::start();
-        let trx = self.create_transaction()?;
-        trx.set_option(TransactionOption::Timeout(5_000))
-            .map_err(map_fdb_error)?;
-        let mut options = RangeOption::from(self.namespaced_key(start)..self.namespaced_key(end));
-        if limit != usize::MAX {
-            options.limit = Some(limit);
-        }
-        if direction == RangeDirection::Reverse {
-            options = options.rev();
-        }
-        let values = block_on(
-            trx.get_ranges_keyvalues(options, false)
-                .try_collect::<Vec<_>>(),
-        )
-        .map_err(map_fdb_error)?;
-        let result = values
-            .into_iter()
-            .map(|item| {
-                Ok(RangeItem {
-                    key: self.strip_namespace(item.key())?,
-                    value: item.value().to_vec(),
-                })
-            })
-            .collect::<CatalogResult<Vec<_>>>();
+        let mut budget = SyncFdbScanBudget::new_for_operation(operation);
+        let request = SyncFdbScanRequest::with_limit(start, end, direction, limit);
+        let result = scan_range_all_with_budget(self, request, &mut budget);
         record_range_result!(operation, start, result.as_ref(), started);
         result
     }
@@ -441,3 +482,7 @@ impl MutableCatalogKv for FdbOrderedCatalogKv {
         self.commit_table_replacements_versionstamped(catalog, previous_sequence, replacements)
     }
 }
+
+#[cfg(test)]
+#[path = "fdb_kv_tests.rs"]
+mod fdb_kv_tests;

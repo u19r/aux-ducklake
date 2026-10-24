@@ -2,6 +2,13 @@
 mod tests {
     use std::{cell::RefCell, rc::Rc};
 
+    use super::super::{
+        InlineCatalogStats, InlineGeometryStats, InlineRowChangesPayload, InlineStatsMode,
+        InlineStatsRequest, InlineTableName, LiveColumnStats, ReadInlineRowsPayload,
+        inline_read_snapshot, inline_row_changes_payload, load_inlined_table,
+        read_inline_rows_aggregate_stats_payload, read_inline_rows_global_stats_payload,
+        read_inline_rows_payload, read_inline_rows_payload_with_stats_request_and_mode,
+    };
     use crate::{
         CatalogError, CatalogId, CatalogOrderId, ColumnId, DataFileId, DataFileRow, DeleteFileId,
         DeleteFileRow, DuckLakeSnapshotId, FakeOrderedCatalogKv, InlineTableFlush, InlinedTableRow,
@@ -13,16 +20,7 @@ mod tests {
         latest_snapshot, public_snapshot_sequence_for_order, register_delete_file,
         register_inline_table_payload_with_table,
         runtime_snapshot_range::{ChangeFeedEndSnapshot, ChangeFeedStartSnapshot, ReadSnapshot},
-    };
-
-    use super::super::{
-        InlineFlushDeletePositionsPayload, InlineFlushPartitionFilter, InlineFlushRow,
-        InlineGeometryStats, InlineRowChangesPayload, InlineStatsMode, InlineStatsRequest,
-        InlineTableName, LiveColumnStats, ReadInlineRowsPayload,
-        inline_flush_delete_positions_payload, inline_read_snapshot, inline_row_changes_payload,
-        load_inlined_table, read_inline_rows_aggregate_stats_payload,
-        read_inline_rows_global_stats_payload, read_inline_rows_payload,
-        read_inline_rows_payload_with_stats_request_and_mode,
+        typed_scalar::normalize_catalog_scalar_type,
     };
 
     #[test]
@@ -269,8 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn given_deleted_inline_rows_when_flushing_then_delete_positions_are_returned_in_output_order()
-    {
+    fn given_deleted_inline_rows_when_flushing_then_each_row_has_its_delete_snapshot() {
         let catalog = CatalogId(1);
         let table_id = TableId(46);
         let schema_id = SchemaId(0);
@@ -329,36 +326,17 @@ mod tests {
         .unwrap();
         let flush_read = String::from_utf8(flush_read).unwrap();
         assert!(
-            flush_read.contains("row_change\t2\t\t0\ti:0"),
+            flush_read.contains("row_change\t2\t3\t0\ti:0"),
             "{flush_read}"
         );
 
-        let output = inline_flush_delete_positions_payload(
-            &kv,
-            catalog,
-            InlineFlushDeletePositionsPayload {
-                table_name: table_name.to_owned(),
-                snapshot: ReadSnapshot::new(DuckLakeSnapshotId(3)),
-                file_order: None,
-                partition_filter: None,
-                position_start: None,
-                position_end: None,
-            },
-        )
-        .unwrap();
-        let output = String::from_utf8(output).unwrap();
-
-        let expected = format!(
-            "delete_position_count=20\n{}",
-            (0..20)
-                .map(|position| format!("delete_position\t3\t{position}\n"))
-                .collect::<String>()
-        );
-        assert_eq!(output, expected);
+        for row_id in 0..20 {
+            assert!(flush_read.contains(&format!("row_change\t2\t3\t{row_id}\ti:{row_id}")));
+        }
     }
 
     #[test]
-    fn given_sequential_inline_updates_when_reading_rows_for_flush_then_history_and_delete_positions_match()
+    fn given_sequential_inline_updates_when_reading_rows_for_flush_then_each_version_has_its_delete_snapshot()
      {
         let catalog = CatalogId(1);
         let table_id = TableId(49);
@@ -421,15 +399,15 @@ mod tests {
         let flush_read = String::from_utf8(flush_read).unwrap();
 
         assert!(
-            flush_read.contains("row_change\t2\t\t0\ti:0"),
+            flush_read.contains("row_change\t2\t3\t0\ti:0"),
             "{flush_read}"
         );
         assert!(
-            flush_read.contains("row_change\t3\t\t0\ti:1"),
+            flush_read.contains("row_change\t3\t4\t0\ti:1"),
             "{flush_read}"
         );
         assert!(
-            flush_read.contains("row_change\t4\t\t0\ti:2"),
+            flush_read.contains("row_change\t4\t5\t0\ti:2"),
             "{flush_read}"
         );
         assert!(
@@ -441,339 +419,15 @@ mod tests {
             "{flush_read}"
         );
 
-        let delete_positions = inline_flush_delete_positions_payload(
-            &kv,
-            catalog,
-            InlineFlushDeletePositionsPayload {
-                table_name: table_name.to_owned(),
-                snapshot: ReadSnapshot::new(DuckLakeSnapshotId(5)),
-                file_order: None,
-                partition_filter: None,
-                position_start: None,
-                position_end: None,
-            },
-        )
-        .unwrap();
-        let delete_positions = String::from_utf8(delete_positions).unwrap();
-
-        assert_eq!(
-            delete_positions,
-            "delete_position_count=6\n\
-delete_position\t3\t0\n\
-delete_position\t4\t1\n\
-delete_position\t5\t2\n\
-delete_position\t3\t4\n\
-delete_position\t4\t5\n\
-delete_position\t5\t6\n"
-        );
-    }
-
-    #[test]
-    fn given_sorted_inline_updates_when_listing_flush_delete_positions_then_positions_match_file_order()
-     {
-        let catalog = CatalogId(1);
-        let table_id = TableId(50);
-        let schema_id = SchemaId(0);
-        let table_name = "ducklake_inlined_data_50_0";
-        let mut kv = FakeOrderedCatalogKv::new();
-        initialize_catalog_if_absent(&mut kv, catalog).unwrap();
-        let created = commit_create_table_row(
-            &mut kv,
-            catalog,
-            table_with_inline_schema(table_id, "runtime_inline_flush_sorted_versions", schema_id),
-        )
-        .unwrap();
-
-        let mut with_inline = created.clone();
-        with_inline
-            .inlined_data_tables
-            .push(InlinedTableRow::new(table_name, schema_id.0));
-        register_inline_table_payload_with_table(
-            &mut kv,
-            catalog,
-            with_inline.clone(),
-            schema_id,
-            b"row\t0\ti:2\ti:0\nrow\t1\ti:1\ti:0\nrow\t2\ti:3\ti:0\n".to_vec(),
-        )
-        .unwrap();
-
-        for snapshot_id in 3..=5 {
-            commit_delete_inline_table_rows_at_snapshot(
-                &mut kv,
-                catalog,
-                table_id,
-                schema_id,
-                &[0],
-                Some(DuckLakeSnapshotId(snapshot_id)),
-            )
-            .unwrap();
-            let value = snapshot_id - 2;
-            register_inline_table_payload_with_table_at_snapshot_for_test(
-                &mut kv,
-                catalog,
-                with_inline.clone(),
-                schema_id,
-                format!("row\t0\ti:2\ti:{value}\n").into_bytes(),
-                DuckLakeSnapshotId(snapshot_id),
-            );
+        for begin in 2..5 {
+            for row_id in 0..2 {
+                assert!(flush_read.contains(&format!(
+                    "row_change\t{begin}\t{}\t{row_id}\ti:{}",
+                    begin + 1,
+                    begin - 2
+                )));
+            }
         }
-
-        let delete_positions = inline_flush_delete_positions_payload(
-            &kv,
-            catalog,
-            InlineFlushDeletePositionsPayload {
-                table_name: table_name.to_owned(),
-                snapshot: ReadSnapshot::new(DuckLakeSnapshotId(5)),
-                file_order: Some(
-                    "id ASC NULLS LAST, row_id ASC NULLS LAST, begin_snapshot ASC NULLS LAST"
-                        .to_owned(),
-                ),
-                partition_filter: None,
-                position_start: None,
-                position_end: None,
-            },
-        )
-        .unwrap();
-        let delete_positions = String::from_utf8(delete_positions).unwrap();
-
-        assert_eq!(
-            delete_positions,
-            "delete_position_count=3\n\
-delete_position\t3\t1\n\
-delete_position\t4\t2\n\
-delete_position\t5\t3\n"
-        );
-    }
-
-    #[test]
-    fn given_sorted_flush_window_when_deleted_row_sorts_outside_window_then_count_matches_positions()
-     {
-        let catalog = CatalogId(1);
-        let table_id = TableId(54);
-        let schema_id = SchemaId(0);
-        let table_name = "ducklake_inlined_data_54_0";
-        let mut kv = FakeOrderedCatalogKv::new();
-        initialize_catalog_if_absent(&mut kv, catalog).unwrap();
-        let created = commit_create_table_row(
-            &mut kv,
-            catalog,
-            table_with_inline_schema(table_id, "runtime_inline_flush_sorted_window", schema_id),
-        )
-        .unwrap();
-
-        let mut with_inline = created.clone();
-        with_inline
-            .inlined_data_tables
-            .push(InlinedTableRow::new(table_name, schema_id.0));
-        register_inline_table_payload_with_table(
-            &mut kv,
-            catalog,
-            with_inline,
-            schema_id,
-            b"row\t0\ti:2\nrow\t1\ti:1\nrow\t2\ti:3\n".to_vec(),
-        )
-        .unwrap();
-        commit_delete_inline_table_rows_at_snapshot(
-            &mut kv,
-            catalog,
-            table_id,
-            schema_id,
-            &[0],
-            Some(DuckLakeSnapshotId(3)),
-        )
-        .unwrap();
-
-        let delete_positions = inline_flush_delete_positions_payload(
-            &kv,
-            catalog,
-            InlineFlushDeletePositionsPayload {
-                table_name: table_name.to_owned(),
-                snapshot: ReadSnapshot::new(DuckLakeSnapshotId(3)),
-                file_order: Some(
-                    "id ASC NULLS LAST, row_id ASC NULLS LAST, begin_snapshot ASC NULLS LAST"
-                        .to_owned(),
-                ),
-                partition_filter: None,
-                position_start: Some(0),
-                position_end: Some(1),
-            },
-        )
-        .unwrap();
-        let delete_positions = String::from_utf8(delete_positions).unwrap();
-
-        assert_eq!(delete_positions, "delete_position_count=0\n");
-    }
-
-    #[test]
-    fn given_sorted_inline_updates_when_file_order_uses_square_expression_then_positions_match_file_order()
-     {
-        let catalog = CatalogId(1);
-        let table_id = TableId(51);
-        let schema_id = SchemaId(0);
-        let table_name = "ducklake_inlined_data_51_0";
-        let mut kv = FakeOrderedCatalogKv::new();
-        initialize_catalog_if_absent(&mut kv, catalog).unwrap();
-        let created = commit_create_table_row(
-            &mut kv,
-            catalog,
-            table_with_inline_schema(
-                table_id,
-                "runtime_inline_flush_sorted_expression",
-                schema_id,
-            ),
-        )
-        .unwrap();
-
-        let mut with_inline = created.clone();
-        with_inline
-            .inlined_data_tables
-            .push(InlinedTableRow::new(table_name, schema_id.0));
-        register_inline_table_payload_with_table(
-            &mut kv,
-            catalog,
-            with_inline.clone(),
-            schema_id,
-            b"row\t0\ti:2\nrow\t1\ti:1\nrow\t2\ti:3\n".to_vec(),
-        )
-        .unwrap();
-
-        for snapshot_id in 3..=5 {
-            commit_delete_inline_table_rows_at_snapshot(
-                &mut kv,
-                catalog,
-                table_id,
-                schema_id,
-                &[0],
-                Some(DuckLakeSnapshotId(snapshot_id)),
-            )
-            .unwrap();
-            register_inline_table_payload_with_table_at_snapshot_for_test(
-                &mut kv,
-                catalog,
-                with_inline.clone(),
-                schema_id,
-                b"row\t0\ti:2\n".to_vec(),
-                DuckLakeSnapshotId(snapshot_id),
-            );
-        }
-
-        let delete_positions = inline_flush_delete_positions_payload(
-            &kv,
-            catalog,
-            InlineFlushDeletePositionsPayload {
-                table_name: table_name.to_owned(),
-                snapshot: ReadSnapshot::new(DuckLakeSnapshotId(5)),
-                file_order: Some(
-                    "(id * id) DESC NULLS LAST, row_id ASC NULLS LAST, begin_snapshot ASC NULLS LAST"
-                        .to_owned(),
-                ),
-                partition_filter: None,
-                position_start: None,
-                position_end: None,
-            },
-        )
-        .unwrap();
-        let delete_positions = String::from_utf8(delete_positions).unwrap();
-
-        assert_eq!(
-            delete_positions,
-            "delete_position_count=3\n\
-delete_position\t3\t1\n\
-delete_position\t4\t2\n\
-delete_position\t5\t3\n"
-        );
-    }
-
-    #[test]
-    fn given_partition_filter_when_listing_flush_delete_positions_then_positions_are_partition_local()
-     {
-        let catalog = CatalogId(1);
-        let table_id = TableId(52);
-        let schema_id = SchemaId(0);
-        let table_name = "ducklake_inlined_data_52_0";
-        let mut kv = FakeOrderedCatalogKv::new();
-        initialize_catalog_if_absent(&mut kv, catalog).unwrap();
-        let created = commit_create_table_row(
-            &mut kv,
-            catalog,
-            partitioned_inline_schema(table_id, "runtime_inline_flush_partitioned", schema_id),
-        )
-        .unwrap();
-
-        let mut with_inline = created.clone();
-        with_inline
-            .inlined_data_tables
-            .push(InlinedTableRow::new(table_name, schema_id.0));
-        register_inline_table_payload_with_table(
-            &mut kv,
-            catalog,
-            with_inline.clone(),
-            schema_id,
-            b"row\t0\ti:1\ts:65617374\ti:100\n\
-row\t1\ti:2\ts:77657374\ti:200\n\
-row\t2\ti:3\ts:77657374\ti:300\n\
-row\t3\ti:4\ts:63656e7472616c\ti:400\n"
-                .to_vec(),
-        )
-        .unwrap();
-        commit_delete_inline_table_rows_at_snapshot(
-            &mut kv,
-            catalog,
-            table_id,
-            schema_id,
-            &[1],
-            Some(DuckLakeSnapshotId(3)),
-        )
-        .unwrap();
-        register_inline_table_payload_with_table_at_snapshot_for_test(
-            &mut kv,
-            catalog,
-            with_inline,
-            schema_id,
-            b"row\t4\ti:2\ts:77657374\ti:250\n".to_vec(),
-            DuckLakeSnapshotId(3),
-        );
-
-        let delete_positions = inline_flush_delete_positions_payload(
-            &kv,
-            catalog,
-            InlineFlushDeletePositionsPayload {
-                table_name: table_name.to_owned(),
-                snapshot: ReadSnapshot::new(DuckLakeSnapshotId(3)),
-                file_order: None,
-                partition_filter: Some("CAST(region AS VARCHAR) = 'west'".to_owned()),
-                position_start: Some(0),
-                position_end: Some(2),
-            },
-        )
-        .unwrap();
-        let delete_positions = String::from_utf8(delete_positions).unwrap();
-
-        assert_eq!(
-            delete_positions,
-            "delete_position_count=1\n\
-delete_position\t3\t0\n"
-        );
-    }
-
-    #[test]
-    fn given_transform_partition_filter_when_matching_flush_row_then_cast_argument_is_unwrapped() {
-        let table = timestamp_inline_schema(
-            TableId(53),
-            "runtime_inline_flush_transform_filter",
-            SchemaId(0),
-        );
-        let filter =
-            InlineFlushPartitionFilter::parse(Some("year(CAST(ts AS TIMESTAMP)) = 2021"), &table)
-                .unwrap();
-        let row = InlineFlushRow {
-            row_id: 0,
-            begin_snapshot: 1,
-            end_snapshot: None,
-            values: vec!["i:1".to_owned(), "v:323032312d30362d3135".to_owned()],
-        };
-
-        assert!(filter.matches(&row));
     }
 
     #[test]
@@ -991,6 +645,49 @@ delete_position\t3\t0\n"
             "{deletions}"
         );
         assert!(!deletions.contains("\t102\ti:102"), "{deletions}");
+    }
+
+    #[test]
+    fn given_binary_inline_values_when_global_stats_are_read_then_bytes_need_no_utf8_or_ordered_extrema()
+     {
+        let catalog = CatalogId(1);
+        let table_id = TableId(51);
+        let schema_id = SchemaId(0);
+        let table_name = "binary_stats_inlined";
+        let mut kv = FakeOrderedCatalogKv::new();
+        initialize_catalog_if_absent(&mut kv, catalog).unwrap();
+        let mut table = table_with_inline_schema(table_id, "binary_stats", schema_id);
+        table.columns.truncate(1);
+        table.columns[0].column_type = "BLOB".into();
+        let mut table = commit_create_table_row(&mut kv, catalog, table).unwrap();
+        table
+            .inlined_data_tables
+            .push(InlinedTableRow::new(table_name, schema_id.0));
+        register_inline_table_payload_with_table(
+            &mut kv,
+            catalog,
+            table,
+            schema_id,
+            b"row\t0\tx:00015c7fff\nrow\t1\tn:\n".to_vec(),
+        )
+        .unwrap();
+        let output = read_inline_rows_global_stats_payload(
+            &kv,
+            catalog,
+            ReadInlineRowsPayload {
+                table_name: table_name.to_owned(),
+                snapshot: None,
+                include_flushed: true,
+                include_deleted: false,
+            },
+        )
+        .unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("inline_table_stats\t2\t2"), "{output}");
+        assert!(
+            output.contains("inline_column_stats\t1\ttrue\ttrue\tfalse\t\tfalse\t"),
+            "{output}"
+        );
     }
 
     #[test]
@@ -1231,7 +928,7 @@ delete_position\t3\t0\n"
     }
 
     #[test]
-    fn given_inline_struct_field_added_after_rows_when_reading_global_stats_then_new_child_contains_null()
+    fn given_inline_struct_field_added_after_rows_when_reading_layout_stats_then_only_written_children_are_reported()
      {
         let catalog = CatalogId(1);
         let table_id = TableId(52);
@@ -1293,9 +990,14 @@ delete_position\t3\t0\n"
         let output = String::from_utf8(output).unwrap();
 
         assert!(
-            output.contains("inline_column_stats\t4\ttrue\ttrue\tfalse\t\tfalse\t"),
+            output.contains("inline_column_stats\t2\ttrue\tfalse\ttrue\t1\ttrue\t1"),
             "{output}"
         );
+        assert!(
+            output.contains("inline_column_stats\t3\ttrue\tfalse\ttrue\t2\ttrue\t2"),
+            "{output}"
+        );
+        assert!(!output.contains("inline_column_stats\t4\t"), "{output}");
     }
 
     #[test]
@@ -2115,6 +1817,41 @@ delete_position\t3\t0\n"
     }
 
     #[test]
+    fn given_invalid_inline_numeric_value_after_valid_values_then_both_extrema_clear() {
+        let mut stats = LiveColumnStats::new(normalize_catalog_scalar_type("DECIMAL"));
+
+        stats.accumulate_comparable("9.9".to_owned());
+        stats.accumulate_comparable("not-a-decimal".to_owned());
+        stats.accumulate_comparable("10.0".to_owned());
+
+        assert_eq!(stats.min_value, None);
+        assert_eq!(stats.max_value, None);
+    }
+
+    #[test]
+    fn given_opaque_nested_parent_when_accumulating_child_stats_then_child_is_unknown() {
+        let table = nested_stats_table(
+            TableId(59),
+            "runtime_inline_opaque_nested_stats",
+            SchemaId(0),
+            "struct",
+        );
+        let mut stats = InlineCatalogStats::for_inline_schema(&table);
+        let nested_value = encoded_duckdb_text("{'i': 42, 'j': 3}");
+        stats
+            .accumulate_visible_row(0, &[nested_value.as_str()])
+            .unwrap();
+        stats.accumulate_visible_row(0, &["d:001122"]).unwrap();
+        let mut output = String::new();
+        stats.append_to(&mut output).unwrap();
+
+        assert!(
+            output.contains("inline_column_stats\t2\ttrue\ttrue\tfalse\t\tfalse\t"),
+            "{output}"
+        );
+    }
+
+    #[test]
     fn given_null_and_opaque_duckdb_inline_values_when_accumulating_stats_then_only_null_marks_contains_null()
      {
         let mut stats = LiveColumnStats::default();
@@ -2206,37 +1943,6 @@ delete_position\t3\t0\n"
                 true,
                 None,
             )],
-            CatalogOrderId::uuid_v7(0),
-        )
-    }
-
-    fn partitioned_inline_schema(table_id: TableId, name: &str, schema_id: SchemaId) -> TableRow {
-        TableRow::with_catalog_metadata(
-            table_id,
-            schema_id,
-            format!("{name}-uuid"),
-            name,
-            format!("main/{name}"),
-            vec![
-                TableColumnRow::new(ColumnId(1), "id", "INTEGER", true, None),
-                TableColumnRow::new(ColumnId(2), "region", "VARCHAR", true, None),
-                TableColumnRow::new(ColumnId(3), "amount", "INTEGER", true, None),
-            ],
-            CatalogOrderId::uuid_v7(0),
-        )
-    }
-
-    fn timestamp_inline_schema(table_id: TableId, name: &str, schema_id: SchemaId) -> TableRow {
-        TableRow::with_catalog_metadata(
-            table_id,
-            schema_id,
-            format!("{name}-uuid"),
-            name,
-            format!("main/{name}"),
-            vec![
-                TableColumnRow::new(ColumnId(1), "id", "INTEGER", true, None),
-                TableColumnRow::new(ColumnId(2), "ts", "TIMESTAMP", true, None),
-            ],
             CatalogOrderId::uuid_v7(0),
         )
     }

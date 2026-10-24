@@ -1,7 +1,11 @@
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, collections::BTreeSet};
+    use std::{
+        cell::Cell,
+        collections::{BTreeMap, BTreeSet},
+    };
 
+    use crate::typed_scalar::normalize_catalog_scalar_type;
     use crate::{
         CatalogId, CatalogOrderId, ColumnId, DataFileId, DataFileRow, DeleteFileId, DeleteFileRow,
         FakeOrderedCatalogKv, FileColumnStatsRow, FilePartitionValueRow, InlineFileDeletionRow,
@@ -219,6 +223,10 @@ mod tests {
             ),
         ];
         let source_refs = sources.iter().collect::<Vec<_>>();
+        let column_types = BTreeMap::from([
+            (ColumnId(1), normalize_catalog_scalar_type("INTEGER")),
+            (ColumnId(2), normalize_catalog_scalar_type("VARCHAR")),
+        ]);
 
         let merged = merge_stats_for_replacement(
             &stats,
@@ -231,6 +239,7 @@ mod tests {
                 581,
                 CatalogOrderId::uuid_v7(17),
             ),
+            &column_types,
         );
 
         let label_stats = merged
@@ -241,6 +250,219 @@ mod tests {
         assert_eq!(label_stats.null_count, 7);
         assert_eq!(label_stats.min_value.as_deref(), Some("eight"));
         assert_eq!(label_stats.max_value.as_deref(), Some("seven"));
+    }
+
+    #[test]
+    fn given_decimal_source_stats_when_merging_replacement_then_extrema_follow_numeric_order() {
+        let table = TableId(3);
+        let sources = [
+            DataFileRow::new(
+                DataFileId(18),
+                table,
+                "main/t/source-18.parquet",
+                1,
+                674,
+                CatalogOrderId::uuid_v7(17),
+            ),
+            DataFileRow::new(
+                DataFileId(20),
+                table,
+                "main/t/source-20.parquet",
+                1,
+                585,
+                CatalogOrderId::uuid_v7(19),
+            ),
+        ];
+        let stats = vec![
+            FileColumnStatsRow::new(
+                DataFileId(18),
+                table,
+                ColumnId(1),
+                0,
+                Some("9.9".to_owned()),
+                Some("9.9".to_owned()),
+            ),
+            FileColumnStatsRow::new(
+                DataFileId(20),
+                table,
+                ColumnId(1),
+                0,
+                Some("10.0".to_owned()),
+                Some("10.0".to_owned()),
+            ),
+        ];
+
+        let source_refs = sources.iter().collect::<Vec<_>>();
+        let column_types = BTreeMap::from([(
+            ColumnId(1),
+            normalize_catalog_scalar_type("DECIMAL(38, 17)"),
+        )]);
+        let merged = merge_stats_for_replacement(
+            &stats,
+            &source_refs,
+            &DataFileRow::new(
+                DataFileId(24),
+                table,
+                "main/t/merged.parquet",
+                2,
+                581,
+                CatalogOrderId::uuid_v7(17),
+            ),
+            &column_types,
+        );
+
+        let value_stats = merged
+            .iter()
+            .find(|row| row.column_id == ColumnId(1))
+            .unwrap();
+        assert_eq!(value_stats.min_value.as_deref(), Some("9.9"));
+        assert_eq!(value_stats.max_value.as_deref(), Some("10.0"));
+    }
+
+    #[test]
+    fn given_wide_or_invalid_source_stats_when_merging_replacement_then_extrema_are_safe() {
+        let table = TableId(3);
+        let sources = [
+            DataFileRow::new(
+                DataFileId(18),
+                table,
+                "main/t/source-18.parquet",
+                1,
+                674,
+                CatalogOrderId::uuid_v7(17),
+            ),
+            DataFileRow::new(
+                DataFileId(20),
+                table,
+                "main/t/source-20.parquet",
+                1,
+                585,
+                CatalogOrderId::uuid_v7(19),
+            ),
+        ];
+        let source_refs = sources.iter().collect::<Vec<_>>();
+        let column_types = BTreeMap::from([
+            (ColumnId(1), normalize_catalog_scalar_type("DECIMAL")),
+            (ColumnId(2), normalize_catalog_scalar_type("DECIMAL")),
+            (ColumnId(3), normalize_catalog_scalar_type("DECIMAL")),
+            (ColumnId(4), normalize_catalog_scalar_type("HUGEINT")),
+            (ColumnId(5), normalize_catalog_scalar_type("UBIGINT")),
+            (ColumnId(6), normalize_catalog_scalar_type("UHUGEINT")),
+            (ColumnId(7), normalize_catalog_scalar_type("DECIMAL")),
+        ]);
+        let values = [
+            (ColumnId(1), "9.9", "9.9", "10.0", "10.0"),
+            (ColumnId(2), "-10", "-10", "-9.9", "-9.9"),
+            (
+                ColumnId(3),
+                "9007199254740992",
+                "9007199254740993",
+                "9007199254740993",
+                "9007199254740993",
+            ),
+            (
+                ColumnId(4),
+                "-170141183460469231731687303715884105728",
+                "-170141183460469231731687303715884105728",
+                "170141183460469231731687303715884105727",
+                "170141183460469231731687303715884105727",
+            ),
+            (
+                ColumnId(5),
+                "18446744073709551614",
+                "18446744073709551615",
+                "18446744073709551615",
+                "18446744073709551615",
+            ),
+            (
+                ColumnId(6),
+                "340282366920938463463374607431768211454",
+                "340282366920938463463374607431768211454",
+                "340282366920938463463374607431768211455",
+                "340282366920938463463374607431768211455",
+            ),
+            (ColumnId(7), "bad", "bad", "bad", "bad"),
+        ];
+        let mut stats = Vec::new();
+        for (column_id, first_min, first_max, second_min, second_max) in values {
+            stats.push(
+                FileColumnStatsRow::new(
+                    DataFileId(18),
+                    table,
+                    column_id,
+                    0,
+                    Some(first_min.to_owned()),
+                    Some(first_max.to_owned()),
+                )
+                .with_value_count(Some(1)),
+            );
+            stats.push(
+                FileColumnStatsRow::new(
+                    DataFileId(20),
+                    table,
+                    column_id,
+                    0,
+                    Some(second_min.to_owned()),
+                    Some(second_max.to_owned()),
+                )
+                .with_value_count(Some(1)),
+            );
+        }
+
+        let merged = merge_stats_for_replacement(
+            &stats,
+            &source_refs,
+            &DataFileRow::new(
+                DataFileId(24),
+                table,
+                "main/t/merged.parquet",
+                2,
+                581,
+                CatalogOrderId::uuid_v7(17),
+            ),
+            &column_types,
+        );
+
+        for (column_id, expected_min, expected_max) in [
+            (ColumnId(1), Some("9.9"), Some("10.0")),
+            (ColumnId(2), Some("-10"), Some("-9.9")),
+            (
+                ColumnId(3),
+                Some("9007199254740992"),
+                Some("9007199254740993"),
+            ),
+            (
+                ColumnId(4),
+                Some("-170141183460469231731687303715884105728"),
+                Some("170141183460469231731687303715884105727"),
+            ),
+            (
+                ColumnId(5),
+                Some("18446744073709551614"),
+                Some("18446744073709551615"),
+            ),
+            (
+                ColumnId(6),
+                Some("340282366920938463463374607431768211454"),
+                Some("340282366920938463463374607431768211455"),
+            ),
+            (ColumnId(7), None, None),
+        ] {
+            let row = merged
+                .iter()
+                .find(|row| row.column_id == column_id)
+                .unwrap();
+            assert_eq!(
+                row.min_value.as_deref(),
+                expected_min,
+                "column {column_id:?}"
+            );
+            assert_eq!(
+                row.max_value.as_deref(),
+                expected_max,
+                "column {column_id:?}"
+            );
+        }
     }
 
     #[test]

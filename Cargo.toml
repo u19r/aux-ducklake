@@ -12,11 +12,15 @@ edition = "2024"
 license = "BUSL-1.1"
 publish = false
 repository = "https://github.com/u19r/aux-ducklake"
-rust-version = "1.96.0"
+rust-version = "1.99.1"
 
 [workspace.dependencies]
-foundationdb = { version = "0.11.0", default-features = false, features = ["embedded-fdb-include", "fdb-7_4"] }
-foundationdb-simulation = { version = "0.3.0", default-features = false, features = ["embedded-fdb-include", "fdb-7_4", "cpp-abi"] }
-futures = "0.3.31"
-sha2 = "0.10.9"
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+foundationdb = { version = "0.11.0", default-features = false, features = ["embedded-fdb-include", "fdb-7_4"], git = "https://github.com/foundationdb-rs/foundationdb-rs.git", rev = "9c91ad4fc84836a51f6544ea7c60c784f4d9b6f3" }
+foundationdb-simulation = { version = "0.3.0", default-features = false, features = ["embedded-fdb-include", "fdb-7_4", "cpp-abi"], git = "https://github.com/foundationdb-rs/foundationdb-rs.git", rev = "9c91ad4fc84836a51f6544ea7c60c784f4d9b6f3" }
+futures = "0.3.34"
+sha2 = "0.11.1"
 tempfile = "3.27.0"
+
+[workspace.lints.clippy]
+all = "deny"
