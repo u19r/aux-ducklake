@@ -123,8 +123,8 @@ jobs:
             echo "no release assets were downloaded" >&2
             exit 1
           fi
-          tag_commit="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
-          if [ "$tag_commit" != "$GITHUB_SHA" ]; then
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG" &&
+            [ "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" != "$GITHUB_SHA" ]; then
             echo "release tag must identify the built commit $GITHUB_SHA" >&2
             exit 1
           fi
