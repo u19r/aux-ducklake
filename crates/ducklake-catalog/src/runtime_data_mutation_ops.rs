@@ -1,4 +1,5 @@
-use crate::runtime_foundationdb::runtime_foundationdb_commit_data_and_inline_mutation;
+use std::collections::BTreeSet;
+
 use crate::{
     CatalogId, CatalogOrderId, CatalogResult, ColumnId, CommitAttemptId, DataFileId, DataFileRow,
     DataMutationCommit, DeleteFileId, DeleteFileRow, DuckLakeSnapshotId, FileColumnStatsRow,
@@ -7,7 +8,10 @@ use crate::{
     data_mutation_intents::DeleteFileMaterialization,
     inline_change_feed::data_file_covers_inline_begin,
     inline_data::list_unflushed_inline_table_payloads_at,
-    runtime_foundationdb::runtime_foundationdb_commit_data_mutation,
+    runtime_foundationdb::{
+        runtime_foundationdb_commit_data_and_inline_mutation,
+        runtime_foundationdb_commit_data_mutation,
+    },
     runtime_protocol::RuntimeCatalogBackend,
     runtime_snapshot_range::{ProposedCommitSnapshot, SemanticDeleteCoverageBegin},
     runtime_tabular_payload::{
@@ -16,12 +20,12 @@ use crate::{
     snapshot_by_ducklake_sequence,
     table_store::load_table_at,
 };
-use std::collections::BTreeSet;
 
 const COMMIT_DATA_MUTATION: &str = "CommitDataMutation";
 
 #[derive(Default)]
 pub(crate) struct RuntimeDataMutation {
+    pub(crate) snapshot_fence: Option<crate::snapshot_fence::SnapshotFence>,
     pub(crate) proposed_commit_snapshot: Option<ProposedCommitSnapshot>,
     pub(crate) recovery_attempt_id: Option<CommitAttemptId>,
     pub(crate) read_snapshot: Option<DuckLakeSnapshotId>,
@@ -380,6 +384,17 @@ pub(crate) fn data_mutation_payload_values(payload: &[u8]) -> CatalogResult<Runt
                     attempt_id,
                     "recovery attempt id",
                 )?));
+            }
+            ["snapshot_fence", order] => {
+                if mutation
+                    .snapshot_fence
+                    .replace(crate::snapshot_fence::SnapshotFence::try_from(*order)?)
+                    .is_some()
+                {
+                    return Err(crate::CatalogError::Decode(
+                        "duplicate snapshot fence".to_owned(),
+                    ));
+                }
             }
             ["read_snapshot", snapshot_id] => {
                 mutation.read_snapshot = Some(DuckLakeSnapshotId(parse_u64_field(
@@ -906,14 +921,16 @@ fn data_mutation_payload(commit: DataMutationCommit, affected_table_ids: &[Table
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        "appended_file_count={}\n\
-         added_delete_file_count={}\n\
-         inline_file_deletion_count={}\n\
-         file_partition_value_count={}\n\
-         file_column_stats_count={}\n\
-         flushed_inline_table_count={}\n\
-         dropped_data_file_count={}\n\
-         affected_table_ids={}\n",
+        concat!(
+            "appended_file_count={}\n",
+            "added_delete_file_count={}\n",
+            "inline_file_deletion_count={}\n",
+            "file_partition_value_count={}\n",
+            "file_column_stats_count={}\n",
+            "flushed_inline_table_count={}\n",
+            "dropped_data_file_count={}\n",
+            "affected_table_ids={}\n",
+        ),
         commit.data_files.len(),
         commit.delete_files.len(),
         commit.inline_file_deletion_count,

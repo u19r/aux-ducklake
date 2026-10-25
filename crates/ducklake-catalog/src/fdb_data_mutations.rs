@@ -1,9 +1,10 @@
-use crate::fdb_inline_tables::{InlineTableDeletePayload, InlineTablePayload};
 use crate::{
     CommitAttemptId, DataFileId, DataFileRow, DeleteFileRow, FdbOrderedCatalogKv,
     FileColumnStatsRow, FilePartitionValueRow, InlineFileDeletionRow, InlineTableFlush,
     conflict_watermarks::stage_fdb_max_file_id_watermark,
-    maintenance::ScheduledDataFileCleanupKind, snapshot_operations::SnapshotOperationKind,
+    fdb_inline_tables::{InlineTableDeletePayload, InlineTablePayload},
+    maintenance::ScheduledDataFileCleanupKind,
+    snapshot_operations::SnapshotOperationKind,
 };
 
 const MAX_MUTATION_COMMIT_RETRIES: usize = 3;
@@ -88,6 +89,7 @@ impl FdbDataMutation {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct FdbMutationReadContext {
+    pub(crate) snapshot_fence: Option<crate::snapshot_fence::SnapshotFence>,
     pub(crate) order: Option<crate::CatalogOrderId>,
     pub(crate) data_files: Vec<DataFileRow>,
     pub(crate) append_partitions: Vec<FdbAppendPartitionExpectation>,
@@ -181,6 +183,7 @@ mod validation;
 
 use recovery::*;
 use sizing::*;
+pub(crate) use validation::recover_committed_mutation;
 use validation::*;
 #[cfg(test)]
 #[path = "fdb_data_mutations_tests.rs"]

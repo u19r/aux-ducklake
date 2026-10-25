@@ -573,6 +573,24 @@ pub(crate) fn list_table_rows(
     }
 }
 
+// Includes the latest dropped version because retained snapshots still
+// reference its inline registrations.
+pub(crate) fn load_latest_table_version(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    table_id: TableId,
+) -> CatalogResult<Option<TableRow>> {
+    kv.scan_prefix(
+        &table_object_prefix(catalog, table_id),
+        RangeDirection::Reverse,
+        1,
+    )?
+    .into_iter()
+    .next()
+    .map(|item| decode_table_item(catalog, &item.key, &item.value))
+    .transpose()
+}
+
 pub(crate) fn list_table_rows_for_table(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,

@@ -1,8 +1,9 @@
 #[cfg(test)]
 mod tests {
     use crate::{
-        CatalogOrderId, ColumnId, InlinedTableRow, TableColumnRow, TableId, TablePartitionFieldRow,
-        TablePartitionRow, TableRow, ValidityWindow,
+        CatalogCacheNamespace, CatalogId, CatalogOrderId, ColumnId, DuckLakeSnapshotId,
+        InlinedTableRow, TableColumnRow, TableId, TablePartitionFieldRow, TablePartitionRow,
+        TableRow, ValidityWindow,
     };
 
     #[cfg(feature = "foundationdb")]
@@ -37,6 +38,38 @@ mod tests {
             &read_table,
             &current_table
         ));
+    }
+
+    #[cfg(feature = "foundationdb")]
+    #[test]
+    fn ending_runtime_context_evicts_only_its_global_stats_batch_cache_entries() {
+        let catalog = CatalogId(8_401);
+        let context_id = 8_402;
+        let other_context_id = context_id + 1;
+        let namespace = CatalogCacheNamespace::foundationdb(8_403, 8_404);
+        let key = |read_context_id| super::super::InlineGlobalStatsBatchCacheKey {
+            namespace: namespace.with_read_context(Some(read_context_id)),
+            catalog,
+            requests: vec![(
+                "ducklake_inlined_data_1_0".to_owned(),
+                Some(DuckLakeSnapshotId(7)),
+            )],
+        };
+        let cache = super::super::inline_global_stats_batch_cache();
+        let context_key = key(context_id);
+        let other_key = key(other_context_id);
+        cache.insert(context_key.clone(), b"context".to_vec());
+        cache.insert(other_key.clone(), b"other".to_vec());
+
+        super::super::end_inline_global_stats_batch_read_context(namespace, catalog, context_id);
+
+        assert_eq!(cache.get_ref(&context_key), None);
+        assert_eq!(cache.get_ref(&other_key), Some(b"other".to_vec()));
+
+        cache.insert(context_key.clone(), b"reused".to_vec());
+        assert_eq!(cache.get_ref(&context_key), Some(b"reused".to_vec()));
+        super::super::end_inline_global_stats_batch_read_context(namespace, catalog, context_id);
+        assert_eq!(cache.get_ref(&context_key), None);
     }
 
     #[cfg(feature = "foundationdb")]

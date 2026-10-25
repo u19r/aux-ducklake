@@ -1,0 +1,43 @@
+# name: inline-delete-flush-time-travel
+# description: Known baseline gap: history after DELETE and flush in one transaction
+# group: [aux_known_gap]
+
+require ducklake
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS lake (DATA_PATH '{DATA_PATH}/inline_txn_flush', DATA_INLINING_ROW_LIMIT 100)
+
+statement ok
+CREATE TABLE lake.items(id INTEGER)
+
+statement ok
+INSERT INTO lake.items VALUES (1), (2), (3)
+
+statement ok
+SET VARIABLE before_delete = (SELECT id FROM ducklake_current_snapshot('lake'))
+
+statement ok
+BEGIN
+
+statement ok
+DELETE FROM lake.items WHERE id = 1
+
+statement ok
+CALL ducklake_flush_inlined_data('lake')
+
+statement ok
+COMMIT
+
+query I
+SELECT count(*) FROM lake.items
+----
+2
+
+query I
+SELECT count(*) FROM lake.items AT (VERSION => getvariable('before_delete')::BIGINT)
+----
+3

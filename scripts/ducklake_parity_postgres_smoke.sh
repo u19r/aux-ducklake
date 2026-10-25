@@ -33,7 +33,7 @@ assert_expected_output() {
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         [[ "$duckdb_output" == *"$line"* ]] || fail "expected output to contain: $line"
-    done < "$EXPECTED"
+    done <"$EXPECTED"
 }
 
 [[ -f "$SCENARIO_SQL" ]] || fail "missing scenario SQL: $SCENARIO_SQL"

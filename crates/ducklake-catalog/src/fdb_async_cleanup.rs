@@ -1,7 +1,7 @@
 use crate::{
     CatalogError, CatalogId, CatalogResult, ColumnId, DataFileId, DataFileRow, FdbOrderedCatalogKv,
     FileColumnStatsRow, FilePartitionValueRow, PartitionKeyIndex, RangeDirection, TableId,
-    fdb_async::{MAX_ASYNC_FDB_RETRIES, is_retryable_async_catalog_error},
+    fdb_async::{MAX_FDB_READ_RETRIES, is_retryable_async_catalog_error},
     fdb_runtime::map_fdb_commit_error,
     file_partitions::remove_cached_file_partition_values,
     file_stats::{
@@ -92,7 +92,7 @@ impl FdbOrderedCatalogKv {
     ) -> CatalogResult<()> {
         validate_cleanup_metadata_pair(&partition, &stats)?;
         let mut last_retry_error = None;
-        for _ in 0..=MAX_ASYNC_FDB_RETRIES {
+        for _ in 0..=MAX_FDB_READ_RETRIES {
             match self
                 .try_register_file_cleanup_metadata_async(catalog, &partition, &stats)
                 .await

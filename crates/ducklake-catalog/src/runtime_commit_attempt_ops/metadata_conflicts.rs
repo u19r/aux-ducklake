@@ -4,6 +4,7 @@ use crate::{
     CatalogError, CatalogId, CatalogResult, DuckLakeSnapshotId, OrderedCatalogKv, SchemaId,
     SchemaRow, SnapshotRow, TableId, TableRow, TableVersionReplacement, latest_snapshot,
     load_table_at, load_view_at,
+    runtime_commit_attempt_ops::*,
     runtime_object_ops::{create_view_rows, drop_view_ids, view_comment_change, view_renames},
     runtime_schema_change_payload::{
         ADD_COLUMNS, CHANGE_COLUMN_DEFAULTS, CHANGE_COLUMN_TYPES, DdlPayload, RENAME_COLUMNS,
@@ -16,8 +17,6 @@ use crate::{
     snapshot_by_ducklake_sequence, snapshot_by_public_sequence,
     table_store::{list_tables_at, load_current_table_row},
 };
-
-use crate::runtime_commit_attempt_ops::*;
 pub(super) fn commit_metadata_intents_with_current_kv(
     kv: &mut impl CommitAttemptTableReplacements,
     catalog: CatalogId,
@@ -264,8 +263,15 @@ pub(super) fn reject_schema_create_conflicts(
     let mut schema_names = current
         .iter()
         .filter(|schema| !replacement_schemas.contains(&schema.schema_id))
-        .map(|schema| schema.name.to_ascii_lowercase())
+        .map(|schema| (schema.parent_schema_id, schema.name.to_ascii_lowercase()))
         .collect::<BTreeSet<_>>();
+    let parents = current
+        .iter()
+        .filter(|schema| !replacement_schemas.contains(&schema.schema_id))
+        .chain(created_schemas)
+        .map(|schema| (schema.schema_id, schema.parent_schema_id))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    reject_invalid_schema_parents(&parents)?;
     for schema in created_schemas {
         if !schema_ids.insert(schema.schema_id) {
             return Err(CatalogError::InvalidMutation(format!(
@@ -273,11 +279,37 @@ pub(super) fn reject_schema_create_conflicts(
                 schema.name, schema.schema_id.0
             )));
         }
-        if !schema_names.insert(schema.name.to_ascii_lowercase()) {
+        if !schema_names.insert((schema.parent_schema_id, schema.name.to_ascii_lowercase())) {
             return Err(CatalogError::InvalidMutation(format!(
                 "conflict creating schema {}: schema name already exists",
                 schema.name
             )));
+        }
+    }
+    Ok(())
+}
+
+fn reject_invalid_schema_parents(
+    parents: &std::collections::BTreeMap<SchemaId, Option<SchemaId>>,
+) -> CatalogResult<()> {
+    for id in parents.keys() {
+        let mut parent = parents[id];
+        let mut seen = BTreeSet::from([*id]);
+        while let Some(parent_id) = parent {
+            if !seen.insert(parent_id) {
+                return Err(CatalogError::InvalidMutation(
+                    "schema parent cycle".to_owned(),
+                ));
+            }
+            if parent_id == SchemaId(0) {
+                break;
+            }
+            parent = *parents.get(&parent_id).ok_or_else(|| {
+                CatalogError::InvalidMutation(format!(
+                    "parent schema {} no longer exists",
+                    parent_id.0
+                ))
+            })?;
         }
     }
     Ok(())
@@ -325,6 +357,18 @@ pub(super) fn reject_schema_drop_conflicts(
     }
     let dropped_schema_ids = dropped_schema_ids.iter().copied().collect::<BTreeSet<_>>();
     let dropped_table_ids = dropped_table_ids.iter().copied().collect::<BTreeSet<_>>();
+    for schema in list_schemas_at(kv, catalog, latest_order)? {
+        if schema
+            .parent_schema_id
+            .is_some_and(|id| dropped_schema_ids.contains(&id))
+            && !dropped_schema_ids.contains(&schema.schema_id)
+        {
+            return Err(CatalogError::InvalidMutation(format!(
+                "conflict dropping parent schema: child {} exists",
+                schema.name
+            )));
+        }
+    }
     for table in list_tables_at(kv, catalog, latest_order)? {
         if dropped_schema_ids.contains(&table.schema_id)
             && !dropped_table_ids.contains(&table.table_id)

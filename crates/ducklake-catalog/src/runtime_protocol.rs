@@ -1,5 +1,8 @@
-use crate::{CatalogError, CatalogId, CatalogResult};
+use std::fmt::Write;
+
 use sha2::{Digest, Sha256};
+
+use crate::{CatalogError, CatalogId, CatalogResult};
 
 pub const RUNTIME_PROTOCOL_VERSION: u16 = 2;
 pub const MAX_RUNTIME_REQUEST_BYTES: usize = 6 * 1024 * 1024;
@@ -41,6 +44,7 @@ pub struct RuntimeRequest {
     pub operation: String,
     pub payload: Vec<u8>,
     pub read_context_id: Option<u64>,
+    pub snapshot_fence: Option<crate::SnapshotFence>,
     pub page_offset: usize,
     pub page_etag: Option<String>,
 }
@@ -59,6 +63,7 @@ impl RuntimeRequest {
             operation: operation.into(),
             payload,
             read_context_id: None,
+            snapshot_fence: None,
             page_offset: 0,
             page_etag: None,
         };
@@ -104,6 +109,9 @@ impl RuntimeRequest {
         if let Some(read_context_id) = self.read_context_id {
             header.push_str(&format!("read_context_id={read_context_id}\n"));
         }
+        if let Some(fence) = self.snapshot_fence {
+            header.push_str(&format!("snapshot_fence={fence}\n"));
+        }
         header.push('\n');
         let mut out = Vec::with_capacity(header.len().saturating_add(self.payload.len()));
         out.extend_from_slice(header.as_bytes());
@@ -124,6 +132,7 @@ impl RuntimeRequest {
         let mut page_offset = None;
         let mut page_etag = None;
         let mut read_context_id = None;
+        let mut snapshot_fence = None;
         for (index, line) in header.lines().enumerate() {
             if index == 0 {
                 version = Some(parse_magic(line)?);
@@ -139,6 +148,14 @@ impl RuntimeRequest {
                 "page_offset" => page_offset = Some(parse_usize(value, "page_offset")?),
                 "page_etag" => page_etag = Some(value.to_owned()),
                 "read_context_id" => read_context_id = Some(parse_u64(value, "read_context_id")?),
+                "snapshot_fence" => {
+                    if snapshot_fence
+                        .replace(crate::SnapshotFence::try_from(value)?)
+                        .is_some()
+                    {
+                        return Err(CatalogError::Decode("duplicate snapshot fence".to_owned()));
+                    }
+                }
                 _ => {
                     return Err(CatalogError::Decode(format!(
                         "unknown runtime request header {key}"
@@ -156,6 +173,7 @@ impl RuntimeRequest {
         )?
         .with_catalog_id(catalog_id.unwrap_or(CatalogId(1)))?;
         request.read_context_id = read_context_id;
+        request.snapshot_fence = snapshot_fence;
         match (page_offset, page_etag) {
             (None, None) => Ok(request),
             (Some(offset), Some(etag)) => {
@@ -346,7 +364,11 @@ pub(crate) fn paged_runtime_response(
 }
 
 fn runtime_payload_etag(payload: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(payload))
+    let mut etag = String::with_capacity(64);
+    for byte in Sha256::digest(payload) {
+        write!(etag, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    etag
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

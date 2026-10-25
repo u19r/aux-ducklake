@@ -2,12 +2,29 @@ use std::collections::BTreeMap;
 
 use crate::{
     CatalogError, CatalogId, CatalogResult, KvBatch, OrderedCatalogKv, TableId,
-    keys::{conflict_max_catalog_id_key, conflict_max_file_id_key, table_next_row_id_key},
+    keys::{
+        conflict_max_catalog_id_key, conflict_max_file_id_key, conflict_watermarks_initialized_key,
+        table_next_row_id_key,
+    },
 };
+
+const CONFLICT_WATERMARKS_INITIALIZED_VALUE: [u8; 1] = [1];
+const IMPLICIT_MAIN_SCHEMA_ID: u64 = 0;
 
 pub(crate) struct ConflictWatermarkValues {
     pub(crate) max_catalog_id: Option<u64>,
     pub(crate) max_file_id: Option<u64>,
+}
+
+pub(crate) fn stage_conflict_watermarks_initialized(batch: &mut KvBatch, catalog: CatalogId) {
+    batch.put(
+        conflict_watermarks_initialized_key(catalog),
+        CONFLICT_WATERMARKS_INITIALIZED_VALUE.to_vec(),
+    );
+    batch.put(
+        conflict_max_catalog_id_key(catalog),
+        IMPLICIT_MAIN_SCHEMA_ID.to_be_bytes().to_vec(),
+    );
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -31,14 +48,33 @@ pub(crate) fn load_conflict_watermarks(
     catalog: CatalogId,
 ) -> CatalogResult<ConflictWatermarkValues> {
     let keys = [
+        conflict_watermarks_initialized_key(catalog),
         conflict_max_catalog_id_key(catalog),
         conflict_max_file_id_key(catalog),
     ];
     let values = kv.batch_get(&keys)?;
+    if values.len() != keys.len() {
+        return Err(CatalogError::Backend(format!(
+            "conflict watermark batch returned {} values for {} keys",
+            values.len(),
+            keys.len()
+        )));
+    }
+    validate_initialized_marker(&keys[0], values[0].as_deref())?;
     Ok(ConflictWatermarkValues {
-        max_catalog_id: decode_optional_u64(&keys[0], values.first().and_then(Option::as_deref))?,
-        max_file_id: decode_optional_u64(&keys[1], values.get(1).and_then(Option::as_deref))?,
+        max_catalog_id: decode_optional_u64(&keys[1], values[1].as_deref())?,
+        max_file_id: decode_optional_u64(&keys[2], values[2].as_deref())?,
     })
+}
+
+fn validate_initialized_marker(key: &[u8], value: Option<&[u8]>) -> CatalogResult<()> {
+    if value == Some(CONFLICT_WATERMARKS_INITIALIZED_VALUE.as_slice()) {
+        return Ok(());
+    }
+    let key_label = crate::keys::decode_key(key).unwrap_or_else(|_| "<invalid-key>".to_owned());
+    Err(CatalogError::InvalidKey(format!(
+        "missing or invalid conflict watermarks initialized marker for key {key_label}"
+    )))
 }
 
 pub(crate) fn stage_max_catalog_id_watermark(
@@ -146,6 +182,19 @@ pub(crate) fn stage_fdb_max_catalog_id_watermark(
     candidate: u64,
 ) {
     stage_fdb_max_u64(kv, trx, conflict_max_catalog_id_key(catalog), candidate);
+}
+
+#[cfg(feature = "foundationdb")]
+pub(crate) fn stage_fdb_conflict_watermarks_initialized(
+    kv: &crate::FdbOrderedCatalogKv,
+    trx: &foundationdb::Transaction,
+    catalog: CatalogId,
+) {
+    trx.set(
+        &kv.namespaced_key(&conflict_watermarks_initialized_key(catalog)),
+        &CONFLICT_WATERMARKS_INITIALIZED_VALUE,
+    );
+    stage_fdb_max_catalog_id_watermark(kv, trx, catalog, IMPLICIT_MAIN_SCHEMA_ID);
 }
 
 #[cfg(feature = "foundationdb")]

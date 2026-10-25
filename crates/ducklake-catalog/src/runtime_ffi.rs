@@ -1,15 +1,16 @@
+use std::panic::{AssertUnwindSafe, catch_unwind};
+
 #[cfg(feature = "runtime-metrics")]
 use crate::runtime_metrics::record_runtime_request_elapsed;
-use crate::runtime_metrics::{RuntimeMetricStage, RuntimeMetricStatus};
 use crate::{
     CatalogResult,
+    runtime_metrics::{RuntimeMetricStage, RuntimeMetricStatus},
     runtime_operations::{payload_for_request, runtime_operation_policy},
     runtime_protocol::{
         RuntimeCatalogBackend, RuntimeRequest, RuntimeResponse, RuntimeResponseStatus,
         paged_runtime_response,
     },
 };
-use std::panic::{AssertUnwindSafe, catch_unwind};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -43,12 +44,14 @@ fn record_runtime_request_stage(
 }
 
 #[unsafe(no_mangle)]
-/// Executes one catalog runtime request and writes the owned response buffer to `out`.
+/// Executes one catalog runtime request and writes the owned response buffer to
+/// `out`.
 ///
 /// # Safety
 ///
-/// `request_ptr` must reference `request_len` readable bytes for the duration of the call, and
-/// `out` must be a valid, writable pointer to an exclusively owned buffer descriptor.
+/// `request_ptr` must reference `request_len` readable bytes for the duration
+/// of the call, and `out` must be a valid, writable pointer to an exclusively
+/// owned buffer descriptor.
 pub unsafe extern "C" fn ducklake_catalog_runtime_probe(
     request_ptr: *const u8,
     request_len: usize,
@@ -57,7 +60,8 @@ pub unsafe extern "C" fn ducklake_catalog_runtime_probe(
     if request_ptr.is_null() || out.is_null() {
         return FFI_INVALID_ARGUMENT;
     }
-    // SAFETY: The caller provides a non-null pointer and length for the duration of this call.
+    // SAFETY: The caller provides a non-null pointer and length for the duration of
+    // this call.
     let request_bytes = unsafe { std::slice::from_raw_parts(request_ptr, request_len) };
     let probe = match catch_unwind(AssertUnwindSafe(|| runtime_probe_response(request_bytes))) {
         Ok(probe) => probe,
@@ -79,14 +83,16 @@ pub unsafe extern "C" fn ducklake_catalog_runtime_probe(
     }
     match encoded {
         Ok(buffer) => {
-            // SAFETY: `out` was validated as non-null and is exclusively owned by the caller.
+            // SAFETY: `out` was validated as non-null and is exclusively owned by the
+            // caller.
             unsafe {
                 *out = leak_buffer(buffer);
             }
             FFI_OK
         }
         Err(buffer) => {
-            // SAFETY: `out` was validated as non-null and is exclusively owned by the caller.
+            // SAFETY: `out` was validated as non-null and is exclusively owned by the
+            // caller.
             unsafe {
                 *out = leak_buffer(buffer);
             }
@@ -100,8 +106,9 @@ pub unsafe extern "C" fn ducklake_catalog_runtime_probe(
 ///
 /// # Safety
 ///
-/// `ptr` and `len` must be the unchanged pair returned by `ducklake_catalog_runtime_probe`, and
-/// the buffer must not have been freed previously.
+/// `ptr` and `len` must be the unchanged pair returned by
+/// `ducklake_catalog_runtime_probe`, and the buffer must not have been freed
+/// previously.
 pub unsafe extern "C" fn ducklake_catalog_runtime_free(ptr: *mut u8, len: usize) {
     if ptr.is_null() {
         return;
@@ -168,19 +175,20 @@ fn runtime_probe_response(bytes: &[u8]) -> RuntimeProbeResult {
 }
 
 fn runtime_response_from_request(request: RuntimeRequest) -> CatalogResult<RuntimeResponse> {
-    let mut read_request = crate::store::begin_runtime_read_request(request.read_context_id);
-    if read_request.is_new_context() {
-        crate::store::invalidate_runtime_read_context(request.catalog_id);
-    }
     let started = RuntimeMetricStage::start();
     let mutates_catalog = runtime_operation_policy(&request.operation).mutates_catalog;
+    // Commit validation must observe commits made after the caller's pinned read
+    // context.
+    let context_id = request.read_context_id.filter(|_| !mutates_catalog);
+    let mut read_request = crate::store::begin_runtime_read_request(context_id);
     if mutates_catalog && request.page_offset != 0 {
         return Err(crate::CatalogError::Decode(
             "mutating runtime operations cannot be paginated".to_owned(),
         ));
     }
     if mutates_catalog {
-        read_request.invalidate_catalog_on_drop(request.catalog_id);
+        crate::store::invalidate_runtime_read_context(request.catalog_id);
+        read_request.invalidate_catalog_on_drop(request.catalog_id, request.read_context_id);
     }
     let payload = match payload_for_request(&request) {
         Ok(payload) => {
@@ -203,6 +211,9 @@ fn runtime_response_from_request(request: RuntimeRequest) -> CatalogResult<Runti
         }
     };
     let request_id = request.request_id;
+    if request.operation == "EndRuntimeReadContext" {
+        read_request.end_context();
+    }
     if mutates_catalog {
         RuntimeResponse::ok(request_id, payload)
     } else {

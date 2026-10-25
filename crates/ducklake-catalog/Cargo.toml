@@ -20,16 +20,24 @@ path = "src/bin/ducklake-fdb-benchmark.rs"
 name = "ducklake-fdb-prefix-copy"
 path = "src/bin/ducklake-fdb-prefix-copy.rs"
 
+[[bin]]
+name = "ducklake-fdb-prefix-clear"
+path = "src/bin/ducklake-fdb-prefix-clear.rs"
+
 [dependencies]
+chrono = { workspace = true }
 foundationdb = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 sha2 = { workspace = true }
 
 [dev-dependencies]
-alloc-counter = { git = "https://github.com/u19r/aux-common", package = "alloc-counter" }
+alloc-counter = { git = "https://github.com/u19r/aux-common", package = "alloc-counter", rev = "662da2358c5c2bebecc85dd892c45deb825eabc6" }
 tempfile = { workspace = true }
 
 [features]
 default = []
 foundationdb = ["dep:foundationdb", "dep:futures"]
 runtime-metrics = []
+
+[lints]
+workspace = true

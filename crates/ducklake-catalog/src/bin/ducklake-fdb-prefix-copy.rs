@@ -13,7 +13,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod prefix_copy {
     use std::env;
 
-    use ducklake_catalog::keys::prefix_end;
+    use ducklake_catalog::{clear_foundationdb_prefix, keys::prefix_end};
     use foundationdb::{Database, RangeOption, options::TransactionOption};
     use futures::{TryStreamExt, executor::block_on};
 
@@ -23,11 +23,11 @@ mod prefix_copy {
     pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         let args = Args::parse()?;
         validate_prefixes(&args.source_prefix, &args.destination_prefix)?;
-        let _network = unsafe { foundationdb::boot() };
+        let _network = foundationdb::boot()?;
         let db = Database::new(args.cluster_file.as_deref())?;
 
         if args.clear_destination {
-            clear_destination(&db, &args.destination_prefix)?;
+            clear_foundationdb_prefix(&db, args.destination_prefix.as_bytes())?;
         }
         if args.sample_keys > 0 {
             print_sample_keys(&db, &args.source_prefix, args.sample_keys)?;
@@ -179,20 +179,6 @@ mod prefix_copy {
             destination_key.extend_from_slice(suffix);
             trx.set(&destination_key, value);
         }
-        block_on(trx.commit())?;
-        Ok(())
-    }
-
-    fn clear_destination(
-        db: &Database,
-        destination_prefix: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let trx = db.create_trx()?;
-        trx.set_option(TransactionOption::Timeout(5_000))?;
-        trx.clear_range(
-            destination_prefix.as_bytes(),
-            &prefix_end(destination_prefix.as_bytes()),
-        );
         block_on(trx.commit())?;
         Ok(())
     }

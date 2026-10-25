@@ -251,3 +251,37 @@ fn given_current_table_index_when_listing_latest_tables_then_history_is_not_scan
         "latest table listing should use the current table index, not scan table history"
     );
 }
+
+#[test]
+fn given_dropped_latest_table_when_loading_registration_owner_then_only_latest_version_is_decoded()
+{
+    let catalog = CatalogId(5);
+    let table_id = TableId(7);
+    let first_order = CatalogOrderId::uuid_v7(10);
+    let latest_order = CatalogOrderId::uuid_v7(20);
+    let mut latest = TableRow::new(table_id, "latest", latest_order);
+    latest.validity.end_order = Some(CatalogOrderId::uuid_v7(30));
+    let mut batch = KvBatch::new();
+    batch.put(
+        table_object_key(catalog, table_id, first_order),
+        b"unreadable old history".to_vec(),
+    );
+    batch.put(
+        table_object_key(catalog, table_id, latest_order),
+        latest.encode(),
+    );
+    let mut kv = FakeOrderedCatalogKv::new();
+    kv.commit(batch).unwrap();
+
+    let loaded = crate::table_store::load_latest_table_version(&kv, catalog, table_id)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(loaded.name, "latest");
+    assert_eq!(loaded.validity.end_order, latest.validity.end_order);
+    assert!(
+        crate::table_store::load_latest_table_version(&kv, catalog, TableId(8))
+            .unwrap()
+            .is_none()
+    );
+}

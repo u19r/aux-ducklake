@@ -398,7 +398,7 @@ pub(crate) fn load_scheduled_data_file_cleanup_rows(
             .collect::<Vec<_>>(),
     )?;
     let mut rows = Vec::new();
-    for (data_file_id, pair) in data_file_ids.iter().zip(values.chunks_exact(2)) {
+    for (data_file_id, pair) in data_file_ids.iter().zip(values.as_chunks::<2>().0) {
         let [Some(scheduled), Some(data_file)] = pair else {
             continue;
         };
@@ -470,7 +470,7 @@ pub(crate) fn load_scheduled_delete_file_cleanup_rows(
             .collect::<Vec<_>>(),
     )?;
     let mut rows = Vec::new();
-    for (delete_file_id, pair) in delete_file_ids.iter().zip(values.chunks_exact(2)) {
+    for (delete_file_id, pair) in delete_file_ids.iter().zip(values.as_chunks::<2>().0) {
         let [Some(scheduled), Some(delete_file)] = pair else {
             continue;
         };

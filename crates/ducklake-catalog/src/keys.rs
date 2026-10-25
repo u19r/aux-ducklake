@@ -294,6 +294,13 @@ pub fn catalog_file_stats_version_key(catalog: CatalogId) -> Vec<u8> {
 }
 
 #[must_use]
+pub fn conflict_watermarks_initialized_key(catalog: CatalogId) -> Vec<u8> {
+    let mut key = family_prefix(catalog, KeyFamily::MetadataVersion);
+    key.extend_from_slice(b"conflict-watermarks-initialized");
+    key
+}
+
+#[must_use]
 pub fn conflict_max_catalog_id_key(catalog: CatalogId) -> Vec<u8> {
     let mut key = family_prefix(catalog, KeyFamily::MetadataVersion);
     key.extend_from_slice(b"conflict-max-catalog-id");

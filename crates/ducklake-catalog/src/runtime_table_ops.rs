@@ -9,7 +9,7 @@ use crate::{
     runtime_tabular_payload::{
         TabularPayload, default_value_to_option, empty_to_none, parse_bool_field, parse_u64_field,
     },
-    table_store::{list_current_table_rows, list_table_rows_for_table},
+    table_store::list_table_rows_for_table,
 };
 
 pub(crate) const CREATE_TABLES: &str = "CreateTables";
@@ -30,28 +30,6 @@ pub(crate) fn get_next_column_id(
         next_column_id(&kv, catalog, table_id)?
     };
     Ok(format!("next_column_id={next_column_id}\n").into_bytes())
-}
-
-pub(crate) fn is_column_created_with_table(
-    _backend: RuntimeCatalogBackend,
-    catalog: CatalogId,
-    payload: &[u8],
-) -> CatalogResult<Vec<u8>> {
-    let table_name = crate::runtime_payload::payload_string_value(
-        payload,
-        "table_name",
-        "IsColumnCreatedWithTable missing table_name",
-    )?;
-    let column_name = crate::runtime_payload::payload_string_value(
-        payload,
-        "column_name",
-        "IsColumnCreatedWithTable missing column_name",
-    )?;
-    let created = {
-        let kv = open_foundationdb_catalog()?;
-        column_created_with_table(&kv, catalog, &table_name, &column_name)?
-    };
-    Ok(format!("created_with_table={created}\n").into_bytes())
 }
 
 pub(crate) fn create_tables(
@@ -252,26 +230,6 @@ fn next_column_id(
             .ok_or(CatalogError::NotFound("table"))?;
     }
     Ok(max_column_id.map_or(1, |max| max.saturating_add(1)))
-}
-
-fn column_created_with_table(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    table_name: &str,
-    column_name: &str,
-) -> CatalogResult<bool> {
-    latest_snapshot(kv, catalog)?.ok_or(CatalogError::NotFound("catalog snapshot"))?;
-    let tables = list_current_table_rows(kv, catalog)?;
-    Ok(tables
-        .iter()
-        .find(|table| table.name.eq_ignore_ascii_case(table_name))
-        .and_then(|table| {
-            table
-                .columns
-                .iter()
-                .find(|column| column.name.eq_ignore_ascii_case(column_name))
-        })
-        .is_some_and(|column| column.created_with_table))
 }
 
 fn push_current_table(tables: &mut Vec<TableRow>, current: &mut Option<TableRow>) {

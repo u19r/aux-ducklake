@@ -1,9 +1,7 @@
 use crate::{
     CatalogId, CatalogResult, FileColumnStatsRow, FilePartitionValueRow, OrderedCatalogKv,
-    runtime_read_context::CatalogCurrentFileColumnStatsContext,
+    runtime_metadata_ops::*, runtime_read_context::CatalogCurrentFileColumnStatsContext,
 };
-
-use crate::runtime_metadata_ops::*;
 
 #[cfg(not(test))]
 pub(super) fn cached_foundationdb_current_metadata_file_column_stats_rows(
@@ -66,7 +64,8 @@ pub(super) fn append_file_partition_values_mirror_inserts(
             sql_string(&row.partition_value)
         };
         out.push_str(&format!(
-            "INSERT INTO {{METADATA_CATALOG}}.ducklake_file_partition_value VALUES ({}, {}, {}, {});\n",
+            "INSERT INTO {{METADATA_CATALOG}}.ducklake_file_partition_value VALUES ({}, {}, {}, \
+             {});\n",
             row.data_file_id.0, row.table_id.0, row.partition_key_index.0, partition_value
         ));
     }
@@ -102,7 +101,9 @@ pub(super) fn append_file_column_stats_mirror_inserts(
 ) {
     for row in rows {
         out.push_str(&format!(
-            "INSERT INTO {{METADATA_CATALOG}}.ducklake_file_column_stats VALUES ({}, {}, {}, NULL, {}, {}, {}, {}, NULL, {});\n",
+            "INSERT INTO {{METADATA_CATALOG}}.ducklake_file_column_stats (data_file_id, table_id, \
+             column_id, column_size_bytes, value_count, null_count, min_value, max_value, \
+             contains_nan, extra_stats) VALUES ({}, {}, {}, NULL, {}, {}, {}, {}, NULL, {});\n",
             row.data_file_id.0,
             row.table_id.0,
             row.column_id.0,

@@ -79,13 +79,24 @@ pub(crate) fn stage_prepared_inline_flush_versionstamped(
         ConflictRangeType::Read,
     )
     .map_err(map_fdb_error)?;
-    for row_id in &prepared.current_row_ids {
-        trx.clear(&kv.namespaced_key(&inline_current_row_key(
+    // Clear exactly the observed IDs. Contiguous IDs share one mutation;
+    // gaps and any later allocated IDs remain outside these ranges.
+    let row_key = |row_id| {
+        kv.namespaced_key(&inline_current_row_key(
             catalog,
             prepared.flush.table_id,
             prepared.flush.schema_id,
-            *row_id,
-        )));
+            row_id,
+        ))
+    };
+    for rows in prepared
+        .current_row_ids
+        .chunk_by(|left, right| left.checked_add(1) == Some(*right))
+    {
+        let start = row_key(rows[0]);
+        let mut end = row_key(rows[rows.len() - 1]);
+        end.push(0);
+        trx.clear_range(&start, &end);
     }
     trx.atomic_op(
         &kv.versionstamped_key(

@@ -2,7 +2,6 @@
 use std::sync::OnceLock;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt::Write,
     ops::Bound,
 };
 
@@ -12,87 +11,8 @@ use crate::CatalogCacheNamespace;
 use crate::bounded_cache::{BoundedCache, static_bounded_cache};
 use crate::{
     CatalogId, CatalogOrderId, CatalogResult, OrderedCatalogKv, SchemaId,
-    inline_change_feed::list_inline_deleted_row_changes_for_schema,
+    inline_change_feed::list_inline_deleted_row_changes_for_schema, runtime_inline_rows::*,
 };
-
-use crate::runtime_inline_rows::*;
-
-pub(crate) fn inline_flush_delete_positions_payload(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    payload: InlineFlushDeletePositionsPayload,
-) -> CatalogResult<Vec<u8>> {
-    let snapshot = inline_read_snapshot(
-        kv,
-        catalog,
-        Some(payload.snapshot),
-        InlineStatsRequest::Conservative,
-    )?
-    .ok_or_else(|| missing_snapshot(payload.snapshot.public_id()))?;
-    let context = InlineTableSnapshotContext::load_for_table_name(
-        kv,
-        catalog,
-        &payload.table_name,
-        snapshot,
-    )?;
-    let payloads = context.payloads(kv, catalog, false)?;
-    let render_context = context.render_context(kv, catalog)?;
-    let mut rows = Vec::new();
-    for inline_payload in payloads {
-        let begin_snapshot = render_context
-            .snapshot_sequence(inline_payload.begin_order)
-            .ok_or_else(|| missing_snapshot_order(inline_payload.begin_order))?;
-        collect_inline_flush_rows(
-            &inline_payload.payload,
-            begin_snapshot,
-            &render_context.deleted_rows,
-            &mut rows,
-        )?;
-    }
-    let filter = InlineFlushPartitionFilter::parse(
-        payload.partition_filter.as_deref(),
-        &context.schema_table,
-    )?;
-    rows.retain(|row| filter.matches(row));
-    let file_order =
-        InlineFlushFileOrder::parse(payload.file_order.as_deref(), &context.schema_table)?;
-    rows.sort_by(|left, right| file_order.compare(left, right));
-    let position_start = payload.position_start.unwrap_or(0);
-    let position_end = payload.position_end.unwrap_or(u64::MAX);
-    let delete_count = rows
-        .iter()
-        .enumerate()
-        .filter(|(position, row)| {
-            row.end_snapshot.is_some()
-                && position_in_flush_window(*position, position_start, position_end)
-        })
-        .count();
-    if delete_count == 0 {
-        return Ok(b"delete_position_count=0\n".to_vec());
-    }
-
-    let mut out = format!("delete_position_count={delete_count}\n");
-    for (position, row) in rows.iter().enumerate() {
-        if !position_in_flush_window(position, position_start, position_end) {
-            continue;
-        }
-        if let Some(end_snapshot) = row.end_snapshot {
-            writeln!(out, "delete_position\t{end_snapshot}\t{position}").map_err(|error| {
-                crate::CatalogError::Decode(format!(
-                    "failed to render inline delete position: {error}"
-                ))
-            })?;
-        }
-    }
-    Ok(out.into_bytes())
-}
-
-pub(super) fn position_in_flush_window(position: usize, start: u64, end: u64) -> bool {
-    let Ok(position) = u64::try_from(position) else {
-        return false;
-    };
-    start <= position && position < end
-}
 
 #[derive(Clone)]
 pub(super) struct InlineDeletionIndex {

@@ -6,6 +6,8 @@ use std::{
 use foundationdb::options::ConflictRangeType;
 use futures::{executor::block_on, future::try_join_all};
 
+#[cfg(test)]
+use crate::store::latest_snapshot;
 use crate::{
     CatalogError, CatalogResult, CommitAttemptId, CommitAttemptRow, DataFileId, DataFileRow,
     DataMutationCommit, DeleteFileId, DeleteFileRow, FdbOrderedCatalogKv, FilePartitionValueRow,
@@ -21,9 +23,6 @@ use crate::{
     },
     kv::OrderedCatalogKv,
 };
-
-#[cfg(test)]
-use crate::store::latest_snapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum MutationCommitAttempt {
@@ -519,7 +518,7 @@ pub(super) fn reject_duplicate_proposed_file_ids(
     Ok(())
 }
 
-pub(super) fn recover_committed_mutation(
+pub(crate) fn recover_committed_mutation(
     kv: &impl OrderedCatalogKv,
     catalog: crate::CatalogId,
     attempt_id: Option<CommitAttemptId>,

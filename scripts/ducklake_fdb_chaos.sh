@@ -4,8 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
     case "$CARGO_TARGET_DIR" in
-        /*) ;;
-        *) CARGO_TARGET_DIR="$ROOT_DIR/$CARGO_TARGET_DIR" ;;
+    /*) ;;
+    *) CARGO_TARGET_DIR="$ROOT_DIR/$CARGO_TARGET_DIR" ;;
     esac
 else
     CARGO_TARGET_DIR="$ROOT_DIR/target/codex-validation"

@@ -249,6 +249,9 @@ impl FdbOrderedCatalogKv {
 
         let started = MutationMetricStage::start();
         let trx = self.create_transaction()?;
+        if let Some(fence) = read_context.snapshot_fence {
+            fence.stage(self, &trx, catalog)?;
+        }
         let validates_with_row_id_watermark =
             should_reject_current_row_id_overlaps(row_id_overlap_policy, &inline_flushes)
                 && dropped_data_file_ids.is_empty();
@@ -282,7 +285,9 @@ impl FdbOrderedCatalogKv {
                         staged_inline_flush_items.saturating_add(staged.staged_item_count());
                 }
                 Err(error) => {
-                    if matches!(error, CatalogError::ConflictFenceChanged { .. }) {
+                    if read_context.snapshot_fence.is_none()
+                        && matches!(error, CatalogError::ConflictFenceChanged { .. })
+                    {
                         return Ok(MutationCommitAttempt::Done(DataMutationCommit::default()));
                     }
                     return Err(error);
@@ -290,6 +295,11 @@ impl FdbOrderedCatalogKv {
             }
         }
         if !inline_flushes.is_empty() && staged_inline_flush_items == 0 {
+            if read_context.snapshot_fence.is_some() {
+                return Err(CatalogError::InvalidMutation(
+                    "conflict committing fenced mutation: inline flush staged no rows".to_owned(),
+                ));
+            }
             return Ok(MutationCommitAttempt::Done(DataMutationCommit::default()));
         }
         reject_existing_file_ids(
@@ -430,7 +440,8 @@ impl FdbOrderedCatalogKv {
         let versionstamp = trx.get_versionstamp();
         if let Err(error) = commit_transaction(trx, attempt_id) {
             let error_class = classify_fdb_error(error);
-            if !inline_flushes.is_empty()
+            if read_context.snapshot_fence.is_none()
+                && !inline_flushes.is_empty()
                 && error_class == FoundationDbErrorClass::RetryableNotCommitted
             {
                 return Ok(MutationCommitAttempt::Done(DataMutationCommit::default()));
@@ -517,6 +528,8 @@ fn commit_transaction(
     transaction: foundationdb::Transaction,
     attempt_id: Option<crate::CommitAttemptId>,
 ) -> Result<(), foundationdb::FdbError> {
+    #[cfg(test)]
+    crate::snapshot_fence::snapshot_fence_tests::invoke_before_commit();
     inject_commit_unknown("before", attempt_id)?;
     block_on(transaction.commit())
         .map(|_| ())
@@ -535,14 +548,31 @@ fn inject_commit_unknown(
     let Some((requested_stage, requested_attempt)) = request.split_once(':') else {
         return Ok(());
     };
-    let requested_attempt = requested_attempt.parse::<u128>().ok();
-    if requested_stage != stage || attempt_id.map(|id| id.0) != requested_attempt {
+    let Some(attempt_id) = attempt_id else {
+        return Ok(());
+    };
+    let receipt = std::env::var_os("AUX_DUCKLAKE_TEST_FDB_COMMIT_UNKNOWN_RECEIPT");
+    let matches_attempt = if requested_attempt == "any" {
+        // The caller arms this receipt after schema setup, so startup commits
+        // cannot consume the fault intended for the first data mutation.
+        receipt.as_ref().is_some_and(|path| {
+            std::fs::read_to_string(path).is_ok_and(|contents| contents == "armed")
+        })
+    } else {
+        requested_attempt.parse::<u128>().ok() == Some(attempt_id.0)
+    };
+    if requested_stage != stage || !matches_attempt {
         return Ok(());
     }
     let Ok(mut last_request) = LAST_COMMIT_UNKNOWN_INJECTION.lock() else {
         return Ok(());
     };
     if last_request.as_ref() == Some(&request) {
+        return Ok(());
+    }
+    if let Some(path) = receipt
+        && std::fs::write(path, format!("{stage}:{}", attempt_id.0)).is_err()
+    {
         return Ok(());
     }
     *last_request = Some(request);

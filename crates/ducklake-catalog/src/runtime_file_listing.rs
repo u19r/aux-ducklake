@@ -1,14 +1,16 @@
 #[cfg(feature = "foundationdb")]
+use std::cmp::Ordering;
+#[cfg(feature = "foundationdb")]
 use std::collections::HashMap;
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(not(test))]
 use std::sync::OnceLock;
 
-#[cfg(not(test))]
 use crate::CatalogCacheNamespace;
 #[cfg(not(test))]
 use crate::bounded_cache::{BoundedCache, static_bounded_cache};
 use crate::runtime_metrics::RuntimeMetricStage;
+use crate::typed_scalar::{compare_typed_scalars, normalize_catalog_scalar_type};
 use crate::{
     AttachedDataFile, CatalogId, CatalogOrderId, CatalogResult, DataFileId, DuckLakeSnapshotId,
     OrderedCatalogKv, PartitionKeyIndex, SchemaId, SnapshotRow, TableId,
@@ -33,6 +35,8 @@ use crate::file_partitions::{
 use crate::latest_snapshot;
 #[cfg(test)]
 use crate::list_data_files_with_deletes_at;
+#[cfg(feature = "foundationdb")]
+use crate::runtime_inline_snapshot::capture::capture_inline_current_rows_at_read_version;
 #[cfg(feature = "runtime-metrics")]
 use crate::runtime_metrics::record_runtime_method_elapsed;
 #[cfg(feature = "runtime-metrics")]
@@ -141,9 +145,10 @@ pub(crate) fn foundationdb_data_files_at_payload(
     payload: ListDataFilesAtPayload,
 ) -> CatalogResult<Vec<u8>> {
     let started = RuntimeMetricStage::start();
+    let read_kv = runtime_read_snapshot_kv(kv)?;
     #[cfg(not(test))]
     let cache_key = FileListingPayloadCacheKey::data_files_at(
-        kv.catalog_cache_namespace(),
+        read_kv.catalog_cache_namespace(),
         catalog,
         payload.table_id,
         payload.snapshot_id,
@@ -154,16 +159,23 @@ pub(crate) fn foundationdb_data_files_at_payload(
     {
         return Ok(payload);
     }
-    let mut request = FileListingRequestContext::for_current_catalog(kv, catalog)?;
-    let snapshot = request.resolve_snapshot(kv, catalog, payload.snapshot_id)?;
+    let mut request = FileListingRequestContext::for_current_catalog(&read_kv, catalog)?;
+    let snapshot = request.resolve_snapshot(&read_kv, catalog, payload.snapshot_id)?;
+    if let Some(table) = load_table_at(&read_kv, catalog, payload.table_id, snapshot.order)? {
+        capture_inline_current_rows_at_read_version(&read_kv, catalog, &table, snapshot.order)?;
+    }
     record_list_data_files_at_stage("Snapshot", started);
-    let files =
-        foundationdb_attached_data_files_at_order(kv, catalog, payload.table_id, snapshot.order)?;
+    let files = foundationdb_attached_data_files_at_order(
+        &read_kv,
+        catalog,
+        payload.table_id,
+        snapshot.order,
+    )?;
     let started = RuntimeMetricStage::start();
     let mut out = String::new();
     push_files_payload(
         &mut out,
-        kv,
+        &read_kv,
         catalog,
         snapshot.order,
         files,
@@ -180,6 +192,20 @@ pub(crate) fn foundationdb_data_files_at_payload(
 
 #[cfg(feature = "foundationdb")]
 pub(crate) fn foundationdb_attached_data_files_at_order(
+    kv: &crate::FdbOrderedCatalogKv,
+    catalog: CatalogId,
+    table_id: TableId,
+    snapshot_order: CatalogOrderId,
+) -> CatalogResult<Vec<AttachedDataFile>> {
+    let read_kv = runtime_read_snapshot_kv(kv)?;
+    if let Some(table) = load_table_at(&read_kv, catalog, table_id, snapshot_order)? {
+        capture_inline_current_rows_at_read_version(&read_kv, catalog, &table, snapshot_order)?;
+    }
+    foundationdb_attached_data_files_at_order_inner(&read_kv, catalog, table_id, snapshot_order)
+}
+
+#[cfg(feature = "foundationdb")]
+fn foundationdb_attached_data_files_at_order_inner(
     kv: &crate::FdbOrderedCatalogKv,
     catalog: CatalogId,
     table_id: TableId,
@@ -204,6 +230,16 @@ pub(crate) fn foundationdb_attached_data_files_at_order(
     Ok(files)
 }
 
+#[cfg(feature = "foundationdb")]
+pub(crate) fn runtime_read_snapshot_kv(
+    kv: &crate::FdbOrderedCatalogKv,
+) -> CatalogResult<crate::FdbOrderedCatalogKv> {
+    if crate::store::active_runtime_read_context_id().is_some() {
+        return kv.with_read_version();
+    }
+    Ok(kv.clone())
+}
+
 #[cfg(all(feature = "foundationdb", feature = "runtime-metrics"))]
 fn record_list_data_files_at_stage(stage: &str, started: RuntimeMetricStage) {
     record_runtime_request_elapsed(
@@ -224,9 +260,10 @@ pub(crate) fn foundationdb_current_partition_files_payload(
     catalog: CatalogId,
     payload: CurrentPartitionFilesPayload,
 ) -> CatalogResult<Vec<u8>> {
+    let read_kv = runtime_read_snapshot_kv(kv)?;
     #[cfg(not(test))]
     let cache_key = FileListingPayloadCacheKey::current_partition_files(
-        kv.catalog_cache_namespace(),
+        read_kv.catalog_cache_namespace(),
         catalog,
         payload.table_id,
         payload.partition_key_index,
@@ -238,19 +275,23 @@ pub(crate) fn foundationdb_current_partition_files_payload(
     {
         return Ok(payload);
     }
-    let snapshot = latest_snapshot(kv, catalog)?
+    let snapshot = latest_snapshot(&read_kv, catalog)?
         .ok_or_else(|| crate::CatalogError::Decode("catalog snapshot does not exist".to_owned()))?;
+    if let Some(table) = load_table_at(&read_kv, catalog, payload.table_id, snapshot.order)? {
+        capture_inline_current_rows_at_read_version(&read_kv, catalog, &table, snapshot.order)?;
+    }
     let mut request = FileListingRequestContext::from_latest(Some(snapshot.clone()));
     let files = list_current_data_files_for_partition_scan(
-        kv,
+        &read_kv,
         catalog,
         payload.table_id,
         payload.partition_key_index,
         &payload.partition_value,
     )?;
-    let files = block_on(kv.attach_current_delete_files_async(catalog, files, snapshot.order))?;
+    let files =
+        block_on(read_kv.attach_current_delete_files_async(catalog, files, snapshot.order))?;
     let rendered = partition_files_payload_with_context(
-        kv,
+        &read_kv,
         catalog,
         snapshot.order,
         payload.partition_value,
@@ -270,22 +311,27 @@ pub(crate) fn foundationdb_current_partition_files_batch_payload(
     catalog: CatalogId,
     payload: CurrentPartitionFilesBatchPayload,
 ) -> CatalogResult<Vec<u8>> {
-    let snapshot = latest_snapshot(kv, catalog)?
+    let read_kv = runtime_read_snapshot_kv(kv)?;
+    let snapshot = latest_snapshot(&read_kv, catalog)?
         .ok_or_else(|| crate::CatalogError::Decode("catalog snapshot does not exist".to_owned()))?;
+    if let Some(table) = load_table_at(&read_kv, catalog, payload.table_id, snapshot.order)? {
+        capture_inline_current_rows_at_read_version(&read_kv, catalog, &table, snapshot.order)?;
+    }
     let mut request = FileListingRequestContext::from_latest(Some(snapshot.clone()));
     let mut out = String::new();
     for partition_value in payload.partition_values {
         let files = list_current_data_files_for_partition_scan(
-            kv,
+            &read_kv,
             catalog,
             payload.table_id,
             payload.partition_key_index,
             &partition_value,
         )?;
-        let files = block_on(kv.attach_current_delete_files_async(catalog, files, snapshot.order))?;
+        let files =
+            block_on(read_kv.attach_current_delete_files_async(catalog, files, snapshot.order))?;
         push_partition_files_payload_with_context(
             &mut out,
-            kv,
+            &read_kv,
             catalog,
             snapshot.order,
             &partition_value,
@@ -302,8 +348,9 @@ pub(crate) fn foundationdb_current_partition_prune_files_payload(
     catalog: CatalogId,
     payload: CurrentPartitionPruneFilesPayload,
 ) -> CatalogResult<Vec<u8>> {
+    let read_kv = runtime_read_snapshot_kv(kv)?;
     let partition_values = matching_partition_values(
-        kv,
+        &read_kv,
         catalog,
         payload.table_id,
         payload.partition_key_index,
@@ -315,7 +362,7 @@ pub(crate) fn foundationdb_current_partition_prune_files_payload(
         return Ok(Vec::new());
     }
     foundationdb_current_partition_files_batch_payload(
-        kv,
+        &read_kv,
         catalog,
         CurrentPartitionFilesBatchPayload {
             table_id: payload.table_id,
@@ -331,9 +378,10 @@ pub(crate) fn foundationdb_partition_files_at_payload(
     catalog: CatalogId,
     payload: PartitionFilesAtPayload,
 ) -> CatalogResult<Vec<u8>> {
+    let read_kv = runtime_read_snapshot_kv(kv)?;
     #[cfg(not(test))]
     let cache_key = FileListingPayloadCacheKey::partition_files_at(
-        kv.catalog_cache_namespace(),
+        read_kv.catalog_cache_namespace(),
         catalog,
         payload.table_id,
         payload.snapshot_id,
@@ -346,17 +394,20 @@ pub(crate) fn foundationdb_partition_files_at_payload(
     {
         return Ok(payload);
     }
-    let mut request = FileListingRequestContext::for_current_catalog(kv, catalog)?;
-    let snapshot = request.resolve_snapshot(kv, catalog, payload.snapshot_id)?;
+    let mut request = FileListingRequestContext::for_current_catalog(&read_kv, catalog)?;
+    let snapshot = request.resolve_snapshot(&read_kv, catalog, payload.snapshot_id)?;
+    if let Some(table) = load_table_at(&read_kv, catalog, payload.table_id, snapshot.order)? {
+        capture_inline_current_rows_at_read_version(&read_kv, catalog, &table, snapshot.order)?;
+    }
     let filter = PartitionScanFilter::load(
-        kv,
+        &read_kv,
         catalog,
         payload.table_id,
         payload.partition_key_index,
         &payload.partition_value,
     )?;
     let files = match foundationdb_cached_attached_visible_data_files_at(
-        kv,
+        &read_kv,
         catalog,
         payload.table_id,
         snapshot.order,
@@ -366,16 +417,20 @@ pub(crate) fn foundationdb_partition_files_at_payload(
             .filter(|attached| filter.includes(attached.data_file.data_file_id))
             .collect(),
         None => {
-            let files =
-                foundationdb_visible_data_files_at(kv, catalog, payload.table_id, snapshot.order)?
-                    .into_iter()
-                    .filter(|data_file| filter.includes(data_file.data_file_id))
-                    .collect();
-            block_on(kv.attach_delete_files_at_async(catalog, files, snapshot.order))?
+            let files = foundationdb_visible_data_files_at(
+                &read_kv,
+                catalog,
+                payload.table_id,
+                snapshot.order,
+            )?
+            .into_iter()
+            .filter(|data_file| filter.includes(data_file.data_file_id))
+            .collect();
+            block_on(read_kv.attach_delete_files_at_async(catalog, files, snapshot.order))?
         }
     };
     let rendered = partition_files_payload_with_context(
-        kv,
+        &read_kv,
         catalog,
         snapshot.order,
         payload.partition_value,
@@ -395,20 +450,28 @@ pub(crate) fn foundationdb_partition_files_at_batch_payload(
     catalog: CatalogId,
     payload: PartitionFilesAtBatchPayload,
 ) -> CatalogResult<Vec<u8>> {
-    let mut request = FileListingRequestContext::for_current_catalog(kv, catalog)?;
-    let snapshot = request.resolve_snapshot(kv, catalog, payload.snapshot_id)?;
+    let read_kv = runtime_read_snapshot_kv(kv)?;
+    let mut request = FileListingRequestContext::for_current_catalog(&read_kv, catalog)?;
+    let snapshot = request.resolve_snapshot(&read_kv, catalog, payload.snapshot_id)?;
+    if let Some(table) = load_table_at(&read_kv, catalog, payload.table_id, snapshot.order)? {
+        capture_inline_current_rows_at_read_version(&read_kv, catalog, &table, snapshot.order)?;
+    }
     let attached_files = match foundationdb_cached_attached_visible_data_files_at(
-        kv,
+        &read_kv,
         catalog,
         payload.table_id,
         snapshot.order,
     ) {
         Some(files) => files,
         None => {
-            let files =
-                foundationdb_visible_data_files_at(kv, catalog, payload.table_id, snapshot.order)?;
+            let files = foundationdb_visible_data_files_at(
+                &read_kv,
+                catalog,
+                payload.table_id,
+                snapshot.order,
+            )?;
             foundationdb_attached_visible_data_files_at(
-                kv,
+                &read_kv,
                 catalog,
                 payload.table_id,
                 snapshot.order,
@@ -416,13 +479,17 @@ pub(crate) fn foundationdb_partition_files_at_batch_payload(
             )?
         }
     };
-    let partitioned =
-        partitioned_data_file_ids(kv, catalog, payload.table_id, payload.partition_key_index)?;
+    let partitioned = partitioned_data_file_ids(
+        &read_kv,
+        catalog,
+        payload.table_id,
+        payload.partition_key_index,
+    )?;
     let file_index = PartitionBatchFileIndex::new(&attached_files, &partitioned);
     let mut out = String::new();
     for partition_value in payload.partition_values {
         let matched = partition_value_lookup_ids(
-            kv,
+            &read_kv,
             catalog,
             payload.table_id,
             payload.partition_key_index,
@@ -435,7 +502,7 @@ pub(crate) fn foundationdb_partition_files_at_batch_payload(
             .collect();
         push_partition_files_payload_with_context(
             &mut out,
-            kv,
+            &read_kv,
             catalog,
             snapshot.order,
             &partition_value,
@@ -493,8 +560,9 @@ pub(crate) fn foundationdb_partition_prune_files_at_payload(
     catalog: CatalogId,
     payload: PartitionPruneFilesAtPayload,
 ) -> CatalogResult<Vec<u8>> {
+    let read_kv = runtime_read_snapshot_kv(kv)?;
     let partition_values = matching_partition_values(
-        kv,
+        &read_kv,
         catalog,
         payload.table_id,
         payload.partition_key_index,
@@ -506,7 +574,7 @@ pub(crate) fn foundationdb_partition_prune_files_at_payload(
         return Ok(Vec::new());
     }
     foundationdb_partition_files_at_batch_payload(
-        kv,
+        &read_kv,
         catalog,
         PartitionFilesAtBatchPayload {
             snapshot_id: payload.snapshot_id,
@@ -551,46 +619,24 @@ fn partition_value_matches(
     if candidate == "__HIVE_DEFAULT_PARTITION__" {
         return false;
     }
-    let normalized_type = column_type.to_ascii_uppercase();
-    if normalized_type.contains("INT")
-        && let (Ok(left), Ok(right)) = (candidate.parse::<i128>(), boundary.parse::<i128>())
-    {
-        return compare_values(left, right, comparison);
-    }
-    if (normalized_type.contains("FLOAT")
-        || normalized_type.contains("DOUBLE")
-        || normalized_type.contains("REAL")
-        || normalized_type.contains("DECIMAL"))
-        && let (Ok(left), Ok(right)) = (candidate.parse::<f64>(), boundary.parse::<f64>())
-    {
-        return compare_partial_values(left, right, comparison);
-    }
-    compare_values(candidate, boundary, comparison)
-}
-
-#[cfg(feature = "foundationdb")]
-fn compare_values<T: Ord>(left: T, right: T, comparison: PartitionPruneComparison) -> bool {
-    match comparison {
-        PartitionPruneComparison::Equal => left == right,
-        PartitionPruneComparison::GreaterThan => left > right,
-        PartitionPruneComparison::GreaterThanOrEqual => left >= right,
-        PartitionPruneComparison::LessThan => left < right,
-        PartitionPruneComparison::LessThanOrEqual => left <= right,
+    match compare_typed_scalars(
+        normalize_catalog_scalar_type(column_type),
+        candidate,
+        boundary,
+    ) {
+        Some(ordering) => compare_partition_order(ordering, comparison),
+        None => true,
     }
 }
 
 #[cfg(feature = "foundationdb")]
-fn compare_partial_values<T: PartialOrd>(
-    left: T,
-    right: T,
-    comparison: PartitionPruneComparison,
-) -> bool {
+fn compare_partition_order(ordering: Ordering, comparison: PartitionPruneComparison) -> bool {
     match comparison {
-        PartitionPruneComparison::Equal => left == right,
-        PartitionPruneComparison::GreaterThan => left > right,
-        PartitionPruneComparison::GreaterThanOrEqual => left >= right,
-        PartitionPruneComparison::LessThan => left < right,
-        PartitionPruneComparison::LessThanOrEqual => left <= right,
+        PartitionPruneComparison::Equal => ordering == Ordering::Equal,
+        PartitionPruneComparison::GreaterThan => ordering == Ordering::Greater,
+        PartitionPruneComparison::GreaterThanOrEqual => ordering != Ordering::Less,
+        PartitionPruneComparison::LessThan => ordering == Ordering::Less,
+        PartitionPruneComparison::LessThanOrEqual => ordering != Ordering::Greater,
     }
 }
 
@@ -944,9 +990,38 @@ pub(crate) fn invalidate_file_listing_read_context(catalog: CatalogId) {
     }
 }
 
+#[cfg(not(test))]
+pub(crate) fn end_file_listing_read_context(
+    namespace: CatalogCacheNamespace,
+    catalog: CatalogId,
+    read_context_id: u64,
+) {
+    let namespace = namespace
+        .without_read_context()
+        .with_read_context(Some(read_context_id));
+    if let Some(cache) = FILE_LISTING_PAYLOAD_CACHE.get() {
+        cache.retain(|key, _| key.catalog != catalog || key.namespace != namespace);
+    }
+    if let Some(cache) = VISIBLE_DATA_FILES_AT_CACHE.get() {
+        cache.retain(|key, _| key.catalog != catalog || key.namespace != namespace);
+    }
+    if let Some(cache) = ATTACHED_VISIBLE_DATA_FILES_AT_CACHE.get() {
+        cache.retain(|key, _| key.catalog != catalog || key.namespace != namespace);
+    }
+}
+
 #[cfg(test)]
 #[allow(dead_code)]
 pub(crate) fn invalidate_file_listing_read_context(_catalog: CatalogId) {}
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn end_file_listing_read_context(
+    _namespace: CatalogCacheNamespace,
+    _catalog: CatalogId,
+    _read_context_id: u64,
+) {
+}
 
 fn latest_or_next_public_snapshot(
     latest: Option<&SnapshotRow>,

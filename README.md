@@ -12,6 +12,11 @@ The repository contains:
 
 For binary and extension setup, see [USAGE.md](USAGE.md).
 
+Embedded consumers must use the matching patched DuckDB host, DuckLake extension, and
+`libducklake_catalog` runtime described in [USAGE.md](USAGE.md#embedded-host-provenance). A
+`LOAD`-only check on stock DuckDB is not an aux-catalog proof; the current aux-duckdb bundle uses
+upstream DuckLake and is not a valid `META_TYPE 'aux_catalog'` host.
+
 ## Repository Layout
 
 - `crates/ducklake-catalog/`: catalog runtime, FoundationDB backend, FFI, and utilities.
@@ -23,7 +28,7 @@ For binary and extension setup, see [USAGE.md](USAGE.md).
 
 ## Prerequisites
 
-- Rust 1.96.0 or newer.
+- Rust 1.99.1 or newer.
 - `just`, `cmake`, `git`, and either `ninja` or `make`.
 - FoundationDB client tools and library for FoundationDB tests and runtime work.
 - PostgreSQL, including `pg_config`, for parity tests, upstream PostgreSQL tests, and the release gate.
@@ -41,7 +46,7 @@ just ducklake-runtime-cpp-ffi-smoke
 ```
 
 `just ducklake-fetch` checks out the DuckLake and DuckDB commits pinned in
-`scripts/fetch_ducklake.sh` and applies
+`scripts/ducklake-upstream-pins.sh` and applies
 `patches/ducklake/0001-add-aux-catalog-metadata-manager.patch`. Treat
 `third_party/ducklake/` as generated output.
 
@@ -78,7 +83,8 @@ artifacts are written under `docs/benchmarks/ducklake-fdb-feature-parity/`.
 
 The upstream checkout is generated from the DuckLake and DuckDB pins plus the aux bridge patch.
 
-1. Update `DUCKLAKE_COMMIT` and `DUCKDB_COMMIT` in `scripts/fetch_ducklake.sh`. Advancing DuckDB
+1. Update `DUCKLAKE_COMMIT`, `DUCKDB_COMMIT`, and `DUCKDB_VERSION` in
+   `scripts/ducklake-upstream-pins.sh`. Advancing DuckDB
    beyond DuckLake's submodule pin may require API compatibility changes.
 2. Rebase `patches/ducklake/0001-add-aux-catalog-metadata-manager.patch` onto the DuckLake pin.
 3. Run:

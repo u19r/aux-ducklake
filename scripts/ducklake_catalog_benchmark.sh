@@ -95,7 +95,7 @@ copy_metric_snapshot() {
     if [[ -n "$source" && -f "$source" ]]; then
         cp "$source" "$target"
     else
-        : > "$target"
+        : >"$target"
     fi
 }
 
@@ -333,105 +333,107 @@ assert_label() {
 
 profile="${1:-smoke}"
 case "$profile" in
-    inline)
-        inline_table_count="${AUX_DUCKLAKE_INLINE_TABLES:-5}"
-        inline_first_rows="${AUX_DUCKLAKE_INLINE_FIRST_ROWS:-5}"
-        inline_second_rows="${AUX_DUCKLAKE_INLINE_SECOND_ROWS:-12}"
-        inline_delete_rows="${AUX_DUCKLAKE_INLINE_DELETE_ROWS:-2}"
-        inline_split_steps="${AUX_DUCKLAKE_INLINE_SPLIT_STEPS:-0}"
-        inline_preload_tables="${AUX_DUCKLAKE_INLINE_PRELOAD_TABLES:-0}"
-        inline_preload_rows="${AUX_DUCKLAKE_INLINE_PRELOAD_ROWS:-1}"
-        inline_flush_interval="${AUX_DUCKLAKE_INLINE_FLUSH_INTERVAL:-end}"
-        realistic_row_bytes="${AUX_DUCKLAKE_REALISTIC_ROW_BYTES:-4096}"
-        scan_rows=0
-        parallel_workers=1
-        table_count="$inline_table_count"
-        target_data_bytes=0
-        ;;
-    scan10)
-        scan_rows=35
-        parallel_workers=2
-        table_count=2
-        target_data_bytes=0
-        ;;
-    smoke)
-        scan_rows=100
-        parallel_workers=4
-        table_count=2
-        target_data_bytes=0
-        ;;
-    profile)
-        scan_rows="${2:-10000}"
-        parallel_workers=4
-        table_count=2
-        target_data_bytes=0
-        ;;
-    operational)
-        scan_rows=0
-        parallel_workers=1
-        table_count=3
-        target_data_bytes=0
-        production_commit_iterations="${AUX_DUCKLAKE_OPERATIONAL_COMMIT_ITERATIONS:-10}"
-        operational_trials="${AUX_DUCKLAKE_OPERATIONAL_TRIALS:-4}"
-        operational_validation="each"
-        [[ "$operational_trials" =~ ^[0-9]+$ ]] &&
-            ((operational_trials >= 2 && operational_trials % 2 == 0)) ||
-            fail "AUX_DUCKLAKE_OPERATIONAL_TRIALS must be an even integer of at least 2"
-        ;;
-    operational-growth)
-        scan_rows=0
-        parallel_workers=1
-        table_count=3
-        target_data_bytes=0
-        production_commit_iterations="${AUX_DUCKLAKE_OPERATIONAL_GROWTH_COMMIT_ITERATIONS:-100}"
-        operational_trials="${AUX_DUCKLAKE_OPERATIONAL_GROWTH_TRIALS:-2}"
-        operational_validation="final"
-        [[ "$operational_trials" =~ ^[0-9]+$ ]] &&
-            ((operational_trials >= 2 && operational_trials % 2 == 0)) ||
-            fail "AUX_DUCKLAKE_OPERATIONAL_TRIALS must be an even integer of at least 2"
-        ;;
-    realistic)
-        table_count="${AUX_DUCKLAKE_REALISTIC_TABLES:-50}"
-        target_data_bytes="${AUX_DUCKLAKE_REALISTIC_TARGET_BYTES:-2147483648}"
-        realistic_row_bytes="${AUX_DUCKLAKE_REALISTIC_ROW_BYTES:-4096}"
-        scan_rows="${AUX_DUCKLAKE_REALISTIC_ROWS_PER_TABLE:-$(((target_data_bytes + table_count * realistic_row_bytes - 1) / (table_count * realistic_row_bytes)))}"
-        parallel_workers="${AUX_DUCKLAKE_REALISTIC_PARALLEL_WORKERS:-8}"
-        preload_batch_rows="${AUX_DUCKLAKE_REALISTIC_PRELOAD_BATCH_ROWS:-16384}"
-        preload_workers="${AUX_DUCKLAKE_REALISTIC_PRELOAD_WORKERS:-1}"
-        ;;
-    varied)
-        table_count="${AUX_DUCKLAKE_VARIED_TABLES:-100}"
-        target_data_bytes="${AUX_DUCKLAKE_VARIED_TARGET_BYTES:-5368709120}"
-        realistic_row_bytes="${AUX_DUCKLAKE_VARIED_ROW_BYTES:-4096}"
-        scan_rows="${AUX_DUCKLAKE_VARIED_ROWS_PER_TABLE:-$(((target_data_bytes + table_count * realistic_row_bytes - 1) / (table_count * realistic_row_bytes)))}"
-        parallel_workers="${AUX_DUCKLAKE_VARIED_PARALLEL_WORKERS:-12}"
-        preload_batch_rows="${AUX_DUCKLAKE_VARIED_PRELOAD_BATCH_ROWS:-4096}"
-        preload_workers="${AUX_DUCKLAKE_VARIED_PRELOAD_WORKERS:-4}"
-        varied_churn_rounds="${AUX_DUCKLAKE_VARIED_CHURN_ROUNDS:-4}"
-        varied_tables_per_transaction="${AUX_DUCKLAKE_VARIED_TABLES_PER_TRANSACTION:-$(default_varied_tables_per_transaction "$table_count")}"
-        varied_churn_mode="${AUX_DUCKLAKE_VARIED_CHURN_MODE:-all}"
-        varied_schema="${AUX_DUCKLAKE_VARIED_SCHEMA:-legacy}"
-        varied_concurrent_writers="${AUX_DUCKLAKE_VARIED_CONCURRENT_WRITERS:-0}"
-        ;;
-    *) fail "usage: $0 scan10|smoke|profile [scan_rows]|realistic|varied|inline|operational|operational-growth" ;;
+inline)
+    inline_table_count="${AUX_DUCKLAKE_INLINE_TABLES:-5}"
+    inline_first_rows="${AUX_DUCKLAKE_INLINE_FIRST_ROWS:-5}"
+    inline_second_rows="${AUX_DUCKLAKE_INLINE_SECOND_ROWS:-12}"
+    inline_delete_rows="${AUX_DUCKLAKE_INLINE_DELETE_ROWS:-2}"
+    inline_split_steps="${AUX_DUCKLAKE_INLINE_SPLIT_STEPS:-0}"
+    inline_preload_tables="${AUX_DUCKLAKE_INLINE_PRELOAD_TABLES:-0}"
+    inline_preload_rows="${AUX_DUCKLAKE_INLINE_PRELOAD_ROWS:-1}"
+    inline_flush_interval="${AUX_DUCKLAKE_INLINE_FLUSH_INTERVAL:-end}"
+    realistic_row_bytes="${AUX_DUCKLAKE_REALISTIC_ROW_BYTES:-4096}"
+    scan_rows=0
+    parallel_workers=1
+    table_count="$inline_table_count"
+    target_data_bytes=0
+    ;;
+scan10)
+    scan_rows=35
+    parallel_workers=2
+    table_count=2
+    target_data_bytes=0
+    ;;
+smoke)
+    scan_rows=100
+    parallel_workers=4
+    table_count=2
+    target_data_bytes=0
+    ;;
+profile)
+    scan_rows="${2:-10000}"
+    parallel_workers=4
+    table_count=2
+    target_data_bytes=0
+    ;;
+operational)
+    scan_rows=0
+    parallel_workers=1
+    table_count=3
+    target_data_bytes=0
+    production_commit_iterations="${AUX_DUCKLAKE_OPERATIONAL_COMMIT_ITERATIONS:-10}"
+    operational_trials="${AUX_DUCKLAKE_OPERATIONAL_TRIALS:-4}"
+    operational_validation="each"
+    if [[ ! "$operational_trials" =~ ^[0-9]+$ ]] ||
+        ((operational_trials < 2 || operational_trials % 2 != 0)); then
+        fail "AUX_DUCKLAKE_OPERATIONAL_TRIALS must be an even integer of at least 2"
+    fi
+    ;;
+operational-growth)
+    scan_rows=0
+    parallel_workers=1
+    table_count=3
+    target_data_bytes=0
+    production_commit_iterations="${AUX_DUCKLAKE_OPERATIONAL_GROWTH_COMMIT_ITERATIONS:-100}"
+    operational_trials="${AUX_DUCKLAKE_OPERATIONAL_GROWTH_TRIALS:-2}"
+    operational_validation="final"
+    if [[ ! "$operational_trials" =~ ^[0-9]+$ ]] ||
+        ((operational_trials < 2 || operational_trials % 2 != 0)); then
+        fail "AUX_DUCKLAKE_OPERATIONAL_TRIALS must be an even integer of at least 2"
+    fi
+    ;;
+realistic)
+    table_count="${AUX_DUCKLAKE_REALISTIC_TABLES:-50}"
+    target_data_bytes="${AUX_DUCKLAKE_REALISTIC_TARGET_BYTES:-2147483648}"
+    realistic_row_bytes="${AUX_DUCKLAKE_REALISTIC_ROW_BYTES:-4096}"
+    scan_rows="${AUX_DUCKLAKE_REALISTIC_ROWS_PER_TABLE:-$(((target_data_bytes + table_count * realistic_row_bytes - 1) / (table_count * realistic_row_bytes)))}"
+    parallel_workers="${AUX_DUCKLAKE_REALISTIC_PARALLEL_WORKERS:-8}"
+    preload_batch_rows="${AUX_DUCKLAKE_REALISTIC_PRELOAD_BATCH_ROWS:-16384}"
+    preload_workers="${AUX_DUCKLAKE_REALISTIC_PRELOAD_WORKERS:-1}"
+    ;;
+varied)
+    table_count="${AUX_DUCKLAKE_VARIED_TABLES:-100}"
+    target_data_bytes="${AUX_DUCKLAKE_VARIED_TARGET_BYTES:-5368709120}"
+    realistic_row_bytes="${AUX_DUCKLAKE_VARIED_ROW_BYTES:-4096}"
+    scan_rows="${AUX_DUCKLAKE_VARIED_ROWS_PER_TABLE:-$(((target_data_bytes + table_count * realistic_row_bytes - 1) / (table_count * realistic_row_bytes)))}"
+    parallel_workers="${AUX_DUCKLAKE_VARIED_PARALLEL_WORKERS:-12}"
+    preload_batch_rows="${AUX_DUCKLAKE_VARIED_PRELOAD_BATCH_ROWS:-4096}"
+    preload_workers="${AUX_DUCKLAKE_VARIED_PRELOAD_WORKERS:-4}"
+    varied_churn_rounds="${AUX_DUCKLAKE_VARIED_CHURN_ROUNDS:-4}"
+    varied_tables_per_transaction="${AUX_DUCKLAKE_VARIED_TABLES_PER_TRANSACTION:-$(default_varied_tables_per_transaction "$table_count")}"
+    varied_churn_mode="${AUX_DUCKLAKE_VARIED_CHURN_MODE:-all}"
+    varied_schema="${AUX_DUCKLAKE_VARIED_SCHEMA:-legacy}"
+    varied_concurrent_writers="${AUX_DUCKLAKE_VARIED_CONCURRENT_WRITERS:-0}"
+    ;;
+*) fail "usage: $0 scan10|smoke|profile [scan_rows]|realistic|varied|inline|operational|operational-growth" ;;
 esac
 
 case "${inline_flush_interval:-end}" in
-    each_batch | end | never) ;;
-    *) fail "AUX_DUCKLAKE_INLINE_FLUSH_INTERVAL must be each_batch, end, or never" ;;
+each_batch | end | never) ;;
+*) fail "AUX_DUCKLAKE_INLINE_FLUSH_INTERVAL must be each_batch, end, or never" ;;
 esac
 
 case "${varied_schema:-legacy}" in
-    legacy | mixed | narrow | wide) ;;
-    *) fail "AUX_DUCKLAKE_VARIED_SCHEMA must be legacy, mixed, narrow, or wide" ;;
+legacy | mixed | narrow | wide) ;;
+*) fail "AUX_DUCKLAKE_VARIED_SCHEMA must be legacy, mixed, narrow, or wide" ;;
 esac
 
 case "${varied_churn_mode:-all}" in
-    all | mutate | insert | update | delete | latest | time_travel | join | join_time_travel) ;;
-    *)
-        fail \
-            "AUX_DUCKLAKE_VARIED_CHURN_MODE must be all, mutate, insert, update, delete, latest, time_travel, join, or join_time_travel"
-        ;;
+all | mutate | insert | update | delete | latest | time_travel | join | join_time_travel) ;;
+*)
+    fail \
+        "AUX_DUCKLAKE_VARIED_CHURN_MODE must be all, mutate, insert, update, delete, latest, time_travel, join, or join_time_travel"
+    ;;
 esac
 
 if [[ "$profile" == "varied" ]]; then
@@ -762,10 +764,9 @@ FROM dl.main.file_fact;
 SQL
 }
 
-
 backend_artifact() {
     local backend="$1" output="$2" generated="$3" elapsed="$4" labels_json="$5"
-    cat > "$output" <<JSON
+    cat >"$output" <<JSON
 {
   "artifact": "ducklake-fdb-feature-parity-realistic-benchmark",
   "profile": "$profile",
@@ -805,7 +806,7 @@ operational_artifact() {
     local create_latency_ms="$9" accounting_file="${10}"
     local accounting_json
     accounting_json="$(cat "$accounting_file")"
-    cat > "$output" <<JSON
+    cat >"$output" <<JSON
 {
   "artifact": "ducklake-operational-commit-benchmark",
   "profile": "$profile",
@@ -1077,14 +1078,16 @@ run_operational_backend() {
     local prepare session_prepare attach cleanup
     if [[ "$backend" == "postgres" ]]; then
         local dsn="${AUX_DUCKLAKE_POSTGRES_DSN:-dbname=postgres}"
-        local schema="ducklake_operational_$(date +%s)_$$_${RANDOM}"
+        local schema
+        schema="ducklake_operational_$(date +%s)_$$_${RANDOM}"
         unset AUX_DUCKLAKE_RUNTIME_CATALOG_IDENTITY || true
         prepare="$(postgres_prepare_sql "$dsn" "$schema")"
         session_prepare="$(postgres_session_sql)"
         attach="$(postgres_attach_sql "$dsn" "$schema" "$data_dir" 100)"
         cleanup="$(postgres_cleanup_sql "$dsn" "$schema")"
     else
-        local fdb_prefix="aux-ducklake-benchmark/operational/$(date +%s)/$$/${backend}/${RANDOM}/"
+        local fdb_prefix
+        fdb_prefix="aux-ducklake-benchmark/operational/$(date +%s)/$$/${backend}/${RANDOM}/"
         export AUX_DUCKLAKE_CATALOG_BACKEND=fdb
         export AUX_DUCKLAKE_FDB_PREFIX="$fdb_prefix"
         export AUX_DUCKLAKE_RUNTIME_LIBRARY="$FDB_RUNTIME_LIBRARY"
@@ -1151,14 +1154,15 @@ DETACH dl;"
     )"
     [[ "$create_elapsed_micros" =~ ^[0-9]+$ ]] ||
         fail "$backend operational create has no transaction timing"
-    create_elapsed_ms="$(python3 - "$create_elapsed_micros" <<'PY'
+    create_elapsed_ms="$(
+        python3 - "$create_elapsed_micros" <<'PY'
 import sys
 print(f"{int(sys.argv[1]) / 1000:.3f}")
 PY
-)"
+    )"
 
     local samples_file="$tmp_dir/operational-commit-latencies"
-    : > "$samples_file"
+    : >"$samples_file"
     local commit_elapsed_micros
     local expected_count expected_sum deleted_sum membership_sum expected result_label
     for ((iteration = 1; iteration <= production_commit_iterations; iteration++)); do
@@ -1176,7 +1180,7 @@ PY
         )"
         [[ "$commit_elapsed_micros" =~ ^[0-9]+$ ]] ||
             fail "$backend operational commit $iteration has no transaction timing"
-        python3 - "$iteration" "$commit_elapsed_micros" >> "$samples_file" <<'PY'
+        python3 - "$iteration" "$commit_elapsed_micros" >>"$samples_file" <<'PY'
 import sys
 print(f"{sys.argv[1]} {int(sys.argv[2]) / 1000:.3f}")
 PY
@@ -1208,7 +1212,8 @@ run_backend() {
     local prepare session_prepare attach_file attach_inline cleanup
     if [[ "$backend" == "postgres" ]]; then
         local dsn="${AUX_DUCKLAKE_POSTGRES_DSN:-dbname=postgres}"
-        local schema="ducklake_benchmark_${profile}_$(date +%s)_$$"
+        local schema
+        schema="ducklake_benchmark_${profile}_$(date +%s)_$$"
         unset AUX_DUCKLAKE_RUNTIME_CATALOG_IDENTITY || true
         prepare="$(postgres_prepare_sql "$dsn" "$schema")"
         session_prepare="$(postgres_session_sql)"
@@ -1216,7 +1221,8 @@ run_backend() {
         attach_inline="$(postgres_attach_sql "$dsn" "$schema" "$data_dir" 100)"
         cleanup="$(postgres_cleanup_sql "$dsn" "$schema")"
     else
-        local fdb_prefix="aux-ducklake-benchmark/${profile}/$(date +%s)/$$/${backend}/"
+        local fdb_prefix
+        fdb_prefix="aux-ducklake-benchmark/${profile}/$(date +%s)/$$/${backend}/"
         export AUX_DUCKLAKE_CATALOG_BACKEND=fdb
         export AUX_DUCKLAKE_FDB_PREFIX="$fdb_prefix"
         export AUX_DUCKLAKE_RUNTIME_LIBRARY="$FDB_RUNTIME_LIBRARY"
@@ -1303,7 +1309,8 @@ $cleanup
     }
 
     local labels_json
-    labels_json="$(python3 - <<PY
+    labels_json="$(
+        python3 - <<PY
 import json
 labels = {
   "latest_scan": "$(extract_label_from_output "$all_output" "latest_scan")",
@@ -1316,7 +1323,7 @@ labels = {
 }
 print(json.dumps(labels, indent=8))
 PY
-)"
+    )"
     backend_artifact "$backend" "$output" "$ended" "$elapsed" "$labels_json"
     echo "ducklake_fdb_feature_parity_${backend}_benchmark_artifact=$output"
 }
@@ -1490,7 +1497,7 @@ DETACH dl;
     ended="$(now_micros)"
     elapsed="$(elapsed_ms "$started" "$ended")"
     write_metric_accounting "$accounting_file" "$batch_name" "$elapsed" "$runtime_before" "$runtime_after"
-    printf '%s\nbenchmark_peak_rss_kib=%s\n' "$duckdb_output" "$duckdb_peak_rss_kib" > "$output_file"
+    printf '%s\nbenchmark_peak_rss_kib=%s\n' "$duckdb_output" "$duckdb_peak_rss_kib" >"$output_file"
     [[ "$duckdb_status" -eq 0 ]] || {
         printf '%s\n' "$duckdb_output" >&2
         fail "$backend realistic batch $batch_name failed"
@@ -1508,7 +1515,8 @@ run_inline_micro_backend() {
     local prepare session_prepare attach_file attach_inline cleanup
     if [[ "$backend" == "postgres" ]]; then
         local dsn="${AUX_DUCKLAKE_POSTGRES_DSN:-dbname=postgres}"
-        local schema="ducklake_inline_${profile}_$(date +%s)_$$"
+        local schema
+        schema="ducklake_inline_${profile}_$(date +%s)_$$"
         unset AUX_DUCKLAKE_RUNTIME_CATALOG_IDENTITY || true
         prepare="$(postgres_prepare_sql "$dsn" "$schema")"
         session_prepare="$(postgres_session_sql)"
@@ -1516,7 +1524,8 @@ run_inline_micro_backend() {
         attach_inline="$(postgres_attach_sql "$dsn" "$schema" "$data_dir" 100)"
         cleanup="$(postgres_cleanup_sql "$dsn" "$schema")"
     else
-        local fdb_prefix="aux-ducklake-benchmark/${profile}/$(date +%s)/$$/${backend}/"
+        local fdb_prefix
+        fdb_prefix="aux-ducklake-benchmark/${profile}/$(date +%s)/$$/${backend}/"
         export AUX_DUCKLAKE_CATALOG_BACKEND=fdb
         export AUX_DUCKLAKE_FDB_PREFIX="$fdb_prefix"
         export AUX_DUCKLAKE_RUNTIME_LIBRARY="$FDB_RUNTIME_LIBRARY"
@@ -1530,7 +1539,7 @@ run_inline_micro_backend() {
     fi
 
     local batches_file="$tmp_dir/batches.jsonl"
-    : > "$batches_file"
+    : >"$batches_file"
     local started ended elapsed table batch_out
     started="$(now_micros)"
     if [[ "${inline_preload_tables:-0}" -gt 0 ]]; then
@@ -1586,11 +1595,11 @@ DETACH dl;
         fail "$backend realistic preload schema failed"
     }
     schema_out="$tmp_dir/preload-schema.out"
-    printf '%s\n' "$duckdb_output" > "$schema_out"
+    printf '%s\n' "$duckdb_output" >"$schema_out"
     preload_peak_rss_kib="$duckdb_peak_rss_kib"
 
-    : > "$output_file"
-    cat "$schema_out" >> "$output_file"
+    : >"$output_file"
+    cat "$schema_out" >>"$output_file"
     for ((worker = 0; worker < preload_workers; worker++)); do
         worker_attach="$attach"
         if [[ "$backend" == "fdb" ]]; then
@@ -1632,12 +1641,14 @@ DETACH dl;
             cat "${worker_outputs[$index]}" >&2
             fail "$backend realistic preload worker $index failed"
         fi
-        cat "${worker_outputs[$index]}" >> "$output_file"
+        cat "${worker_outputs[$index]}" >>"$output_file"
     done
-    printf 'realistic_preload=%s,%s,%s,%s\n' "$table_count" "$scan_rows" "$((table_count * scan_rows))" "$((table_count * scan_rows * realistic_row_bytes))" >> "$output_file"
-    printf 'realistic_preload_parallelism=%s\n' "$preload_workers" >> "$output_file"
-    printf 'realistic_preload_batch_rows=%s\n' "$preload_batch_rows" >> "$output_file"
-    printf 'benchmark_peak_rss_kib=%s\n' "$preload_peak_rss_kib" >> "$output_file"
+    {
+        printf 'realistic_preload=%s,%s,%s,%s\n' "$table_count" "$scan_rows" "$((table_count * scan_rows))" "$((table_count * scan_rows * realistic_row_bytes))"
+        printf 'realistic_preload_parallelism=%s\n' "$preload_workers"
+        printf 'realistic_preload_batch_rows=%s\n' "$preload_batch_rows"
+        printf 'benchmark_peak_rss_kib=%s\n' "$preload_peak_rss_kib"
+    } >>"$output_file"
     copy_metric_snapshot "${AUX_DUCKLAKE_BENCHMARK_RUNTIME_METRICS_PATH:-}" "$runtime_after"
     benchmark_runtime_scope_restore
     ended="$(now_micros)"
@@ -1654,13 +1665,14 @@ launch_concurrent_reader() {
     if [[ "$backend" == "fdb" ]]; then
         worker_attach="$(fdb_attach_sql "$tmp_dir/concurrent-reader-${worker}.duckdb" "$data_dir" 0)"
     fi
-    local worker_sql="$session_prepare
+    local worker_sql
+    worker_sql="$session_prepare
 $worker_attach
 $(realistic_latest_query_sql "$table_count")
 DETACH dl;
 "
     local worker_out="$tmp_dir/concurrent-reader-${worker}.out"
-    ("$DUCKDB_BIN" -unsigned -csv -batch > "$worker_out" 2>&1 <<< "$worker_sql") &
+    ("$DUCKDB_BIN" -unsigned -csv -batch >"$worker_out" 2>&1 <<<"$worker_sql") &
     worker_pids+=("$!")
     worker_outputs+=("$worker_out")
 }
@@ -1671,13 +1683,14 @@ launch_concurrent_writer() {
     if [[ "$backend" == "fdb" ]]; then
         worker_attach="$(fdb_attach_sql "$tmp_dir/concurrent-writer-${worker}.duckdb" "$data_dir" 0)"
     fi
-    local worker_sql="$session_prepare
+    local worker_sql
+    worker_sql="$session_prepare
 $worker_attach
 $(varied_concurrent_writer_sql "$table_count" "$scan_rows" "$worker")
 DETACH dl;
 "
     local worker_out="$tmp_dir/concurrent-writer-${worker}.out"
-    ("$DUCKDB_BIN" -unsigned -csv -batch > "$worker_out" 2>&1 <<< "$worker_sql") &
+    ("$DUCKDB_BIN" -unsigned -csv -batch >"$worker_out" 2>&1 <<<"$worker_sql") &
     worker_pids+=("$!")
     worker_outputs+=("$worker_out")
 }
@@ -1690,7 +1703,7 @@ await_concurrent_workers() {
             cat "${worker_outputs[$index]}" >&2
             fail "$backend concurrent read/write worker $index failed"
         fi
-        cat "${worker_outputs[$index]}" >> "$output_file"
+        cat "${worker_outputs[$index]}" >>"$output_file"
     done
 }
 
@@ -1702,8 +1715,8 @@ $(realistic_latest_query_sql "$table_count")
 DETACH dl;
 "
     [[ "$duckdb_status" -eq 0 ]] || fail "$backend concurrent read/write readback failed"
-    printf '%s\n' "$duckdb_output" >> "$output_file"
-    printf 'concurrent_readers=%s\nconcurrent_writers=%s\n' "$parallel_workers" "$varied_concurrent_writers" >> "$output_file"
+    printf '%s\n' "$duckdb_output" >>"$output_file"
+    printf 'concurrent_readers=%s\nconcurrent_writers=%s\n' "$parallel_workers" "$varied_concurrent_writers" >>"$output_file"
 }
 
 run_concurrent_read_write() {
@@ -1716,7 +1729,7 @@ run_concurrent_read_write() {
     runtime_after="$(mktemp)"
     accounting_file="$(mktemp)"
     copy_metric_snapshot "${AUX_DUCKLAKE_BENCHMARK_RUNTIME_METRICS_PATH:-}" "$runtime_before"
-    : > "$output_file"
+    : >"$output_file"
     started="$(now_micros)"
     for ((worker = 0; worker < parallel_workers; worker++)); do
         launch_concurrent_reader "$backend" "$worker" "$tmp_dir"
@@ -1744,7 +1757,8 @@ run_realistic_backend() {
     local prepare session_prepare attach_file attach_inline cleanup
     if [[ "$backend" == "postgres" ]]; then
         local dsn="${AUX_DUCKLAKE_POSTGRES_DSN:-dbname=postgres}"
-        local schema="ducklake_realistic_${profile}_$(date +%s)_$$"
+        local schema
+        schema="ducklake_realistic_${profile}_$(date +%s)_$$"
         unset AUX_DUCKLAKE_RUNTIME_CATALOG_IDENTITY || true
         prepare="$(postgres_prepare_sql "$dsn" "$schema")"
         session_prepare="$(postgres_session_sql)"
@@ -1752,7 +1766,8 @@ run_realistic_backend() {
         attach_inline="$(postgres_attach_sql "$dsn" "$schema" "$data_dir" 100)"
         cleanup="$(postgres_cleanup_sql "$dsn" "$schema")"
     else
-        local fdb_prefix="aux-ducklake-benchmark/${profile}/$(date +%s)/$$/${backend}/"
+        local fdb_prefix
+        fdb_prefix="aux-ducklake-benchmark/${profile}/$(date +%s)/$$/${backend}/"
         export AUX_DUCKLAKE_CATALOG_BACKEND=fdb
         export AUX_DUCKLAKE_FDB_PREFIX="$fdb_prefix"
         export AUX_DUCKLAKE_RUNTIME_LIBRARY="$FDB_RUNTIME_LIBRARY"
@@ -1766,7 +1781,7 @@ run_realistic_backend() {
     fi
 
     local batches_file="$tmp_dir/batches.jsonl"
-    : > "$batches_file"
+    : >"$batches_file"
     local started ended elapsed batch_out
     started="$(now_micros)"
 
@@ -1775,7 +1790,7 @@ run_realistic_backend() {
     append_realistic_batch_artifact "$batches_file" "preload" "$REALISTIC_LAST_BATCH_MS" "$batch_out" "$REALISTIC_LAST_ACCOUNTING_FILE"
 
     if [[ "$profile" == "varied" && "${AUX_DUCKLAKE_VARIED_CHURN_ONLY_AFTER_PRELOAD:-0}" == "1" ]]; then
-        : > "$batches_file"
+        : >"$batches_file"
         started="$(now_micros)"
         batch_out="$tmp_dir/mutation_churn.out"
         run_realistic_batch "$backend" "mutation_churn" "$batch_out" "$(varied_churn_sql "$table_count" "$scan_rows" "$varied_churn_rounds" "$varied_churn_mode" "$varied_tables_per_transaction")" "$session_prepare" "$attach_file"
@@ -1836,7 +1851,7 @@ $(realistic_time_travel_query_sql "$table_count" "realistic_query_snapshot")" "$
     append_realistic_batch_artifact "$batches_file" "time_travel_queries" "$REALISTIC_LAST_BATCH_MS" "$batch_out" "$REALISTIC_LAST_ACCOUNTING_FILE"
 
     batch_out="$tmp_dir/parallel.out"
-    : > "$batch_out"
+    : >"$batch_out"
     local parallel_started parallel_ended parallel_elapsed worker worker_sql worker_out worker_attach
     local parallel_runtime_before parallel_runtime_after parallel_accounting_file
     local worker_pids=()
@@ -1870,14 +1885,14 @@ DETACH dl;
             cat "${worker_outputs[$index]}" >&2
             fail "$backend realistic parallel worker $index failed"
         fi
-        cat "${worker_outputs[$index]}" >> "$batch_out"
+        cat "${worker_outputs[$index]}" >>"$batch_out"
     done
     parallel_ended="$(now_micros)"
     parallel_elapsed="$(elapsed_ms "$parallel_started" "$parallel_ended")"
     copy_metric_snapshot "${AUX_DUCKLAKE_BENCHMARK_RUNTIME_METRICS_PATH:-}" "$parallel_runtime_after"
     benchmark_runtime_scope_restore
     write_metric_accounting "$parallel_accounting_file" "parallel_latest_queries" "$parallel_elapsed" "$parallel_runtime_before" "$parallel_runtime_after"
-    printf 'realistic_parallel_workers=%s\n' "$parallel_workers" >> "$batch_out"
+    printf 'realistic_parallel_workers=%s\n' "$parallel_workers" >>"$batch_out"
     append_realistic_batch_artifact "$batches_file" "parallel_latest_queries" "$parallel_elapsed" "$batch_out" "$parallel_accounting_file"
     rm -f "$parallel_runtime_before" "$parallel_runtime_after"
 
@@ -1893,8 +1908,8 @@ $cleanup"
 }
 
 case "$BENCHMARK_BACKEND" in
-    both | fdb | postgres) ;;
-    *) fail "AUX_DUCKLAKE_BENCHMARK_BACKEND must be both, fdb, or postgres" ;;
+both | fdb | postgres) ;;
+*) fail "AUX_DUCKLAKE_BENCHMARK_BACKEND must be both, fdb, or postgres" ;;
 esac
 
 if [[ "$BENCHMARK_BACKEND" != "postgres" ]]; then
@@ -1904,38 +1919,38 @@ tmp_root="$(mktemp -d)"
 trap 'rm -rf "$tmp_root"' EXIT
 
 case "$profile" in
-    scan10)
-        fdb_output="$OUT_DIR/fdb-scan10-latest.json"
-        postgres_output="$OUT_DIR/postgres-scan10-latest.json"
-        ;;
-    smoke)
-        fdb_output="$OUT_DIR/fdb-smoke-latest.json"
-        postgres_output="$OUT_DIR/postgres-smoke-latest.json"
-        ;;
-    profile)
-        fdb_output="$OUT_DIR/fdb-profile-latest.json"
-        postgres_output="$OUT_DIR/postgres-profile-latest.json"
-        ;;
-    realistic)
-        fdb_output="$OUT_DIR/fdb-realistic-latest.json"
-        postgres_output="$OUT_DIR/postgres-realistic-latest.json"
-        ;;
-    varied)
-        fdb_output="$OUT_DIR/fdb-varied-latest.json"
-        postgres_output="$OUT_DIR/postgres-varied-latest.json"
-        ;;
-    inline)
-        fdb_output="$OUT_DIR/fdb-inline-latest.json"
-        postgres_output="$OUT_DIR/postgres-inline-latest.json"
-        ;;
-    operational)
-        fdb_output="$OUT_DIR/fdb-operational-latest.json"
-        postgres_output="$OUT_DIR/postgres-operational-latest.json"
-        ;;
-    operational-growth)
-        fdb_output="$OUT_DIR/fdb-operational-growth-latest.json"
-        postgres_output="$OUT_DIR/postgres-operational-growth-latest.json"
-        ;;
+scan10)
+    fdb_output="$OUT_DIR/fdb-scan10-latest.json"
+    postgres_output="$OUT_DIR/postgres-scan10-latest.json"
+    ;;
+smoke)
+    fdb_output="$OUT_DIR/fdb-smoke-latest.json"
+    postgres_output="$OUT_DIR/postgres-smoke-latest.json"
+    ;;
+profile)
+    fdb_output="$OUT_DIR/fdb-profile-latest.json"
+    postgres_output="$OUT_DIR/postgres-profile-latest.json"
+    ;;
+realistic)
+    fdb_output="$OUT_DIR/fdb-realistic-latest.json"
+    postgres_output="$OUT_DIR/postgres-realistic-latest.json"
+    ;;
+varied)
+    fdb_output="$OUT_DIR/fdb-varied-latest.json"
+    postgres_output="$OUT_DIR/postgres-varied-latest.json"
+    ;;
+inline)
+    fdb_output="$OUT_DIR/fdb-inline-latest.json"
+    postgres_output="$OUT_DIR/postgres-inline-latest.json"
+    ;;
+operational)
+    fdb_output="$OUT_DIR/fdb-operational-latest.json"
+    postgres_output="$OUT_DIR/postgres-operational-latest.json"
+    ;;
+operational-growth)
+    fdb_output="$OUT_DIR/fdb-operational-growth-latest.json"
+    postgres_output="$OUT_DIR/postgres-operational-growth-latest.json"
+    ;;
 esac
 
 if [[ "$profile" == "operational" || "$profile" == "operational-growth" ]]; then

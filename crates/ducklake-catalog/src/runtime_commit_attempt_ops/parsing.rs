@@ -1,13 +1,12 @@
 use crate::{
     CatalogError, CatalogResult, CommitAttemptId, DuckLakeSnapshotId, SnapshotCommitMetadata,
+    runtime_commit_attempt_ops::*,
     runtime_data_mutation_ops::{
         data_mutation_payload_values, proposed_commit_snapshot_covering_inline_flushes,
     },
     runtime_snapshot_range::ProposedCommitSnapshot,
     runtime_tabular_payload::{TabularPayload, parse_u64_field, parse_uuid_u128_field},
 };
-
-use crate::runtime_commit_attempt_ops::*;
 pub(crate) fn commit_attempt_intent(payload: &[u8]) -> CatalogResult<RuntimeCommitAttemptIntent> {
     let mut read_snapshot = None;
     let mut proposed_commit_snapshot = None;
@@ -127,6 +126,7 @@ pub(crate) fn commit_attempt_intent(payload: &[u8]) -> CatalogResult<RuntimeComm
         })?;
     }
     Ok(RuntimeCommitAttemptIntent {
+        snapshot_fence: None,
         read_snapshot,
         proposed_commit_snapshot,
         recovery_attempt_id,

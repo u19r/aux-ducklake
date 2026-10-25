@@ -20,6 +20,8 @@ iterations="${AUX_DUCKLAKE_FDB_SOAK_ITERATIONS:-20}"
 if ! ducklake_reuse_debug_build_enabled || [[ ! -x "$DUCKDB_BIN" ]]; then
     AUX_DUCKLAKE_SKIP_FETCH=1 "$ROOT_DIR/scripts/build_ducklake_debug.sh"
 fi
+ducklake_validate_debug_artifacts "$ROOT_DIR" "$DUCKLAKE_DIR" ||
+    fail "debug DuckLake artifacts are stale or do not match the canonical source tree"
 runtime_library="$(ducklake_build_debug_catalog_runtime "$ROOT_DIR" 1 foundationdb)" ||
     fail "foundationdb runtime library was not built"
 
@@ -30,7 +32,8 @@ mkdir -p "$data_dir"
 
 export AUX_DUCKLAKE_RUNTIME_LIBRARY="$runtime_library"
 export AUX_DUCKLAKE_CATALOG_BACKEND=fdb
-export AUX_DUCKLAKE_FDB_PREFIX="aux-ducklake/release/soak/$(date +%s)-$$/"
+AUX_DUCKLAKE_FDB_PREFIX="aux-ducklake/release/soak/$(date +%s)-$$/"
+export AUX_DUCKLAKE_FDB_PREFIX
 
 attach_sql() {
     cat <<SQL

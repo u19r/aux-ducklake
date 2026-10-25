@@ -1,14 +1,20 @@
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::sync::{
+        Arc, Barrier, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use crate::{
-        CatalogError, CatalogId, FakeOrderedCatalogKv, KvBatch, RawSnapshotSequence, SnapshotRow,
+        CatalogCacheNamespace, CatalogError, CatalogId, FakeOrderedCatalogKv, KvBatch,
+        RangeDirection, RawSnapshotSequence, SnapshotRow,
         keys::{latest_snapshot_row_key, snapshot_prefix},
     };
 
     use super::super::{
-        expire_snapshots, latest_snapshot, list_snapshots, snapshot_by_raw_sequence, stage_snapshot,
+        expire_snapshots, latest_snapshot, latest_snapshot_value, list_snapshots,
+        snapshot_by_raw_sequence, stage_snapshot,
     };
 
     #[test]
@@ -139,6 +145,68 @@ mod tests {
     }
 
     #[test]
+    fn given_context_cached_on_one_thread_when_worker_continues_then_global_snapshot_is_reused() {
+        let catalog = CatalogId(0);
+        let mut inner = FakeOrderedCatalogKv::new();
+        let snapshot = SnapshotRow::new(inner.generated_order_id(), RawSnapshotSequence(1));
+        let mut batch = KvBatch::new();
+        stage_snapshot(&mut batch, catalog, &snapshot);
+        inner.commit(batch).unwrap();
+        let kv = ThreadSafeLatestSnapshotGetCountingKv::new(inner, catalog);
+        let context_id = 9_004_001;
+
+        {
+            let _request = super::super::begin_runtime_read_request(Some(context_id));
+            assert_eq!(
+                latest_snapshot(&kv, catalog).unwrap(),
+                Some(snapshot.clone())
+            );
+        }
+
+        let worker_kv = kv.clone();
+        let worker_snapshot = std::thread::spawn(move || {
+            let _request = super::super::begin_runtime_read_request(Some(context_id));
+            latest_snapshot(&worker_kv, catalog)
+        })
+        .join()
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(worker_snapshot, Some(snapshot));
+        assert_eq!(kv.latest_get_count.load(Ordering::Relaxed), 1);
+        super::super::end_runtime_read_context(kv.catalog_cache_namespace, catalog, context_id);
+    }
+
+    #[test]
+    fn given_concurrent_first_context_reads_then_first_snapshot_wins_for_both_workers() {
+        let catalog = CatalogId(0);
+        let mut inner = FakeOrderedCatalogKv::new();
+        let first = SnapshotRow::new(inner.generated_order_id(), RawSnapshotSequence(1));
+        let second = SnapshotRow::new(inner.generated_order_id(), RawSnapshotSequence(2));
+        let context_id = 9_004_002;
+        let kv = BarrierLatestSnapshotKv::new(inner, catalog, &first, &second);
+
+        let first_kv = kv.clone();
+        let first_worker = std::thread::spawn(move || {
+            let _request = super::super::begin_runtime_read_request(Some(context_id));
+            latest_snapshot(&first_kv, catalog)
+        });
+        let second_kv = kv.clone();
+        let second_worker = std::thread::spawn(move || {
+            let _request = super::super::begin_runtime_read_request(Some(context_id));
+            latest_snapshot(&second_kv, catalog)
+        });
+
+        let first_result = first_worker.join().unwrap().unwrap();
+        let second_result = second_worker.join().unwrap().unwrap();
+        assert_eq!(first_result, second_result);
+        assert!(first_result == Some(first) || first_result == Some(second));
+        assert_eq!(kv.latest_get_count.load(Ordering::Relaxed), 2);
+
+        super::super::end_runtime_read_context(kv.catalog_cache_namespace, catalog, context_id);
+    }
+
+    #[test]
     fn given_snapshot_already_expired_when_expiring_again_then_missing_non_latest_is_ignored() {
         let catalog = CatalogId(0);
         let mut kv = FakeOrderedCatalogKv::new();
@@ -173,6 +241,164 @@ mod tests {
         inner: FakeOrderedCatalogKv,
         latest_key: Vec<u8>,
         latest_get_count: Cell<usize>,
+    }
+
+    #[derive(Clone)]
+    struct BarrierLatestSnapshotKv {
+        inner: Arc<Mutex<FakeOrderedCatalogKv>>,
+        latest_key: Vec<u8>,
+        first_value: Vec<u8>,
+        second_value: Vec<u8>,
+        barrier: Arc<Barrier>,
+        latest_get_count: Arc<AtomicUsize>,
+        catalog_cache_namespace: CatalogCacheNamespace,
+    }
+
+    impl BarrierLatestSnapshotKv {
+        fn new(
+            inner: FakeOrderedCatalogKv,
+            catalog: CatalogId,
+            first: &SnapshotRow,
+            second: &SnapshotRow,
+        ) -> Self {
+            Self {
+                inner: Arc::new(Mutex::new(inner)),
+                latest_key: latest_snapshot_row_key(catalog),
+                first_value: latest_snapshot_value(first),
+                second_value: latest_snapshot_value(second),
+                barrier: Arc::new(Barrier::new(2)),
+                latest_get_count: Arc::new(AtomicUsize::new(0)),
+                catalog_cache_namespace: CatalogCacheNamespace::process_local(0x9_004_002),
+            }
+        }
+
+        fn with_inner<T>(
+            &self,
+            read: impl FnOnce(&FakeOrderedCatalogKv) -> T,
+        ) -> crate::CatalogResult<T> {
+            let inner = self.inner.lock().map_err(|_| {
+                crate::CatalogError::Backend("barrier test catalog mutex was poisoned".to_owned())
+            })?;
+            Ok(read(&inner))
+        }
+    }
+
+    impl crate::OrderedCatalogKv for BarrierLatestSnapshotKv {
+        fn catalog_cache_namespace(&self) -> CatalogCacheNamespace {
+            self.catalog_cache_namespace
+        }
+
+        fn get(&self, key: &[u8]) -> crate::CatalogResult<Option<Vec<u8>>> {
+            if key == self.latest_key {
+                let index = self.latest_get_count.fetch_add(1, Ordering::Relaxed);
+                self.barrier.wait();
+                return Ok(Some(if index == 0 {
+                    self.first_value.clone()
+                } else {
+                    self.second_value.clone()
+                }));
+            }
+            self.with_inner(|inner| crate::OrderedCatalogKv::get(inner, key))?
+        }
+
+        fn scan_prefix(
+            &self,
+            prefix: &[u8],
+            direction: RangeDirection,
+            limit: usize,
+        ) -> crate::CatalogResult<Vec<crate::RangeItem>> {
+            self.with_inner(|inner| {
+                crate::OrderedCatalogKv::scan_prefix(inner, prefix, direction, limit)
+            })?
+        }
+
+        fn scan_range(
+            &self,
+            start: &[u8],
+            end: &[u8],
+            direction: RangeDirection,
+            limit: usize,
+        ) -> crate::CatalogResult<Vec<crate::RangeItem>> {
+            self.with_inner(|inner| {
+                crate::OrderedCatalogKv::scan_range(inner, start, end, direction, limit)
+            })?
+        }
+
+        fn read_conflict_fence(&self, key: &[u8]) -> crate::CatalogResult<Option<Vec<u8>>> {
+            self.with_inner(|inner| crate::OrderedCatalogKv::read_conflict_fence(inner, key))?
+        }
+    }
+
+    #[derive(Clone)]
+    struct ThreadSafeLatestSnapshotGetCountingKv {
+        inner: Arc<Mutex<FakeOrderedCatalogKv>>,
+        latest_key: Vec<u8>,
+        latest_get_count: Arc<AtomicUsize>,
+        catalog_cache_namespace: CatalogCacheNamespace,
+    }
+
+    impl ThreadSafeLatestSnapshotGetCountingKv {
+        fn new(inner: FakeOrderedCatalogKv, catalog: CatalogId) -> Self {
+            let catalog_cache_namespace = crate::OrderedCatalogKv::catalog_cache_namespace(&inner);
+            Self {
+                inner: Arc::new(Mutex::new(inner)),
+                latest_key: latest_snapshot_row_key(catalog),
+                latest_get_count: Arc::new(AtomicUsize::new(0)),
+                catalog_cache_namespace,
+            }
+        }
+
+        fn with_inner<T>(
+            &self,
+            read: impl FnOnce(&FakeOrderedCatalogKv) -> T,
+        ) -> crate::CatalogResult<T> {
+            let inner = self.inner.lock().map_err(|_| {
+                crate::CatalogError::Backend(
+                    "thread-safe test catalog mutex was poisoned".to_owned(),
+                )
+            })?;
+            Ok(read(&inner))
+        }
+    }
+
+    impl crate::OrderedCatalogKv for ThreadSafeLatestSnapshotGetCountingKv {
+        fn catalog_cache_namespace(&self) -> CatalogCacheNamespace {
+            self.catalog_cache_namespace
+        }
+
+        fn get(&self, key: &[u8]) -> crate::CatalogResult<Option<Vec<u8>>> {
+            if key == self.latest_key {
+                self.latest_get_count.fetch_add(1, Ordering::Relaxed);
+            }
+            self.with_inner(|inner| crate::OrderedCatalogKv::get(inner, key))?
+        }
+
+        fn scan_prefix(
+            &self,
+            prefix: &[u8],
+            direction: RangeDirection,
+            limit: usize,
+        ) -> crate::CatalogResult<Vec<crate::RangeItem>> {
+            self.with_inner(|inner| {
+                crate::OrderedCatalogKv::scan_prefix(inner, prefix, direction, limit)
+            })?
+        }
+
+        fn scan_range(
+            &self,
+            start: &[u8],
+            end: &[u8],
+            direction: RangeDirection,
+            limit: usize,
+        ) -> crate::CatalogResult<Vec<crate::RangeItem>> {
+            self.with_inner(|inner| {
+                crate::OrderedCatalogKv::scan_range(inner, start, end, direction, limit)
+            })?
+        }
+
+        fn read_conflict_fence(&self, key: &[u8]) -> crate::CatalogResult<Option<Vec<u8>>> {
+            self.with_inner(|inner| crate::OrderedCatalogKv::read_conflict_fence(inner, key))?
+        }
     }
 
     impl LatestSnapshotGetCountingKv {

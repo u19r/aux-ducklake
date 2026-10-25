@@ -152,6 +152,77 @@ pub trait OrderedCatalogKv {
     fn read_conflict_fence(&self, key: &[u8]) -> CatalogResult<Option<Vec<u8>>>;
 }
 
+/// Visit a range in finite pages without retaining the range's complete result.
+///
+/// FoundationDB's range API may return fewer items than requested for byte or
+/// transaction limits, so a non-empty page is always followed by a continuation
+/// request. The visitor owns each item only for the duration of the callback;
+/// callers that need a bounded result must enforce that bound before retaining it.
+pub(crate) fn scan_range_pages(
+    kv: &impl OrderedCatalogKv,
+    start: &[u8],
+    end: &[u8],
+    direction: RangeDirection,
+    max_items: Option<usize>,
+    mut visit: impl FnMut(RangeItem) -> CatalogResult<()>,
+) -> CatalogResult<usize> {
+    const PAGE_SIZE: usize = 256;
+
+    if start >= end {
+        return Ok(0);
+    }
+    let mut page_start = start.to_vec();
+    let mut page_end = end.to_vec();
+    let mut remaining_probe = max_items.map(|limit| limit.saturating_add(1));
+    let mut visited = 0usize;
+
+    loop {
+        let page_limit = remaining_probe.map_or(PAGE_SIZE, |remaining| remaining.min(PAGE_SIZE));
+        if page_limit == 0 {
+            return Ok(visited);
+        }
+        let page = kv.scan_range(&page_start, &page_end, direction, page_limit)?;
+        if page.is_empty() {
+            return Ok(visited);
+        }
+        if page.len() > page_limit {
+            return Err(CatalogError::InvalidMutation(
+                "paged catalog scan returned more items than requested".to_owned(),
+            ));
+        }
+        let last_key = page.last().map(|item| item.key.clone()).ok_or_else(|| {
+            CatalogError::InvalidMutation("paged catalog scan page was empty".to_owned())
+        })?;
+        let page_len = page.len();
+        for item in page {
+            visited = visited.saturating_add(1);
+            visit(item)?;
+        }
+
+        if let Some(remaining) = &mut remaining_probe {
+            *remaining = remaining.saturating_sub(page_len);
+            if *remaining == 0 {
+                return Ok(visited);
+            }
+        }
+        match direction {
+            RangeDirection::Forward => {
+                page_start = key_after_scan_item(&last_key);
+            }
+            RangeDirection::Reverse => {
+                page_end = last_key;
+            }
+        }
+    }
+}
+
+fn key_after_scan_item(key: &[u8]) -> Vec<u8> {
+    let mut next = Vec::with_capacity(key.len().saturating_add(1));
+    next.extend_from_slice(key);
+    next.push(0);
+    next
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CatalogCacheNamespace {
     kind: u8,
@@ -191,6 +262,10 @@ impl CatalogCacheNamespace {
     pub(crate) fn without_read_context(mut self) -> Self {
         self.read_context = 0;
         self
+    }
+
+    pub(crate) fn has_read_context(&self) -> bool {
+        self.read_context != 0
     }
 }
 

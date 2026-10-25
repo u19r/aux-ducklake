@@ -9,3 +9,4 @@ ducklake_ensure_source_tree "$ROOT_DIR" "$DUCKLAKE_DIR"
 ducklake_configure_build_environment debug "$DUCKLAKE_DIR"
 
 make -C "$DUCKLAKE_DIR" debug
+ducklake_write_debug_artifact_fingerprint "$ROOT_DIR" "$DUCKLAKE_DIR" >/dev/null

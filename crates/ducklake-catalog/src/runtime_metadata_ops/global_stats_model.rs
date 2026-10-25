@@ -1,11 +1,16 @@
 #[cfg(feature = "foundationdb")]
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::FileColumnStatsRow;
 #[cfg(feature = "foundationdb")]
 use crate::{CatalogResult, ColumnId, DataFileId, TableId};
-
-use crate::runtime_metadata_ops::*;
+use crate::{
+    FileColumnStatsRow,
+    runtime_metadata_ops::*,
+    typed_scalar::{
+        CatalogScalarType, compare_typed_scalars, normalize_catalog_scalar_type,
+        typed_extrema_are_invalid,
+    },
+};
 
 #[cfg(feature = "foundationdb")]
 #[derive(Clone, Copy)]
@@ -19,6 +24,7 @@ pub(super) struct GlobalStatsFileRow {
 
 #[derive(Clone, Default)]
 pub(super) struct GlobalColumnStats {
+    pub(super) scalar_type: CatalogScalarType,
     pub(super) has_contains_null: bool,
     pub(super) contains_null: bool,
     pub(super) has_min: bool,
@@ -27,12 +33,23 @@ pub(super) struct GlobalColumnStats {
     pub(super) max_value: String,
     pub(super) has_extra_stats: bool,
     pub(super) extra_stats: String,
+    pub(super) invalid_extrema: bool,
+}
+
+pub(super) struct InlineStatsMerge<'a> {
+    pub(super) has_contains_null: bool,
+    pub(super) contains_null: bool,
+    pub(super) has_non_null_values: bool,
+    pub(super) min_value: Option<&'a str>,
+    pub(super) max_value: Option<&'a str>,
 }
 
 #[cfg(feature = "foundationdb")]
 pub(super) struct GlobalTableStats {
     table_id: TableId,
     leaf_column_ids: BTreeSet<ColumnId>,
+    column_types: BTreeMap<ColumnId, CatalogScalarType>,
+    column_defaults: BTreeMap<ColumnId, (Option<String>, bool)>,
     file_columns: BTreeMap<DataFileId, BTreeSet<ColumnId>>,
     live_files: BTreeSet<DataFileId>,
     record_count: u64,
@@ -44,9 +61,35 @@ pub(super) struct GlobalTableStats {
 #[cfg(feature = "foundationdb")]
 impl GlobalTableStats {
     pub(super) fn new(table: &crate::TableRow, allocated_next_row_id: u64) -> Self {
+        let leaf_column_ids = leaf_column_ids(table).into_iter().collect::<BTreeSet<_>>();
+        let column_types = table
+            .columns
+            .iter()
+            .filter(|column| leaf_column_ids.contains(&column.column_id))
+            .map(|column| {
+                (
+                    column.column_id,
+                    normalize_catalog_scalar_type(&column.column_type),
+                )
+            })
+            .collect();
         Self {
             table_id: table.table_id,
-            leaf_column_ids: leaf_column_ids(table).into_iter().collect(),
+            leaf_column_ids,
+            column_types,
+            column_defaults: table
+                .columns
+                .iter()
+                .map(|column| {
+                    (
+                        column.column_id,
+                        (
+                            column.initial_default.clone(),
+                            column.parent_id.is_some() || column.created_with_table,
+                        ),
+                    )
+                })
+                .collect(),
             file_columns: BTreeMap::new(),
             live_files: BTreeSet::new(),
             record_count: 0,
@@ -54,6 +97,17 @@ impl GlobalTableStats {
             table_size_bytes: 0,
             columns: BTreeMap::new(),
         }
+    }
+
+    fn stats_for_column(&mut self, column_id: ColumnId) -> &mut GlobalColumnStats {
+        let scalar_type = self
+            .column_types
+            .get(&column_id)
+            .copied()
+            .unwrap_or_default();
+        self.columns
+            .entry(column_id)
+            .or_insert_with(|| GlobalColumnStats::with_type(scalar_type))
     }
 
     pub(super) fn accumulate_file(&mut self, row: &GlobalStatsFileRow) {
@@ -77,10 +131,7 @@ impl GlobalTableStats {
             .entry(row.data_file_id)
             .or_default()
             .insert(row.column_id);
-        self.columns
-            .entry(row.column_id)
-            .or_default()
-            .merge_file(row);
+        self.stats_for_column(row.column_id).merge_file(row);
     }
 
     pub(super) fn accumulate_inline_payload(&mut self, payload: &[u8]) -> CatalogResult<()> {
@@ -90,6 +141,7 @@ impl GlobalTableStats {
             ))
         })?;
         let mut current_inline_record_count = 0;
+        let mut observed_columns = BTreeSet::new();
         for line in payload.lines() {
             let fields = line.split('\t').collect::<Vec<_>>();
             match fields.as_slice() {
@@ -131,20 +183,31 @@ impl GlobalTableStats {
                         column_id,
                         "inline column stats column id",
                     )?);
-                    self.columns.entry(column_id).or_default().merge_inline(
-                        parse_global_stats_bool(
+                    let has_contains_null = parse_global_stats_bool(
+                        has_contains_null,
+                        "inline column stats has_contains_null",
+                    )?;
+                    let contains_null = parse_global_stats_bool(
+                        contains_null,
+                        "inline column stats contains_null",
+                    )?;
+                    observed_columns.insert(column_id);
+                    self.stats_for_column(column_id)
+                        .merge_inline(InlineStatsMerge {
                             has_contains_null,
-                            "inline column stats has_contains_null",
-                        )?,
-                        parse_global_stats_bool(
                             contains_null,
-                            "inline column stats contains_null",
-                        )?,
-                        parse_global_stats_bool(has_min, "inline column stats has_min")?,
-                        min_value,
-                        parse_global_stats_bool(has_max, "inline column stats has_max")?,
-                        max_value,
-                    );
+                            has_non_null_values: has_contains_null && !contains_null,
+                            min_value: parse_global_stats_bool(
+                                has_min,
+                                "inline column stats has_min",
+                            )?
+                            .then_some(min_value),
+                            max_value: parse_global_stats_bool(
+                                has_max,
+                                "inline column stats has_max",
+                            )?
+                            .then_some(max_value),
+                        });
                 }
                 [
                     "inline_aggregate_column_stats",
@@ -163,29 +226,63 @@ impl GlobalTableStats {
                         non_null_count,
                         "inline aggregate column stats non-null count",
                     )?;
-                    self.columns.entry(column_id).or_default().merge_inline(
-                        true,
-                        non_null_count < current_inline_record_count,
-                        parse_global_stats_bool(has_min, "inline aggregate column stats has_min")?,
-                        min_value,
-                        parse_global_stats_bool(has_max, "inline aggregate column stats has_max")?,
-                        max_value,
-                    );
+                    observed_columns.insert(column_id);
+                    self.stats_for_column(column_id)
+                        .merge_inline(InlineStatsMerge {
+                            has_contains_null: true,
+                            contains_null: non_null_count < current_inline_record_count,
+                            has_non_null_values: non_null_count > 0,
+                            min_value: parse_global_stats_bool(
+                                has_min,
+                                "inline aggregate column stats has_min",
+                            )?
+                            .then_some(min_value),
+                            max_value: parse_global_stats_bool(
+                                has_max,
+                                "inline aggregate column stats has_max",
+                            )?
+                            .then_some(max_value),
+                        });
                 }
                 ["inline_column_extra_stats", column_id, extra_stats] => {
                     let column_id = ColumnId(parse_global_stats_u64(
                         column_id,
                         "inline column extra stats column id",
                     )?);
-                    self.columns
-                        .entry(column_id)
-                        .or_default()
+                    self.stats_for_column(column_id)
                         .merge_extra_stats(extra_stats);
                 }
                 _ => {}
             }
         }
+        if current_inline_record_count > 0 {
+            self.merge_missing_inline_defaults(&observed_columns);
+        }
         Ok(())
+    }
+
+    fn merge_missing_inline_defaults(&mut self, observed: &BTreeSet<ColumnId>) {
+        let missing = self
+            .leaf_column_ids
+            .difference(observed)
+            .copied()
+            .collect::<Vec<_>>();
+        for column in missing {
+            let (default, is_unknown) = self
+                .column_defaults
+                .get(&column)
+                .cloned()
+                .unwrap_or_default();
+            let bound = if is_unknown { None } else { default.as_deref() };
+            self.stats_for_column(column)
+                .merge_inline(InlineStatsMerge {
+                    has_contains_null: true,
+                    contains_null: is_unknown || default.is_none(),
+                    has_non_null_values: is_unknown || default.is_some(),
+                    min_value: bound,
+                    max_value: bound,
+                });
+        }
     }
 
     fn fill_missing_file_columns(&self, columns: &mut BTreeMap<ColumnId, GlobalColumnStats>) {
@@ -196,7 +293,15 @@ impl GlobalTableStats {
                 if self.leaf_column_ids.contains(column_id)
                     && present_columns.is_none_or(|columns| !columns.contains(column_id))
                 {
-                    columns.entry(*column_id).or_default().mark_contains_null();
+                    let scalar_type = self
+                        .column_types
+                        .get(column_id)
+                        .copied()
+                        .unwrap_or_default();
+                    columns
+                        .entry(*column_id)
+                        .or_insert_with(|| GlobalColumnStats::with_type(scalar_type))
+                        .mark_unknown();
                 }
             }
         }
@@ -260,22 +365,44 @@ pub(super) fn leaf_column_ids(table: &crate::TableRow) -> Vec<ColumnId> {
 }
 
 impl GlobalColumnStats {
+    pub(super) fn with_type(scalar_type: CatalogScalarType) -> Self {
+        Self {
+            scalar_type,
+            ..Self::default()
+        }
+    }
+
     fn merge_file(&mut self, row: FileColumnStatsRow) {
         self.has_contains_null = true;
         if row.null_count > 0 {
             self.contains_null = true;
         }
-        if let Some(min_value) = row.min_value
-            && (!self.has_min || global_stats_value_less_than(&min_value, &self.min_value))
-        {
-            self.has_min = true;
-            self.min_value = min_value;
-        }
-        if let Some(max_value) = row.max_value
-            && (!self.has_max || global_stats_value_greater_than(&max_value, &self.max_value))
-        {
-            self.has_max = true;
-            self.max_value = max_value;
+        if typed_extrema_are_invalid(
+            self.scalar_type,
+            row.value_count,
+            row.null_count,
+            row.min_value.as_deref(),
+            row.max_value.as_deref(),
+        ) {
+            self.clear_extrema();
+            self.invalid_extrema = true;
+        } else if !self.invalid_extrema {
+            if let Some(min_value) = row.min_value
+                && (!self.has_min
+                    || compare_typed_scalars(self.scalar_type, &min_value, &self.min_value)
+                        .is_some_and(|ordering| ordering.is_lt()))
+            {
+                self.has_min = true;
+                self.min_value = min_value;
+            }
+            if let Some(max_value) = row.max_value
+                && (!self.has_max
+                    || compare_typed_scalars(self.scalar_type, &max_value, &self.max_value)
+                        .is_some_and(|ordering| ordering.is_gt()))
+            {
+                self.has_max = true;
+                self.max_value = max_value;
+            }
         }
         if let Some(extra_stats) = row.extra_stats
             && !extra_stats.is_empty()
@@ -292,38 +419,65 @@ impl GlobalColumnStats {
         self.extra_stats = merge_global_extra_stats(&self.extra_stats, extra_stats);
     }
 
-    pub(super) fn merge_inline(
-        &mut self,
-        has_contains_null: bool,
-        contains_null: bool,
-        has_min: bool,
-        min_value: &str,
-        has_max: bool,
-        max_value: &str,
-    ) {
-        if has_contains_null {
+    pub(super) fn merge_inline(&mut self, inline: InlineStatsMerge<'_>) {
+        if inline.has_contains_null {
             self.has_contains_null = true;
-            self.contains_null = self.contains_null || contains_null;
+            self.contains_null = self.contains_null || inline.contains_null;
         }
-        if has_min && (!self.has_min || global_stats_value_less_than(min_value, &self.min_value)) {
-            self.has_min = true;
-            self.min_value = min_value.to_owned();
-        }
-        if has_max && (!self.has_max || global_stats_value_greater_than(max_value, &self.max_value))
+        let bounds = match (inline.min_value, inline.max_value) {
+            (Some(min_value), Some(max_value)) => Some((min_value, max_value)),
+            (None, None) => None,
+            _ => {
+                self.clear_extrema();
+                self.invalid_extrema = true;
+                return;
+            }
+        };
+        let bounds_are_invalid = bounds.is_some_and(|(min_value, max_value)| {
+            compare_typed_scalars(self.scalar_type, min_value, min_value).is_none()
+                || compare_typed_scalars(self.scalar_type, max_value, max_value).is_none()
+                || compare_typed_scalars(self.scalar_type, min_value, max_value)
+                    .is_none_or(|ordering| ordering.is_gt())
+        });
+        if !self.invalid_extrema && bounds_are_invalid {
+            self.clear_extrema();
+            self.invalid_extrema = true;
+        } else if let Some((min_value, max_value)) = bounds
+            && !self.invalid_extrema
         {
-            self.has_max = true;
-            self.max_value = max_value.to_owned();
-        }
-        if !has_min && !has_max {
-            self.has_min = false;
-            self.min_value.clear();
-            self.has_max = false;
-            self.max_value.clear();
+            if !self.has_min
+                || compare_typed_scalars(self.scalar_type, min_value, &self.min_value)
+                    .is_some_and(|ordering| ordering.is_lt())
+            {
+                self.has_min = true;
+                self.min_value = min_value.to_owned();
+            }
+            if !self.has_max
+                || compare_typed_scalars(self.scalar_type, max_value, &self.max_value)
+                    .is_some_and(|ordering| ordering.is_gt())
+            {
+                self.has_max = true;
+                self.max_value = max_value.to_owned();
+            }
+        } else if bounds.is_none() {
+            self.clear_extrema();
+            if inline.has_non_null_values {
+                self.invalid_extrema = true;
+            }
         }
     }
 
-    fn mark_contains_null(&mut self) {
+    fn mark_unknown(&mut self) {
         self.has_contains_null = true;
         self.contains_null = true;
+        self.clear_extrema();
+        self.invalid_extrema = true;
+    }
+
+    fn clear_extrema(&mut self) {
+        self.has_min = false;
+        self.min_value.clear();
+        self.has_max = false;
+        self.max_value.clear();
     }
 }

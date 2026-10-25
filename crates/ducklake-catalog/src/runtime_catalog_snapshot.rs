@@ -6,26 +6,15 @@ use std::sync::OnceLock;
 use crate::CatalogCacheNamespace;
 #[cfg(not(test))]
 use crate::bounded_cache::{BoundedCache, static_bounded_cache};
-use crate::runtime_metrics::RuntimeMetricStage;
 #[cfg(feature = "runtime-metrics")]
 use crate::runtime_metrics::record_runtime_method_elapsed;
 use crate::{
-    CatalogId, CatalogOrderId, CatalogResult, DataFileRow, DeleteFileRow, DuckLakeSnapshotId,
-    OrderedCatalogKv, RangeDirection, SnapshotRow,
+    CatalogId, CatalogOrderId, CatalogResult, DuckLakeSnapshotId, OrderedCatalogKv, SnapshotRow,
     conflict_watermarks::load_conflict_watermarks,
-    inline_data::decode_inline_table_item,
-    keys::{KeyFamily, family_prefix},
     latest_snapshot,
-    macro_store::list_macro_rows,
-    runtime_read_context::{
-        CatalogInlineDeletionReadContext, CatalogSnapshotReadContext, CatalogSnapshotRequestContext,
-    },
-    runtime_snapshot_range::{SnapshotDataChangeOrder, SnapshotWatermarkCutoffOrder},
-    runtime_snapshots::public_snapshot_sequences_by_order_shared,
-    schema_store::list_schema_rows,
+    runtime_metrics::RuntimeMetricStage,
+    runtime_read_context::{CatalogSnapshotReadContext, CatalogSnapshotRequestContext},
     schema_version_state::{load_current_schema_version, load_schema_version_at},
-    table_store::list_table_rows,
-    view_store::list_view_rows,
 };
 
 #[cfg(not(test))]
@@ -255,8 +244,15 @@ fn render_catalog_snapshot_payload(context: CatalogSnapshotReadContext) -> Vec<u
     out.push_str(&format!("schema_count={}\n", context.schemas.len()));
     for schema in context.schemas {
         out.push_str(&format!(
-            "schema\t{}\t{}\t{}\t{}\n",
-            schema.schema_id.0, schema.uuid, schema.name, schema.path
+            "schema\t{}\t{}\t{}\t{}\t{}\n",
+            schema.schema_id.0,
+            schema.uuid,
+            schema.name,
+            schema.path,
+            schema
+                .parent_schema_id
+                .map(|id| id.0.to_string())
+                .unwrap_or_default()
         ));
     }
     out.push_str(&format!("table_count={}\n", context.tables.len()));
@@ -414,66 +410,14 @@ pub(crate) struct SnapshotWatermarks {
 pub(crate) fn conflict_snapshot_watermarks(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
-    order: CatalogOrderId,
+    _order: CatalogOrderId,
 ) -> CatalogResult<SnapshotWatermarks> {
     let watermarks = load_conflict_watermarks(kv, catalog)?;
-    if let (Some(max_file_id), Some(max_catalog_id)) =
-        (watermarks.max_file_id, watermarks.max_catalog_id)
-    {
-        return Ok(SnapshotWatermarks {
-            next_catalog_id: max_catalog_id.saturating_add(1),
-            next_file_id: max_file_id.saturating_add(1),
-        });
-    }
-    let stage_started = RuntimeMetricStage::start();
-    let max_file_id = kv
-        .scan_prefix(
-            &family_prefix(catalog, KeyFamily::DataFile),
-            RangeDirection::Forward,
-            usize::MAX,
-        )?
-        .into_iter()
-        .map(|item| DataFileRow::decode(&item.value).map(|row| row.data_file_id.0))
-        .try_fold(None, max_decoded_id)?;
-    record_runtime_stage(
-        "method.runtime_catalog_snapshot.conflict_watermarks.data_files",
-        stage_started,
-    );
-    let stage_started = RuntimeMetricStage::start();
-    let max_delete_file_id = kv
-        .scan_prefix(
-            &family_prefix(catalog, KeyFamily::DeleteFile),
-            RangeDirection::Forward,
-            usize::MAX,
-        )?
-        .into_iter()
-        .map(|item| DeleteFileRow::decode(&item.value).map(|row| row.delete_file_id.0))
-        .try_fold(None, max_decoded_id)?;
-    record_runtime_stage(
-        "method.runtime_catalog_snapshot.conflict_watermarks.delete_files",
-        stage_started,
-    );
-    let stage_started = RuntimeMetricStage::start();
-    let inline_watermark = raw_inline_data_change_watermark(kv, catalog, order)?;
-    record_runtime_stage(
-        "method.runtime_catalog_snapshot.conflict_watermarks.inline_watermark",
-        stage_started,
-    );
-    let next_file_id = max_file_id
-        .into_iter()
-        .chain(max_delete_file_id)
-        .chain(inline_watermark)
-        .max()
-        .map_or(0, |id| id.saturating_add(1));
-    let stage_started = RuntimeMetricStage::start();
-    let next_catalog_id = next_historical_catalog_id(kv, catalog)?;
-    record_runtime_stage(
-        "method.runtime_catalog_snapshot.conflict_watermarks.next_catalog_id",
-        stage_started,
-    );
     Ok(SnapshotWatermarks {
-        next_catalog_id,
-        next_file_id,
+        next_catalog_id: watermarks
+            .max_catalog_id
+            .map_or(0, |id| id.saturating_add(1)),
+        next_file_id: watermarks.max_file_id.map_or(0, |id| id.saturating_add(1)),
     })
 }
 
@@ -485,114 +429,6 @@ pub(crate) fn snapshot_watermarks(
     conflict_snapshot_watermarks(kv, catalog, order)
 }
 
-fn max_decoded_id(current: Option<u64>, decoded: CatalogResult<u64>) -> CatalogResult<Option<u64>> {
-    let decoded = decoded?;
-    Ok(Some(current.map_or(decoded, |value| value.max(decoded))))
-}
-
-fn next_historical_catalog_id(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-) -> CatalogResult<u64> {
-    let stage_started = RuntimeMetricStage::start();
-    let max_schema_id = list_schema_rows(kv, catalog)?
-        .into_iter()
-        .map(|schema| schema.schema_id.0)
-        .max();
-    record_runtime_stage(
-        "method.runtime_catalog_snapshot.next_historical_catalog_id.schemas",
-        stage_started,
-    );
-    let stage_started = RuntimeMetricStage::start();
-    let max_table_id = list_table_rows(kv, catalog)?
-        .into_iter()
-        .map(|table| table.table_id.0)
-        .max();
-    record_runtime_stage(
-        "method.runtime_catalog_snapshot.next_historical_catalog_id.tables",
-        stage_started,
-    );
-    let stage_started = RuntimeMetricStage::start();
-    let max_view_id = list_view_rows(kv, catalog)?
-        .into_iter()
-        .map(|view| view.view_id.0)
-        .max();
-    record_runtime_stage(
-        "method.runtime_catalog_snapshot.next_historical_catalog_id.views",
-        stage_started,
-    );
-    let stage_started = RuntimeMetricStage::start();
-    let max_macro_id = list_macro_rows(kv, catalog)?
-        .into_iter()
-        .map(|macro_row| macro_row.macro_id.0)
-        .max();
-    record_runtime_stage(
-        "method.runtime_catalog_snapshot.next_historical_catalog_id.macros",
-        stage_started,
-    );
-    Ok(max_schema_id
-        .into_iter()
-        .chain(max_table_id)
-        .chain(max_view_id)
-        .chain(max_macro_id)
-        .max()
-        .map_or(1, |id| id.saturating_add(1)))
-}
-
-fn raw_inline_data_change_watermark(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    snapshot_order: CatalogOrderId,
-) -> CatalogResult<Option<u64>> {
-    let stage_started = RuntimeMetricStage::start();
-    let sequence_by_order = public_snapshot_sequences_by_order_shared(kv, catalog)?;
-    record_runtime_stage(
-        "method.runtime_catalog_snapshot.raw_inline_watermark.snapshots",
-        stage_started,
-    );
-    let mut watermark = None;
-    let stage_started = RuntimeMetricStage::start();
-    for item in kv.scan_prefix(
-        &family_prefix(catalog, KeyFamily::InlineTable),
-        RangeDirection::Forward,
-        usize::MAX,
-    )? {
-        let row = decode_inline_table_item(catalog, &item.key, &item.value)?;
-        update_raw_data_change_watermark(
-            sequence_by_order.as_ref(),
-            SnapshotWatermarkCutoffOrder::new(snapshot_order),
-            SnapshotDataChangeOrder::new(row.validity.begin_order),
-            &mut watermark,
-        );
-        if let Some(end_order) = row.validity.end_order {
-            update_raw_data_change_watermark(
-                sequence_by_order.as_ref(),
-                SnapshotWatermarkCutoffOrder::new(snapshot_order),
-                SnapshotDataChangeOrder::new(end_order),
-                &mut watermark,
-            );
-        }
-    }
-    record_runtime_stage(
-        "method.runtime_catalog_snapshot.raw_inline_watermark.inline_tables",
-        stage_started,
-    );
-    let stage_started = RuntimeMetricStage::start();
-    for row in CatalogInlineDeletionReadContext::for_catalog(kv, catalog)?.rows() {
-        update_raw_data_change_watermark(
-            sequence_by_order.as_ref(),
-            SnapshotWatermarkCutoffOrder::new(snapshot_order),
-            SnapshotDataChangeOrder::new(row.validity.begin_order),
-            &mut watermark,
-        );
-    }
-    record_runtime_stage(
-        "method.runtime_catalog_snapshot.raw_inline_watermark.inline_deletions",
-        stage_started,
-    );
-    Ok(watermark)
-}
-
 #[cfg(feature = "runtime-metrics")]
 fn record_runtime_stage(operation: &str, started: RuntimeMetricStage) {
     record_runtime_method_elapsed(operation, started.elapsed_micros());
@@ -601,23 +437,6 @@ fn record_runtime_stage(operation: &str, started: RuntimeMetricStage) {
 #[cfg(not(feature = "runtime-metrics"))]
 #[inline]
 fn record_runtime_stage(_operation: &str, _started: RuntimeMetricStage) {}
-
-fn update_raw_data_change_watermark(
-    sequence_by_order: &BTreeMap<CatalogOrderId, u64>,
-    snapshot_order: SnapshotWatermarkCutoffOrder,
-    change_order: SnapshotDataChangeOrder,
-    watermark: &mut Option<u64>,
-) {
-    let snapshot_order = snapshot_order.catalog_order();
-    let change_order = change_order.catalog_order();
-    if change_order > snapshot_order {
-        return;
-    }
-    let Some(sequence) = sequence_by_order.get(&change_order) else {
-        return;
-    };
-    *watermark = Some(watermark.map_or(*sequence, |value| value.max(*sequence)));
-}
 
 #[cfg(test)]
 #[path = "runtime_catalog_snapshot_tests.rs"]

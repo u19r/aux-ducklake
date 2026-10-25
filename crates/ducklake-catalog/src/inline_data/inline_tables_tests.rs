@@ -44,7 +44,7 @@ mod tests {
         let assembled = assemble_inline_payload(chunks).unwrap();
         assert_eq!(assembled, payload);
         let report = guard.finish();
-        emit_report(&report);
+        emit_report(&report).expect("emit allocation report");
     }
 
     #[test]

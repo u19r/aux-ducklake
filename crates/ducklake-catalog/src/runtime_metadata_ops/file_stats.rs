@@ -1,13 +1,18 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
+use crate::typed_scalar::{
+    CatalogScalarType, compare_typed_scalars, normalize_catalog_scalar_type,
+    typed_extrema_are_invalid,
+};
 use crate::{
-    CatalogId, CatalogResult, DataFileId, PartitionKeyIndex, list_column_mappings,
+    CatalogId, CatalogResult, ColumnId, DataFileId, DataFileRow, FileColumnStatsRow,
+    PartitionKeyIndex, TableId, TableRow, list_column_mappings, list_data_files,
     list_file_column_stats, put_column_mappings, runtime_protocol::RuntimeCatalogBackend,
 };
 
 #[cfg(feature = "foundationdb")]
 use crate::{
-    DuckLakeSnapshotId, TableId, runtime_catalog_snapshot::conflict_snapshot_payload_for_row,
+    DuckLakeSnapshotId, runtime_catalog_snapshot::conflict_snapshot_payload_for_row,
     runtime_payload::payload_u64_value, runtime_snapshots::snapshot_changes_after_payload,
     store::latest_snapshot_uncached,
 };
@@ -135,6 +140,122 @@ pub(super) fn bounded_partition_info_mirror_sql(
     out
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TableColumnStatsMirrorRow {
+    pub(crate) table_id: TableId,
+    pub(crate) column_id: ColumnId,
+    pub(crate) contains_null: bool,
+    pub(crate) min_value: Option<String>,
+    pub(crate) max_value: Option<String>,
+}
+
+pub(crate) fn recompute_table_column_stats(
+    tables: &[TableRow],
+    current_data_files: &[DataFileRow],
+    file_stats: &[FileColumnStatsRow],
+) -> Vec<TableColumnStatsMirrorRow> {
+    let current_file_ids = current_data_files
+        .iter()
+        .map(|row| row.data_file_id)
+        .collect::<BTreeSet<_>>();
+    let column_types = tables
+        .iter()
+        .flat_map(|table| {
+            table.columns.iter().map(|column| {
+                (
+                    (table.table_id, column.column_id),
+                    normalize_catalog_scalar_type(&column.column_type),
+                )
+            })
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut accumulators = BTreeMap::<(TableId, ColumnId), MirrorColumnStats>::new();
+    for row in file_stats
+        .iter()
+        .filter(|row| current_file_ids.contains(&row.data_file_id))
+    {
+        let key = (row.table_id, row.column_id);
+        let scalar_type = column_types.get(&key).copied().unwrap_or_default();
+        accumulators
+            .entry(key)
+            .or_insert_with(|| MirrorColumnStats::new(scalar_type))
+            .merge(row);
+    }
+    accumulators
+        .into_iter()
+        .map(|((table_id, column_id), stats)| TableColumnStatsMirrorRow {
+            table_id,
+            column_id,
+            contains_null: stats.contains_null,
+            min_value: if stats.invalid_extrema {
+                None
+            } else {
+                stats.min_value
+            },
+            max_value: if stats.invalid_extrema {
+                None
+            } else {
+                stats.max_value
+            },
+        })
+        .collect()
+}
+
+struct MirrorColumnStats {
+    scalar_type: CatalogScalarType,
+    contains_null: bool,
+    min_value: Option<String>,
+    max_value: Option<String>,
+    invalid_extrema: bool,
+}
+
+impl MirrorColumnStats {
+    fn new(scalar_type: CatalogScalarType) -> Self {
+        Self {
+            scalar_type,
+            contains_null: false,
+            min_value: None,
+            max_value: None,
+            invalid_extrema: false,
+        }
+    }
+
+    fn merge(&mut self, row: &FileColumnStatsRow) {
+        self.contains_null |= row.null_count > 0;
+        if self.invalid_extrema {
+            return;
+        }
+        if typed_extrema_are_invalid(
+            self.scalar_type,
+            row.value_count,
+            row.null_count,
+            row.min_value.as_deref(),
+            row.max_value.as_deref(),
+        ) {
+            self.min_value = None;
+            self.max_value = None;
+            self.invalid_extrema = true;
+            return;
+        }
+        if let Some(value) = row.min_value.as_ref()
+            && self.min_value.as_deref().is_none_or(|current| {
+                compare_typed_scalars(self.scalar_type, value, current)
+                    .is_some_and(|ordering| ordering.is_lt())
+            })
+        {
+            self.min_value = Some(value.clone());
+        }
+        if let Some(value) = row.max_value.as_ref()
+            && self.max_value.as_deref().is_none_or(|current| {
+                compare_typed_scalars(self.scalar_type, value, current)
+                    .is_some_and(|ordering| ordering.is_gt())
+            })
+        {
+            self.max_value = Some(value.clone());
+        }
+    }
+}
+
 pub(crate) fn list_file_column_stats_rows(
     backend: RuntimeCatalogBackend,
     catalog: CatalogId,
@@ -178,6 +299,17 @@ pub(crate) fn render_bounded_append_mirror_sql(
         .into_iter()
         .filter(|row| current_data_file_ids.contains(&row.data_file_id))
         .collect::<Vec<_>>();
+    let affected_table_id_set = affected_table_ids.iter().copied().collect::<BTreeSet<_>>();
+    let current_data_files = list_data_files(&kv, catalog)?
+        .into_iter()
+        .filter(|row| {
+            row.validity.end_order.is_none() && affected_table_id_set.contains(&row.table_id)
+        })
+        .collect::<Vec<_>>();
+    let all_file_stats = list_file_column_stats(&kv, catalog)?;
+    let tables = crate::table_store::load_current_table_rows(&kv, catalog, &affected_table_id_set)?;
+    let table_column_stats =
+        recompute_table_column_stats(&tables, &current_data_files, &all_file_stats);
     let snapshot_orders = data_files
         .iter()
         .flat_map(|row| {
@@ -196,6 +328,7 @@ pub(crate) fn render_bounded_append_mirror_sql(
         partition_rows,
         &data_files,
         &file_stats,
+        &table_column_stats,
         &snapshots,
     )
     .into_bytes())
@@ -346,17 +479,20 @@ pub(crate) fn list_snapshot_stats_and_changes_inputs(
             "ListSnapshotStatsAndChangesInputs missing snapshot_id",
         )?;
         let kv = open_foundationdb_catalog()?;
-        let Some(latest) = latest_snapshot_uncached(&kv, catalog).row? else {
+        let read_kv = crate::runtime_file_listing::runtime_read_snapshot_kv(&kv)?;
+        let Some(latest) = latest_snapshot_uncached(&read_kv, catalog).row? else {
             return Ok(b"catalog_snapshot_exists=false\n".to_vec());
         };
         let latest_snapshot_id = latest.sequence.0;
-        let mut out = String::from_utf8(conflict_snapshot_payload_for_row(&kv, catalog, latest)?)
-            .map_err(|error| {
+        let mut out = String::from_utf8(conflict_snapshot_payload_for_row(
+            &read_kv, catalog, latest,
+        )?)
+        .map_err(|error| {
             crate::CatalogError::Decode(format!("conflict snapshot payload is not utf-8: {error}"))
         })?;
         out.push_str(
             std::str::from_utf8(&snapshot_changes_after_payload(
-                &kv,
+                &read_kv,
                 catalog,
                 DuckLakeSnapshotId(base_snapshot_id),
             )?)
@@ -368,7 +504,7 @@ pub(crate) fn list_snapshot_stats_and_changes_inputs(
         );
         out.push_str(
             std::str::from_utf8(&global_stats_for_snapshot_payload(
-                &kv,
+                &read_kv,
                 catalog,
                 latest_snapshot_id,
                 &BTreeSet::new(),

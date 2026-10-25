@@ -7,6 +7,7 @@ use crate::{
     AppendCommitResult, CatalogError, CatalogResult, CommitAttemptRow, DataCommitIntent,
     DataFileChangeKind, DataFileRow, FdbOrderedCatalogKv, FoundationDbErrorClass, ValidityWindow,
     conflict::{commit_attempt_key, load_commit_attempt, reject_conflicts_since_base},
+    conflict_watermarks::stage_fdb_max_file_id_watermark,
     fdb_runtime::{classify_fdb_error, map_fdb_commit_error, map_fdb_error},
     fdb_versionstamp::{
         committed_order, data_file_begin_key_order_offset,
@@ -151,6 +152,7 @@ impl FdbOrderedCatalogKv {
             &[],
             MutationType::SetVersionstampedKey,
         );
+        stage_fdb_max_file_id_watermark(self, &trx, catalog, row.data_file_id.0);
         let versionstamp = trx.get_versionstamp();
         if let Err(error) = block_on(trx.commit()) {
             let error_class = classify_fdb_error(*error);

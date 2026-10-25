@@ -1,27 +1,31 @@
+#[cfg(feature = "runtime-metrics")]
+use std::panic::Location;
+use std::{
+    cell::RefCell,
+    collections::BTreeMap,
+    sync::{Mutex, OnceLock},
+};
+
 #[cfg(not(test))]
 use crate::bounded_cache::{BoundedCache, static_bounded_cache};
-use crate::runtime_metrics::RuntimeMetricStage;
 use crate::{
-    CatalogId, CatalogResult, KvBatch, MutableCatalogKv, OrderedCatalogKv, RangeDirection,
-    RawSnapshotSequence, SnapshotRow,
+    CatalogError, CatalogId, CatalogResult, KvBatch, MutableCatalogKv, OrderedCatalogKv,
+    RangeDirection, RawSnapshotSequence, SnapshotRow,
+    conflict_watermarks::stage_conflict_watermarks_initialized,
     ids::{CatalogOrderId, CatalogOrderKind},
     keys::{
         decode_snapshot_timestamp_key, latest_snapshot_row_key, raw_snapshot_row_key, snapshot_key,
         snapshot_prefix, snapshot_timestamp_key, snapshot_timestamp_prefix,
     },
+    runtime_metrics::RuntimeMetricStage,
 };
 #[cfg(feature = "runtime-metrics")]
 use crate::{
     runtime_metrics::{RuntimeMetricStatus, record_runtime_request_elapsed},
     runtime_protocol::RuntimeCatalogBackend,
 };
-#[cfg(feature = "runtime-metrics")]
-use std::panic::Location;
-#[cfg(not(test))]
-use std::sync::OnceLock;
-use std::{cell::RefCell, collections::BTreeMap};
 
-pub const SUPPORTED_DUCKLAKE_COMMIT: &str = "7e3c8e97cc5acddbcd2a1ebfb8530e6c52efdacf";
+pub const SUPPORTED_DUCKLAKE_COMMIT: &str = env!("AUX_DUCKLAKE_SUPPORTED_COMMIT");
 
 #[cfg(feature = "runtime-metrics")]
 macro_rules! record_latest_snapshot_callsite {
@@ -64,16 +68,22 @@ static SNAPSHOT_LIST_CACHE: OnceLock<
 pub(crate) fn invalidate_runtime_read_context(catalog: CatalogId) {
     REQUEST_LATEST_SNAPSHOT_CACHE.with(|cache| {
         if let Some(cache) = cache.borrow_mut().as_mut() {
-            cache.retain(|(_, cached_catalog), _| *cached_catalog != catalog);
+            cache.retain(|(namespace, cached_catalog), _| {
+                *cached_catalog != catalog || namespace.has_read_context()
+            });
         }
     });
     #[cfg(not(test))]
     {
         if let Some(cache) = LATEST_SNAPSHOT_CACHE.get() {
-            cache.retain(|(_, cached_catalog), _| *cached_catalog != catalog);
+            cache.retain(|(namespace, cached_catalog), _| {
+                *cached_catalog != catalog || namespace.has_read_context()
+            });
         }
         if let Some(cache) = SNAPSHOT_LIST_CACHE.get() {
-            cache.retain(|(_, cached_catalog), _| *cached_catalog != catalog);
+            cache.retain(|(namespace, cached_catalog), _| {
+                *cached_catalog != catalog || namespace.has_read_context()
+            });
         }
         crate::runtime_read_context::invalidate_catalog_read_context(catalog);
         crate::runtime_read_context::invalidate_inline_deletion_read_context(catalog);
@@ -86,14 +96,79 @@ pub(crate) fn invalidate_runtime_read_context(catalog: CatalogId) {
     }
 }
 
+/// Drop the latest-snapshot identity for one failed runtime request without
+/// dropping the immutable file/inline captures owned by its read context.
+///
+/// Catalog mutation failures must make a retry observe the latest catalog
+/// state.  The context snapshot cache is keyed by namespace, catalog, and
+/// context id, so matching the catalog and context id here cannot make a
+/// continuation use another catalog's snapshot.  The immutable inline capture
+/// cache deliberately is not touched: an active query may still be consuming
+/// the file/inline payload captured before a concurrent mutation.
+pub(crate) fn invalidate_runtime_read_context_snapshot(catalog: CatalogId, read_context_id: u64) {
+    if let Ok(mut caches) = runtime_read_context_snapshot_caches().lock() {
+        caches.retain(|key, _| key.catalog != catalog || key.read_context_id != read_context_id);
+    }
+    REQUEST_LATEST_SNAPSHOT_CACHE.with(|cache| {
+        if let Some(cache) = cache.borrow_mut().as_mut() {
+            cache.retain(|(_, cached_catalog), _| *cached_catalog != catalog);
+        }
+    });
+}
+
 type LatestSnapshotRequestCache =
     BTreeMap<(crate::CatalogCacheNamespace, CatalogId), Option<SnapshotRow>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct RuntimeReadContextKey {
+    namespace: crate::CatalogCacheNamespace,
+    catalog: CatalogId,
+    read_context_id: u64,
+}
+
+static RUNTIME_READ_CONTEXT_SNAPSHOT_CACHES: OnceLock<
+    Mutex<BTreeMap<RuntimeReadContextKey, Option<SnapshotRow>>>,
+> = OnceLock::new();
+
+fn runtime_read_context_snapshot_caches()
+-> &'static Mutex<BTreeMap<RuntimeReadContextKey, Option<SnapshotRow>>> {
+    RUNTIME_READ_CONTEXT_SNAPSHOT_CACHES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn runtime_read_context_key(
+    namespace: crate::CatalogCacheNamespace,
+    catalog: CatalogId,
+    read_context_id: u64,
+) -> RuntimeReadContextKey {
+    RuntimeReadContextKey {
+        namespace: namespace.without_read_context(),
+        catalog,
+        read_context_id,
+    }
+}
+
+pub(crate) fn end_runtime_read_context(
+    namespace: crate::CatalogCacheNamespace,
+    catalog: CatalogId,
+    read_context_id: u64,
+) {
+    let key = runtime_read_context_key(namespace, catalog, read_context_id);
+    if let Ok(mut caches) = runtime_read_context_snapshot_caches().lock() {
+        caches.remove(&key);
+    }
+    REQUEST_LATEST_SNAPSHOT_CACHE.with(|cache| {
+        if let Some(cache) = cache.borrow_mut().as_mut() {
+            cache.retain(|(cached_namespace, cached_catalog), _| {
+                (*cached_catalog, *cached_namespace)
+                    != (catalog, namespace.with_read_context(Some(read_context_id)))
+            });
+        }
+    });
+}
 
 thread_local! {
     static REQUEST_LATEST_SNAPSHOT_CACHE: RefCell<Option<LatestSnapshotRequestCache>> =
         const { RefCell::new(None) };
-    static PERSISTENT_LATEST_SNAPSHOT_CACHES:
-        RefCell<BTreeMap<u64, LatestSnapshotRequestCache>> = const { RefCell::new(BTreeMap::new()) };
     static ACTIVE_RUNTIME_READ_CONTEXT: RefCell<Option<u64>> = const { RefCell::new(None) };
 }
 
@@ -101,23 +176,11 @@ pub(crate) struct RuntimeReadRequestGuard {
     previous: Option<LatestSnapshotRequestCache>,
     previous_context: Option<u64>,
     context_id: Option<u64>,
-    invalidate_catalog: Option<CatalogId>,
-    new_context: bool,
+    invalidate_catalog: Option<(CatalogId, Option<u64>)>,
 }
 
 pub(crate) fn begin_runtime_read_request(context_id: Option<u64>) -> RuntimeReadRequestGuard {
-    let (request_cache, new_context) = context_id.map_or_else(
-        || (BTreeMap::new(), false),
-        |context_id| {
-            PERSISTENT_LATEST_SNAPSHOT_CACHES.with(|contexts| {
-                let mut contexts = contexts.borrow_mut();
-                match contexts.remove(&context_id) {
-                    Some(cached) => (cached, false),
-                    None => (BTreeMap::new(), true),
-                }
-            })
-        },
-    );
+    let request_cache = BTreeMap::new();
     let previous = REQUEST_LATEST_SNAPSHOT_CACHE.with(|cache| cache.replace(Some(request_cache)));
     let previous_context = ACTIVE_RUNTIME_READ_CONTEXT.with(|active| active.replace(context_id));
     RuntimeReadRequestGuard {
@@ -125,7 +188,6 @@ pub(crate) fn begin_runtime_read_request(context_id: Option<u64>) -> RuntimeRead
         previous_context,
         context_id,
         invalidate_catalog: None,
-        new_context,
     }
 }
 
@@ -134,31 +196,32 @@ pub(crate) fn active_runtime_read_context_id() -> Option<u64> {
 }
 
 impl RuntimeReadRequestGuard {
-    pub(crate) fn is_new_context(&self) -> bool {
-        self.new_context
+    pub(crate) fn end_context(&mut self) {
+        let Some(context_id) = self.context_id.take() else {
+            return;
+        };
+        let _ = context_id;
+        REQUEST_LATEST_SNAPSHOT_CACHE.with(|cache| {
+            cache.replace(Some(BTreeMap::new()));
+        });
     }
 
-    pub(crate) fn invalidate_catalog_on_drop(&mut self, catalog: CatalogId) {
-        self.invalidate_catalog = Some(catalog);
+    pub(crate) fn invalidate_catalog_on_drop(
+        &mut self,
+        catalog: CatalogId,
+        caller_context_id: Option<u64>,
+    ) {
+        self.invalidate_catalog = Some((catalog, caller_context_id));
     }
 }
 
 impl Drop for RuntimeReadRequestGuard {
     fn drop(&mut self) {
-        if let Some(catalog) = self.invalidate_catalog {
+        if let Some((catalog, caller_context_id)) = self.invalidate_catalog {
             invalidate_runtime_read_context(catalog);
-        }
-        if let Some(context_id) = self.context_id {
-            let current = REQUEST_LATEST_SNAPSHOT_CACHE
-                .with(|cache| cache.borrow_mut().take())
-                .unwrap_or_default();
-            PERSISTENT_LATEST_SNAPSHOT_CACHES.with(|contexts| {
-                let mut contexts = contexts.borrow_mut();
-                contexts.insert(context_id, current);
-                while contexts.len() > 16 {
-                    contexts.pop_first();
-                }
-            });
+            if let Some(read_context_id) = caller_context_id {
+                invalidate_runtime_read_context_snapshot(catalog, read_context_id);
+            }
         }
         let previous = self.previous.take();
         REQUEST_LATEST_SNAPSHOT_CACHE.with(|cache| {
@@ -179,6 +242,7 @@ pub fn initialize_empty_catalog(
     let row = SnapshotRow::initial(order);
     let mut batch = KvBatch::new();
     stage_snapshot(&mut batch, catalog, &row);
+    stage_conflict_watermarks_initialized(&mut batch, catalog);
     kv.commit(batch)?;
     invalidate_runtime_read_context(catalog);
     Ok(row)
@@ -206,22 +270,61 @@ pub fn latest_snapshot(
     {
         return Ok(snapshot);
     }
+    if let Some(read_context_id) = active_runtime_read_context_id()
+        && let Some(snapshot) = runtime_read_context_snapshot_caches()
+            .lock()
+            .map_err(|_| {
+                CatalogError::Backend(
+                    "runtime read-context snapshot registry is unavailable".to_owned(),
+                )
+            })?
+            .get(&runtime_read_context_key(
+                cache_key.0,
+                catalog,
+                read_context_id,
+            ))
+    {
+        REQUEST_LATEST_SNAPSHOT_CACHE.with(|cache| {
+            if let Some(cache) = cache.borrow_mut().as_mut() {
+                cache.insert(cache_key, snapshot.clone());
+            }
+        });
+        return Ok(snapshot.clone());
+    }
     #[cfg(not(test))]
-    if runtime_read_context_enabled()
+    if active_runtime_read_context_id().is_none()
+        && runtime_read_context_enabled()
         && let Some(snapshot) = latest_snapshot_cache().get(cache_key)
     {
         return Ok(snapshot);
     }
     let result = latest_snapshot_uncached(kv, catalog);
     record_latest_snapshot_callsite!(result.started);
-    let result = result.row?;
+    let uncached = result.row?;
+    let result = if let Some(read_context_id) = active_runtime_read_context_id() {
+        let key = runtime_read_context_key(cache_key.0, catalog, read_context_id);
+        let mut caches = runtime_read_context_snapshot_caches().lock().map_err(|_| {
+            CatalogError::Backend(
+                "runtime read-context snapshot registry is unavailable".to_owned(),
+            )
+        })?;
+        match caches.entry(key) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(uncached.clone());
+                uncached
+            }
+            std::collections::btree_map::Entry::Occupied(entry) => entry.get().clone(),
+        }
+    } else {
+        uncached
+    };
     REQUEST_LATEST_SNAPSHOT_CACHE.with(|cache| {
         if let Some(cache) = cache.borrow_mut().as_mut() {
             cache.insert(cache_key, result.clone());
         }
     });
     #[cfg(not(test))]
-    if runtime_read_context_enabled() {
+    if active_runtime_read_context_id().is_none() && runtime_read_context_enabled() {
         latest_snapshot_cache().insert(cache_key, result.clone());
     }
     Ok(result)

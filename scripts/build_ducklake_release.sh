@@ -22,18 +22,35 @@ fi
 "$ROOT_DIR/scripts/cargo_with_sccache.sh" build -q -p ducklake-catalog --no-default-features --features foundationdb --release
 
 release_dir="$DUCKLAKE_DIR/build/release"
-rm -rf "$release_dir"
 cmake_args=(
     -DFORCE_COLORED_OUTPUT=1
     -DEXTENSION_STATIC_BUILD=1
     -DDUCKDB_EXTENSION_CONFIGS="$DUCKLAKE_DIR/extension_config.cmake"
     -DDUCKDB_EXPLICIT_PLATFORM="$DUCKDB_PLATFORM"
-    -DOVERRIDE_GIT_DESCRIBE="${AUX_DUCKLAKE_DUCKDB_GIT_DESCRIBE:-}"
+    -DDUCKDB_EXPLICIT_VERSION="$DUCKDB_VERSION"
     -DENABLE_UNITTEST_CPP_TESTS=FALSE
     -DENABLE_SANITIZER=FALSE
     -DENABLE_UBSAN=0
     -DCMAKE_BUILD_TYPE=Release
 )
+if [[ "$(uname -s)" == Linux ]]; then
+    cmake_args+=(
+        -DCMAKE_C_LINKER_LAUNCHER=/opt/aux-mold-3.0.0/bin/mold-link
+        -DCMAKE_CXX_LINKER_LAUNCHER=/opt/aux-mold-3.0.0/bin/mold-link
+    )
+fi
+if [[ -n "${CC:-}" ]]; then
+    cmake_args+=("-DCMAKE_C_COMPILER=$CC")
+fi
+if [[ -n "${CXX:-}" ]]; then
+    cmake_args+=("-DCMAKE_CXX_COMPILER=$CXX")
+fi
+if [[ -n "${AUX_DUCKLAKE_CURL_ROOT:-}" ]]; then
+    cmake_args+=(
+        "-DCURL_INCLUDE_DIR=$AUX_DUCKLAKE_CURL_ROOT/include"
+        "-DCURL_LIBRARY_RELEASE=$AUX_DUCKLAKE_CURL_ROOT/lib/libcurl.so"
+    )
+fi
 while IFS= read -r postgres_arg; do
     [[ -n "$postgres_arg" ]] && cmake_args+=("$postgres_arg")
 done < <(ducklake_postgres_cmake_args required)
@@ -41,15 +58,21 @@ if [[ -n "${CMAKE_PREFIX_PATH:-}" ]]; then
     cmake_args+=("-DCMAKE_PREFIX_PATH=$CMAKE_PREFIX_PATH")
 fi
 case "${GEN:-}" in
-    ninja) cmake_args=(-G Ninja "${cmake_args[@]}") ;;
-    make | "") ;;
-    *) echo "unsupported GEN for release build: $GEN" >&2; exit 1 ;;
+ninja) cmake_args=(-G Ninja "${cmake_args[@]}") ;;
+make | "") ;;
+*)
+    echo "unsupported GEN for release build: $GEN" >&2
+    exit 1
+    ;;
 esac
 ENABLE_POSTGRES_SCANNER=1 cmake "${cmake_args[@]}" -S "$DUCKLAKE_DIR/duckdb" -B "$release_dir"
 case "$(uname -s)" in
-    Darwin) duckdb_shared_target="libduckdb.dylib" ;;
-    Linux) duckdb_shared_target="libduckdb.so" ;;
-    *) echo "unsupported release build host: $(uname -s)" >&2; exit 1 ;;
+Darwin) duckdb_shared_target="libduckdb.dylib" ;;
+Linux) duckdb_shared_target="libduckdb.so" ;;
+*)
+    echo "unsupported release build host: $(uname -s)" >&2
+    exit 1
+    ;;
 esac
 cmake --build "$release_dir" --config Release --target \
     duckdb \

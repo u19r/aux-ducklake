@@ -2,6 +2,23 @@
 mod tests {
     use std::{cell::Cell, collections::BTreeSet};
 
+    use super::super::{
+        GlobalColumnStats, InlineStatsMerge, TableColumnStatsMirrorRow,
+        append_data_file_mirror_inserts, append_delete_file_mirror_inserts,
+        append_file_column_stats_mirror_inserts, append_file_partition_values_mirror_inserts,
+        append_table_inline_stats, begin_snapshot_for_schema_version, bounded_append_mirror_sql,
+        bounded_delete_file_mirror_payload_values, bounded_delete_file_mirror_sql,
+        bounded_scheduled_cleanup_mirror_sql_for_catalog, collect_data_file_ids_from_payload,
+        current_metadata_data_file_rows, current_metadata_file_column_stats,
+        data_file_rows_payload, delete_file_rows_payload,
+        file_stats::{bounded_partition_info_mirror_sql, recompute_table_column_stats},
+        initialization_metadata_settings, json_number_or_null,
+        list_current_data_files_for_data_file_ids, list_data_files_for_data_file_ids,
+        list_delete_files_for_data_file_ids, list_delete_files_for_delete_file_ids,
+        list_file_column_stats_for_data_file_ids, optional_metadata_payload_bool,
+        partition_value_request, payload_u64_values, scheduled_cleanup_delta_sql,
+        semantic_delete_begin_orders_for_rows, stats_snapshot_for_request,
+    };
     use crate::{
         CatalogId, CatalogOrderId, ColumnId, ColumnTypeChange, DataFileId, DataFileRow,
         DeleteFileId, DeleteFileRow, FakeOrderedCatalogKv, FileColumnStatsRow,
@@ -13,24 +30,200 @@ mod tests {
         list_data_files, list_file_column_stats, list_file_partition_values, list_snapshots,
         load_table_at, public_snapshot_sequence_for_order, register_file_column_stats,
         register_file_partition_value, store::stage_snapshot,
+        typed_scalar::normalize_catalog_scalar_type,
     };
 
-    use super::super::file_stats::bounded_partition_info_mirror_sql;
-    use super::super::{
-        GlobalColumnStats, append_data_file_mirror_inserts, append_delete_file_mirror_inserts,
-        append_file_column_stats_mirror_inserts, append_file_partition_values_mirror_inserts,
-        append_table_inline_stats, begin_snapshot_for_schema_version, bounded_append_mirror_sql,
-        bounded_delete_file_mirror_payload_values, bounded_delete_file_mirror_sql,
-        bounded_scheduled_cleanup_mirror_sql_for_catalog, collect_data_file_ids_from_payload,
-        current_metadata_data_file_rows, current_metadata_file_column_stats,
-        data_file_rows_payload, delete_file_rows_payload, initialization_metadata_settings,
-        json_number_or_null, list_current_data_files_for_data_file_ids,
-        list_data_files_for_data_file_ids, list_delete_files_for_data_file_ids,
-        list_delete_files_for_delete_file_ids, list_file_column_stats_for_data_file_ids,
-        optional_metadata_payload_bool, partition_value_request, payload_u64_values,
-        scheduled_cleanup_delta_sql, semantic_delete_begin_orders_for_rows,
-        stats_snapshot_for_request,
-    };
+    #[test]
+    fn given_decimal_global_bounds_when_comparing_then_order_is_numeric() {
+        let mut stats = GlobalColumnStats::with_type(normalize_catalog_scalar_type("DECIMAL"));
+        stats.merge_inline(InlineStatsMerge {
+            has_contains_null: true,
+            contains_null: false,
+            has_non_null_values: true,
+            min_value: Some("9.9"),
+            max_value: Some("9.9"),
+        });
+        stats.merge_inline(InlineStatsMerge {
+            has_contains_null: true,
+            contains_null: false,
+            has_non_null_values: true,
+            min_value: Some("10.0"),
+            max_value: Some("10.0"),
+        });
+
+        assert_eq!(stats.min_value, "9.9");
+        assert_eq!(stats.max_value, "10.0");
+    }
+
+    #[test]
+    fn given_malformed_or_nonfinite_global_bounds_when_merged_then_both_extrema_clear() {
+        for (declaration, invalid) in [("DECIMAL", "not-a-number"), ("DOUBLE", "NaN")] {
+            let mut stats =
+                GlobalColumnStats::with_type(normalize_catalog_scalar_type(declaration));
+            stats.merge_inline(InlineStatsMerge {
+                has_contains_null: true,
+                contains_null: false,
+                has_non_null_values: true,
+                min_value: Some("1"),
+                max_value: Some("2"),
+            });
+            stats.merge_inline(InlineStatsMerge {
+                has_contains_null: true,
+                contains_null: false,
+                has_non_null_values: true,
+                min_value: Some(invalid),
+                max_value: Some("2"),
+            });
+
+            assert!(!stats.has_min, "{declaration}");
+            assert!(!stats.has_max, "{declaration}");
+            assert!(stats.min_value.is_empty(), "{declaration}");
+            assert!(stats.max_value.is_empty(), "{declaration}");
+        }
+    }
+
+    #[test]
+    fn given_inverted_inline_global_bounds_when_merged_then_both_extrema_clear() {
+        let mut stats = GlobalColumnStats::with_type(normalize_catalog_scalar_type("DECIMAL"));
+        stats.merge_inline(InlineStatsMerge {
+            has_contains_null: true,
+            contains_null: false,
+            has_non_null_values: true,
+            min_value: Some("10.0"),
+            max_value: Some("9.9"),
+        });
+
+        assert!(!stats.has_min);
+        assert!(!stats.has_max);
+        assert!(stats.min_value.is_empty());
+        assert!(stats.max_value.is_empty());
+    }
+
+    #[test]
+    #[cfg(feature = "foundationdb")]
+    fn given_inline_and_file_decimal_stats_when_merged_then_global_extrema_are_exact() {
+        let table = TableRow::with_catalog_metadata(
+            TableId(8),
+            crate::SchemaId(0),
+            "decimal-uuid",
+            "decimal",
+            "main/decimal",
+            vec![TableColumnRow::new(
+                ColumnId(1),
+                "value",
+                "DECIMAL(38, 17)",
+                false,
+                None,
+            )],
+            CatalogOrderId::uuid_v7(0),
+        );
+        let mut stats = GlobalTableStats::new(&table, 0);
+        stats.accumulate_file(&GlobalStatsFileRow {
+            data_file_id: DataFileId(1),
+            record_count: 1,
+            file_size_bytes: 10,
+            row_id_start: Some(0),
+            has_deletions: false,
+        });
+        stats.accumulate_file_column_stats(
+            FileColumnStatsRow::new(
+                DataFileId(1),
+                TableId(8),
+                ColumnId(1),
+                0,
+                Some("10.0".to_owned()),
+                Some("10.0".to_owned()),
+            )
+            .with_value_count(Some(1)),
+        );
+        stats
+            .accumulate_inline_payload(
+                b"inline_aggregate_stats\t1\ninline_aggregate_next_row_id\t1\ninline_aggregate_column_stats\t1\t1\ttrue\t9.9\ttrue\t9.9\n",
+            )
+            .unwrap();
+
+        let mut output = String::new();
+        stats.append_to(&mut output).unwrap();
+
+        assert!(
+            output.contains("global_table_column_stats\t8\t1\ttrue\tfalse\ttrue\t9.9\ttrue\t10.0"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "foundationdb")]
+    fn given_old_inline_layout_when_new_column_default_is_missing_then_global_bounds_include_the_default()
+     {
+        let mut table = TableRow::new(TableId(8), "defaults", CatalogOrderId::uuid_v7(1));
+        let mut column = TableColumnRow::new(ColumnId(2), "added", "BIGINT", true, None);
+        column.initial_default = Some("9".to_owned());
+        column.created_with_table = false;
+        table.columns.push(column);
+        let mut stats = GlobalTableStats::new(&table, 0);
+        stats
+            .accumulate_inline_payload(b"inline_aggregate_stats\t2\n")
+            .unwrap();
+        stats.accumulate_inline_payload(b"inline_aggregate_stats\t1\ninline_aggregate_column_stats\t2\t1\ttrue\t10\ttrue\t10\n").unwrap();
+        let mut output = String::new();
+        stats.append_to(&mut output).unwrap();
+        assert!(
+            output.contains("global_table_column_stats\t8\t2\ttrue\tfalse\ttrue\t9\ttrue\t10"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "foundationdb")]
+    fn given_missing_inline_column_when_default_cannot_be_proven_then_bounds_stay_unknown() {
+        for (column_type, is_original, parent) in [
+            ("BOOLEAN", false, None),
+            ("BIGINT", true, None),
+            ("BIGINT", false, Some(ColumnId(1))),
+        ] {
+            let mut table = TableRow::new(TableId(8), "defaults", CatalogOrderId::uuid_v7(1));
+            let mut column = TableColumnRow::new(ColumnId(2), "added", column_type, true, parent);
+            column.created_with_table = is_original;
+            column.initial_default = Some("9".to_owned());
+            table.columns.push(column);
+            let mut stats = GlobalTableStats::new(&table, 0);
+            stats
+                .accumulate_inline_payload(b"inline_aggregate_stats\t2\n")
+                .unwrap();
+            let mut output = String::new();
+            stats.append_to(&mut output).unwrap();
+            assert!(
+                output.contains("global_table_column_stats\t8\t2\ttrue\t"),
+                "{output}"
+            );
+            assert!(!output.contains("\ttrue\t9\t"), "{output}");
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "foundationdb")]
+    fn given_missing_file_column_with_nonnull_default_when_stats_merge_then_bounds_are_unknown() {
+        let mut table = TableRow::new(TableId(8), "defaults", CatalogOrderId::uuid_v7(1));
+        let mut column = TableColumnRow::new(ColumnId(2), "added", "BIGINT", true, None);
+        column.created_with_table = false;
+        column.initial_default = Some("9".to_owned());
+        table.columns.push(column);
+        let mut stats = GlobalTableStats::new(&table, 0);
+        stats.accumulate_file(&GlobalStatsFileRow {
+            data_file_id: DataFileId(1),
+            record_count: 2,
+            file_size_bytes: 100,
+            row_id_start: Some(0),
+            has_deletions: false,
+        });
+        stats.accumulate_inline_payload(b"inline_aggregate_stats\t1\ninline_aggregate_column_stats\t2\t1\ttrue\t10\ttrue\t10\n").unwrap();
+        let mut output = String::new();
+        stats.append_to(&mut output).unwrap();
+        assert!(
+            output.contains("global_table_column_stats\t8\t2\ttrue\ttrue\tfalse\t\tfalse\t"),
+            "{output}"
+        );
+    }
 
     #[cfg(feature = "foundationdb")]
     use super::super::{GlobalStatsFileRow, GlobalTableStats, can_recompute_exact_inline_stats};
@@ -124,7 +317,13 @@ mod tests {
             ..GlobalColumnStats::default()
         };
 
-        stats.merge_inline(true, false, false, "", false, "");
+        stats.merge_inline(InlineStatsMerge {
+            has_contains_null: true,
+            contains_null: false,
+            has_non_null_values: false,
+            min_value: None,
+            max_value: None,
+        });
 
         assert!(!stats.has_min);
         assert!(stats.min_value.is_empty());
@@ -413,7 +612,8 @@ mod tests {
         );
         assert!(
             sql.contains(
-                "INSERT INTO {METADATA_CATALOG}.ducklake_partition_info VALUES (17, 4, NULL, NULL);"
+                "INSERT INTO {METADATA_CATALOG}.ducklake_partition_info VALUES (17, 4, NULL, \
+                 NULL);"
             ),
             "{sql}"
         );
@@ -549,7 +749,8 @@ mod tests {
         .unwrap();
 
         assert!(sql.starts_with(
-            "DELETE FROM {METADATA_CATALOG}.ducklake_files_scheduled_for_deletion WHERE data_file_id IN (5, 6);"
+            "DELETE FROM {METADATA_CATALOG}.ducklake_files_scheduled_for_deletion WHERE \
+             data_file_id IN (5, 6);"
         ));
         assert!(sql.contains("'data.parquet'"), "{sql}");
         assert!(sql.contains("'delete.parquet'"), "{sql}");
@@ -833,7 +1034,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "internal policy test: expired public snapshots are not retained only to resolve inline schema markers"]
+    #[ignore = "internal policy test: expired public snapshots are not retained only to resolve \
+                inline schema markers"]
     fn given_inline_marker_matches_public_schema_version_when_lookup_begin_snapshot_then_schema_version_wins()
      {
         let catalog = CatalogId(1);
@@ -1191,6 +1393,13 @@ mod tests {
             Vec::new(),
             &[data_file],
             &[stats],
+            &[TableColumnStatsMirrorRow {
+                table_id: TableId(7),
+                column_id: ColumnId(1),
+                contains_null: false,
+                min_value: Some("1".to_owned()),
+                max_value: Some("9".to_owned()),
+            }],
             &snapshots,
         );
 
@@ -1198,11 +1407,70 @@ mod tests {
             sql.contains("ducklake_table_column_stats WHERE table_id IN (7);"),
             "{sql}"
         );
-        assert!(sql.contains("stats.table_id IN (7)"), "{sql}");
+        assert!(!sql.contains("stats.table_id IN (7)"), "{sql}");
         assert!(
             !sql.contains("DELETE FROM {METADATA_CATALOG}.ducklake_table_column_stats;\n"),
             "{sql}"
         );
+        assert!(
+            sql.contains(
+                "INSERT INTO {METADATA_CATALOG}.ducklake_table_column_stats (table_id, column_id, \
+                 contains_null, contains_nan, min_value, max_value, extra_stats) VALUES (7, 1, \
+                 false, NULL, '1', '9', NULL);"
+            ),
+            "{sql}"
+        );
+        assert!(!sql.contains("min(stats.min_value)"), "{sql}");
+        assert!(!sql.contains("max(stats.max_value)"), "{sql}");
+    }
+
+    #[test]
+    fn given_decimal_file_stats_when_recomputing_bounded_table_stats_then_extrema_are_typed() {
+        let table = TableRow::with_catalog_metadata(
+            TableId(7),
+            crate::SchemaId(0),
+            "decimal-uuid",
+            "decimal",
+            "main/decimal/",
+            vec![TableColumnRow::new(
+                ColumnId(1),
+                "value",
+                "DECIMAL(38, 17)",
+                false,
+                None,
+            )],
+            CatalogOrderId::uuid_v7(0),
+        );
+        let files = vec![
+            data_file(DataFileId(1), TableId(7), 0),
+            data_file(DataFileId(2), TableId(7), 1),
+        ];
+        let file_stats = vec![
+            FileColumnStatsRow::new(
+                DataFileId(1),
+                TableId(7),
+                ColumnId(1),
+                0,
+                Some("9.9".to_owned()),
+                Some("9.9".to_owned()),
+            )
+            .with_value_count(Some(1)),
+            FileColumnStatsRow::new(
+                DataFileId(2),
+                TableId(7),
+                ColumnId(1),
+                0,
+                Some("10.0".to_owned()),
+                Some("10.0".to_owned()),
+            )
+            .with_value_count(Some(1)),
+        ];
+
+        let rows = recompute_table_column_stats(&[table], &files, &file_stats);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].min_value.as_deref(), Some("9.9"));
+        assert_eq!(rows[0].max_value.as_deref(), Some("10.0"));
     }
 
     #[test]

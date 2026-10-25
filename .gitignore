@@ -7,3 +7,4 @@ duckdb_unittest_tempdir/
 docs/evidence/ducklake-fdb-release
 simfdb/
 .DS_Store
+__pycache__/

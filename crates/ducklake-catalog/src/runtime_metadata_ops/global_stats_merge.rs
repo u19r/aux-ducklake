@@ -33,20 +33,6 @@ pub(super) fn parse_global_stats_bool(value: &str, field_name: &str) -> CatalogR
     }
 }
 
-pub(super) fn global_stats_value_less_than(left: &str, right: &str) -> bool {
-    match (left.parse::<i64>(), right.parse::<i64>()) {
-        (Ok(left), Ok(right)) => left < right,
-        _ => left < right,
-    }
-}
-
-pub(super) fn global_stats_value_greater_than(left: &str, right: &str) -> bool {
-    match (left.parse::<i64>(), right.parse::<i64>()) {
-        (Ok(left), Ok(right)) => left > right,
-        _ => left > right,
-    }
-}
-
 pub(super) fn merge_global_extra_stats(current: &str, incoming: &str) -> String {
     if current.is_empty() {
         return strip_sql_string_quotes(incoming).to_owned();

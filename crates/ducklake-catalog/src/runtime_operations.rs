@@ -12,26 +12,25 @@ use crate::{
         list_removed_data_files_after,
     },
     runtime_inline_ops::{
-        delete_inline_rows, inline_file_deletions_exist,
-        list_current_inline_flush_delete_positions, list_inline_file_deletions,
-        list_inline_file_deletions_for_flush, list_inline_flush_delete_positions,
-        list_inline_row_deletions, list_inline_row_insertions, read_inline_rows,
-        read_inline_rows_for_aggregate_stats, read_inline_rows_for_flush,
-        read_inline_rows_for_global_stats, read_inline_rows_for_global_stats_batch,
-        register_inline_rows, register_inline_tables,
+        delete_inline_rows, inline_file_deletions_exist, list_inline_file_deletions,
+        list_inline_file_deletions_for_flush, list_inline_row_deletions,
+        list_inline_row_insertions, read_inline_rows, read_inline_rows_for_aggregate_stats,
+        read_inline_rows_for_flush, read_inline_rows_for_global_stats,
+        read_inline_rows_for_global_stats_batch, register_inline_rows, register_inline_tables,
     },
     runtime_maintenance_ops::remove_cleanup_files,
     runtime_metadata_ops::{
-        attach_metadata, commit_column_mappings, initialize_ducklake, list_column_mapping_rows,
-        list_config_options, list_current_metadata_data_file_rows,
+        attach_metadata, commit_column_mappings, get_table_schema_versions, initialize_ducklake,
+        list_column_mapping_rows, list_config_options, list_current_metadata_data_file_rows,
         list_current_metadata_data_file_rows_for_data_file_ids,
         list_current_metadata_file_column_stats_rows,
         list_current_metadata_file_column_stats_rows_for_data_file_ids, list_data_file_rows,
         list_delete_file_rows, list_delete_file_rows_for_delete_file_ids,
         list_file_column_stats_rows, list_file_partition_value_rows_for_data_file_ids,
-        list_global_stats_for_snapshot, list_global_stats_inputs_for_snapshot,
-        list_snapshot_stats_and_changes_inputs, lookup_begin_snapshot_for_schema_version,
-        metadata_exists, render_bounded_append_mirror_sql, render_bounded_delete_file_mirror_sql,
+        list_global_stats_for_snapshot, list_global_stats_inputs_for_snapshot, list_inlined_tables,
+        list_null_only_columns, list_snapshot_stats_and_changes_inputs,
+        lookup_begin_snapshot_for_schema_version, metadata_exists,
+        render_bounded_append_mirror_sql, render_bounded_delete_file_mirror_sql,
         render_bounded_partition_info_mirror_sql, render_bounded_scheduled_cleanup_mirror_sql,
         resolve_catalog_id, set_config_option,
     },
@@ -50,9 +49,7 @@ use crate::{
         get_catalog_for_snapshot, get_conflict_snapshot, get_snapshot, get_snapshot_at,
         get_snapshot_at_timestamp, list_snapshot_changes_after, list_snapshots,
     },
-    runtime_table_ops::{
-        create_tables, get_next_column_id, is_column_created_with_table, replace_tables,
-    },
+    runtime_table_ops::{create_tables, get_next_column_id, replace_tables},
 };
 
 #[derive(Clone, Copy)]
@@ -124,10 +121,13 @@ pub(crate) fn runtime_operation_policy(operation: &str) -> RuntimeOperationPolic
         | "RenderBoundedScheduledCleanupMirrorSql"
         | "RenderBoundedDeleteFileMirrorSql"
         | "ListDeleteFilesForDeleteFileIds"
+        | "ListNullOnlyColumns"
+        | "ListInlinedTables"
+        | "GetTableSchemaVersions"
         | "GetBeginSnapshotForSchemaVersion"
-        | "GetNextColumnId"
-        | "IsColumnCreatedWithTable" => RuntimeOperationPolicy::read("metadata"),
-        "GetSnapshot"
+        | "GetNextColumnId" => RuntimeOperationPolicy::read("metadata"),
+        "CheckSnapshotFence"
+        | "GetSnapshot"
         | "GetConflictSnapshot"
         | "GetSnapshotAt"
         | "GetSnapshotAtTimestamp"
@@ -146,6 +146,7 @@ pub(crate) fn runtime_operation_policy(operation: &str) -> RuntimeOperationPolic
         | "ListDataFilesForPartitionScanAt"
         | "ListDataFilesForPartitionScansAt"
         | "ListDataFilesForPartitionPruneAt" => RuntimeOperationPolicy::read("read"),
+        "EndRuntimeReadContext" => RuntimeOperationPolicy::read("read_context"),
         "ReadInlineRows"
         | "ReadInlineRowsForFlush"
         | "ReadInlineRowsForGlobalStats"
@@ -154,8 +155,6 @@ pub(crate) fn runtime_operation_policy(operation: &str) -> RuntimeOperationPolic
         | "InlineFileDeletionsExist"
         | "ListInlineFileDeletions"
         | "ListInlineFileDeletionsForFlush"
-        | "ListInlineFlushDeletePositions"
-        | "ListCurrentInlineFlushDeletePositions"
         | "ListInlineRowInsertions"
         | "ListInlineRowDeletions" => RuntimeOperationPolicy::read("inline"),
         "ListDataFileChanges" | "ListTableDeletions" => RuntimeOperationPolicy::read("change_feed"),
@@ -167,8 +166,17 @@ pub(crate) fn runtime_operation_policy(operation: &str) -> RuntimeOperationPolic
 }
 
 pub(crate) fn payload_for_request(request: &RuntimeRequest) -> CatalogResult<Vec<u8>> {
+    if request.snapshot_fence.is_some()
+        && runtime_operation_policy(&request.operation).mutates_catalog
+        && request.operation != "CommitAttempt"
+    {
+        return Err(crate::CatalogError::InvalidMutation(
+            "snapshot-fenced transactions permit only atomic data commits".to_owned(),
+        ));
+    }
     let catalog = request.catalog_id;
     match request.operation.as_str() {
+        "CheckSnapshotFence" => Ok(b"snapshot_fence_version=1\n".to_vec()),
         "ResolveCatalogId" => resolve_catalog_id(request.backend, catalog, &request.payload),
         "AttachMetadata" => attach_metadata(request.backend, catalog, &request.payload),
         "MetadataExists" => metadata_exists(request.backend, catalog),
@@ -235,6 +243,9 @@ pub(crate) fn payload_for_request(request: &RuntimeRequest) -> CatalogResult<Vec
         "ListDeleteFilesForDeleteFileIds" => {
             list_delete_file_rows_for_delete_file_ids(request.backend, catalog, &request.payload)
         }
+        "ListNullOnlyColumns" => list_null_only_columns(catalog, &request.payload),
+        "ListInlinedTables" => list_inlined_tables(catalog, &request.payload),
+        "GetTableSchemaVersions" => get_table_schema_versions(catalog, &request.payload),
         "GetBeginSnapshotForSchemaVersion" => {
             lookup_begin_snapshot_for_schema_version(request.backend, catalog, &request.payload)
         }
@@ -261,7 +272,12 @@ pub(crate) fn payload_for_request(request: &RuntimeRequest) -> CatalogResult<Vec
         "DropColumns" => drop_columns(request.backend, catalog, &request.payload),
         "RenameTables" => rename_tables(request.backend, catalog, &request.payload),
         "CommitDataMutation" => commit_data_mutation(request.backend, catalog, &request.payload),
-        "CommitAttempt" => commit_attempt(request.backend, catalog, &request.payload),
+        "CommitAttempt" => commit_attempt(
+            request.backend,
+            catalog,
+            &request.payload,
+            request.snapshot_fence,
+        ),
         "GetSnapshot" => get_snapshot(request.backend, catalog),
         "GetConflictSnapshot" => get_conflict_snapshot(request.backend, catalog),
         "GetSnapshotAt" => get_snapshot_at(request.backend, catalog, &request.payload),
@@ -297,6 +313,23 @@ pub(crate) fn payload_for_request(request: &RuntimeRequest) -> CatalogResult<Vec
         "ListDataFilesForPartitionPruneAt" => {
             list_partition_prune_files_at(request.backend, catalog, &request.payload)
         }
+        "EndRuntimeReadContext" => {
+            let read_context_id = request.read_context_id.ok_or_else(|| {
+                crate::CatalogError::Decode(
+                    "EndRuntimeReadContext requires a read_context_id".to_owned(),
+                )
+            })?;
+            #[cfg(feature = "foundationdb")]
+            {
+                let kv = crate::runtime_foundationdb::open_foundationdb_catalog()?;
+                crate::runtime_inline_snapshot::capture::end_runtime_read_context(
+                    &kv,
+                    catalog,
+                    read_context_id,
+                );
+            }
+            Ok(format!("runtime_read_context_ended={read_context_id}\n").into_bytes())
+        }
         "ReadInlineRows" => read_inline_rows(request.backend, catalog, &request.payload),
         "ReadInlineRowsForFlush" => {
             read_inline_rows_for_flush(request.backend, catalog, &request.payload)
@@ -324,12 +357,6 @@ pub(crate) fn payload_for_request(request: &RuntimeRequest) -> CatalogResult<Vec
         "ListInlineFileDeletionsForFlush" => {
             list_inline_file_deletions_for_flush(request.backend, catalog, &request.payload)
         }
-        "ListInlineFlushDeletePositions" => {
-            list_inline_flush_delete_positions(request.backend, catalog, &request.payload)
-        }
-        "ListCurrentInlineFlushDeletePositions" => {
-            list_current_inline_flush_delete_positions(request.backend, catalog, &request.payload)
-        }
         "ListInlineRowInsertions" => {
             list_inline_row_insertions(request.backend, catalog, &request.payload)
         }
@@ -349,9 +376,6 @@ pub(crate) fn payload_for_request(request: &RuntimeRequest) -> CatalogResult<Vec
         "MergeAdjacentFiles" => merge_adjacent_files(request.backend, catalog, &request.payload),
         "RewriteDeleteFiles" => rewrite_delete_files(request.backend, catalog, &request.payload),
         "GetNextColumnId" => get_next_column_id(request.backend, catalog, &request.payload),
-        "IsColumnCreatedWithTable" => {
-            is_column_created_with_table(request.backend, catalog, &request.payload)
-        }
         _ => Ok(format!(
             "runtime_ffi=ok\noperation={}\nbackend={}\npayload_bytes={}\n",
             request.operation,

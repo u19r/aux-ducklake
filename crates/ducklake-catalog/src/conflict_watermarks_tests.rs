@@ -1,14 +1,129 @@
 #[cfg(test)]
 mod tests {
     use crate::{
-        CatalogId, FakeOrderedCatalogKv, KvBatch, TableId,
+        CatalogId, DataFileId, DataFileRow, FakeOrderedCatalogKv, KvBatch, TableId,
         conflict_watermarks::{
             load_conflict_watermarks, load_max_catalog_id_watermark, load_max_file_id_watermark,
-            load_table_next_row_ids, stage_max_catalog_id_watermark, stage_max_file_id_watermark,
-            stage_table_next_row_id,
+            load_table_next_row_ids, stage_conflict_watermarks_initialized,
+            stage_max_catalog_id_watermark, stage_max_file_id_watermark, stage_table_next_row_id,
+        },
+        data_file_store::append_data_file,
+        initialize_empty_catalog,
+        keys::{
+            conflict_max_catalog_id_key, conflict_max_file_id_key,
+            conflict_watermarks_initialized_key, decode_key,
         },
         runtime_catalog_snapshot::conflict_snapshot_watermarks,
     };
+
+    #[test]
+    fn given_conflict_watermarks_marker_key_when_decoded_then_metadata_family_label_is_preserved() {
+        let label = decode_key(&conflict_watermarks_initialized_key(CatalogId(1))).unwrap();
+
+        assert!(label.starts_with("catalog=1/family=metadata-version/tail="));
+    }
+
+    #[test]
+    fn given_new_catalog_when_initialized_then_main_schema_catalog_id_is_reserved() {
+        let catalog = CatalogId(1);
+        let mut kv = FakeOrderedCatalogKv::new();
+
+        initialize_empty_catalog(&mut kv, catalog).unwrap();
+
+        assert_eq!(
+            kv.get(&conflict_watermarks_initialized_key(catalog)),
+            Some(vec![1])
+        );
+        assert_eq!(
+            kv.get(&conflict_max_catalog_id_key(catalog)),
+            Some(0_u64.to_be_bytes().to_vec())
+        );
+        assert_eq!(kv.get(&conflict_max_file_id_key(catalog)), None);
+    }
+
+    #[test]
+    fn given_missing_conflict_watermarks_marker_when_loading_snapshot_then_it_fails_closed() {
+        let catalog = CatalogId(1);
+        let kv = FakeOrderedCatalogKv::new();
+
+        let result = conflict_snapshot_watermarks(&kv, catalog, crate::CatalogOrderId::uuid_v7(10));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn given_marker_with_partial_numeric_keys_when_loading_snapshot_then_optional_maxima_are_accepted()
+     {
+        let catalog = CatalogId(1);
+        let mut kv = FakeOrderedCatalogKv::new();
+        let mut batch = KvBatch::new();
+        stage_conflict_watermarks_initialized(&mut batch, catalog);
+        stage_max_file_id_watermark(&kv, &mut batch, catalog, 123).unwrap();
+        kv.commit(batch).unwrap();
+
+        let watermarks =
+            conflict_snapshot_watermarks(&kv, catalog, crate::CatalogOrderId::uuid_v7(10)).unwrap();
+
+        assert_eq!(watermarks.next_catalog_id, 1);
+        assert_eq!(watermarks.next_file_id, 124);
+    }
+
+    #[test]
+    fn given_malformed_conflict_watermarks_marker_when_loading_snapshot_then_it_fails_closed() {
+        let catalog = CatalogId(1);
+        for value in [&[2_u8][..], &[1, 0][..], &[][..]] {
+            let mut kv = FakeOrderedCatalogKv::new();
+            let mut batch = KvBatch::new();
+            batch.put(conflict_watermarks_initialized_key(catalog), value.to_vec());
+            kv.commit(batch).unwrap();
+
+            let result =
+                conflict_snapshot_watermarks(&kv, catalog, crate::CatalogOrderId::uuid_v7(10));
+
+            assert!(result.is_err(), "marker value {value:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn given_marker_without_numeric_keys_when_loading_snapshot_then_next_ids_remain_zero() {
+        let catalog = CatalogId(1);
+        let mut kv = FakeOrderedCatalogKv::new();
+        let mut batch = KvBatch::new();
+        batch.put(conflict_watermarks_initialized_key(catalog), vec![1]);
+        kv.commit(batch).unwrap();
+
+        let watermarks =
+            conflict_snapshot_watermarks(&kv, catalog, crate::CatalogOrderId::uuid_v7(10)).unwrap();
+
+        assert_eq!(watermarks.next_catalog_id, 0);
+        assert_eq!(watermarks.next_file_id, 0);
+    }
+
+    #[test]
+    fn given_direct_append_when_loading_snapshot_then_max_file_id_advances_next_file_id() {
+        let catalog = CatalogId(1);
+        let mut kv = FakeOrderedCatalogKv::new();
+        initialize_empty_catalog(&mut kv, catalog).unwrap();
+
+        append_data_file(
+            &mut kv,
+            catalog,
+            DataFileRow::new(
+                DataFileId(7),
+                TableId(1),
+                "file.parquet",
+                1,
+                64,
+                crate::CatalogOrderId::uuid_v7(1),
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(load_max_file_id_watermark(&kv, catalog).unwrap(), Some(7));
+        let watermarks =
+            conflict_snapshot_watermarks(&kv, catalog, crate::CatalogOrderId::uuid_v7(10)).unwrap();
+        assert_eq!(watermarks.next_file_id, 8);
+    }
 
     #[test]
     fn given_multiple_file_watermark_updates_in_one_batch_when_committed_then_highest_survives() {
@@ -48,6 +163,7 @@ mod tests {
         let catalog = CatalogId(1);
         let mut kv = FakeOrderedCatalogKv::new();
         let mut batch = KvBatch::new();
+        stage_conflict_watermarks_initialized(&mut batch, catalog);
         stage_max_catalog_id_watermark(&kv, &mut batch, catalog, 41).unwrap();
         stage_max_file_id_watermark(&kv, &mut batch, catalog, 123).unwrap();
         kv.commit(batch).unwrap();
@@ -64,6 +180,7 @@ mod tests {
         let catalog = CatalogId(1);
         let mut kv = FakeOrderedCatalogKv::new();
         let mut batch = KvBatch::new();
+        stage_conflict_watermarks_initialized(&mut batch, catalog);
         stage_max_catalog_id_watermark(&kv, &mut batch, catalog, 41).unwrap();
         stage_max_file_id_watermark(&kv, &mut batch, catalog, 123).unwrap();
         kv.commit(batch).unwrap();

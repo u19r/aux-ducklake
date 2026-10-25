@@ -1,0 +1,5 @@
+# Linux builds require the checksum-pinned installer: scripts/install-mold.sh.
+# The compiler wrapper also selects mold when RUSTFLAGS overrides these flags.
+[target.'cfg(target_os = "linux")']
+linker = "/opt/aux-mold-3.0.0/bin/mold-cc"
+rustflags = ["-C", "link-arg=-B/opt/aux-mold-3.0.0/libexec/mold", "-C", "link-arg=-fuse-ld=bfd"]

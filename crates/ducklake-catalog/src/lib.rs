@@ -48,6 +48,8 @@ mod fdb_macros;
 #[cfg(feature = "foundationdb")]
 mod fdb_metadata_commit;
 #[cfg(feature = "foundationdb")]
+mod fdb_prefix_cleanup;
+#[cfg(feature = "foundationdb")]
 mod fdb_runtime;
 #[cfg(feature = "foundationdb")]
 mod fdb_schemas;
@@ -85,6 +87,9 @@ mod runtime_change_feed;
 mod runtime_change_feed_ops;
 mod runtime_cleanup;
 mod runtime_cleanup_ops;
+mod runtime_column_values;
+#[cfg(test)]
+mod runtime_column_values_tests;
 mod runtime_commit_attempt_ops;
 mod runtime_compaction_ops;
 mod runtime_data_mutation_ops;
@@ -96,6 +101,8 @@ mod runtime_foundationdb_inline;
 mod runtime_foundationdb_objects;
 mod runtime_inline_ops;
 mod runtime_inline_rows;
+#[cfg(feature = "foundationdb")]
+mod runtime_inline_snapshot;
 mod runtime_maintenance_ops;
 mod runtime_metadata_ops;
 mod runtime_metrics;
@@ -112,8 +119,13 @@ mod runtime_snapshot_ops;
 mod runtime_snapshot_range;
 mod runtime_snapshots;
 mod runtime_table_ops;
+mod runtime_table_schema_versions;
+#[cfg(test)]
+mod runtime_table_schema_versions_tests;
 mod runtime_tabular_payload;
 mod schema_rows;
+#[cfg(test)]
+mod schema_rows_tests;
 mod schema_store;
 mod schema_version_state;
 mod snapshot_keys;
@@ -130,6 +142,7 @@ mod table_sort;
 mod table_sort_rows;
 pub mod table_store;
 mod table_version_commit;
+mod typed_scalar;
 mod view_rows;
 mod view_store;
 pub mod workload;
@@ -171,6 +184,8 @@ pub use fdb::FdbOrderedCatalogKv;
 pub use fdb_data_mutations::FdbDataMutation;
 #[cfg(feature = "foundationdb")]
 pub use fdb_inline_tables::InlineTableCommitContext;
+#[cfg(feature = "foundationdb")]
+pub use fdb_prefix_cleanup::clear_foundationdb_prefix;
 #[cfg(feature = "foundationdb")]
 pub use fdb_runtime::shutdown_foundationdb_if_booted;
 pub use file_listing::{
@@ -280,3 +295,6 @@ pub use view_store::{
     commit_change_view_comment, commit_create_view_row, commit_drop_views, commit_rename_views,
     list_views_at, load_view_at,
 };
+
+mod snapshot_fence;
+pub use snapshot_fence::SnapshotFence;

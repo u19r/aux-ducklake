@@ -1,6 +1,6 @@
-use crate::runtime_metrics::RuntimeMetricStage;
 use crate::{
     CatalogError, CatalogResult, CommitAttemptId, DuckLakeSnapshotId, SnapshotCommitMetadata,
+    runtime_metrics::RuntimeMetricStage,
     runtime_object_ops::{CHANGE_VIEW_COMMENT, CREATE_VIEWS, DROP_VIEWS, RENAME_VIEWS},
     runtime_schema_change_payload::{
         ADD_COLUMNS, CHANGE_COLUMN_DEFAULTS, CHANGE_COLUMN_TYPES, CHANGE_COMMENTS,
@@ -15,6 +15,7 @@ const COMMIT_ATTEMPT: &str = "CommitAttempt";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimeCommitAttemptIntent {
+    pub(crate) snapshot_fence: Option<crate::snapshot_fence::SnapshotFence>,
     pub(crate) read_snapshot: Option<DuckLakeSnapshotId>,
     pub(crate) proposed_commit_snapshot: ProposedCommitSnapshot,
     pub(crate) recovery_attempt_id: Option<CommitAttemptId>,

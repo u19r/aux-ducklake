@@ -38,9 +38,13 @@ jobs:
           echo "workflow_dispatch inputs:"
           printf '%s\n' "$WORKFLOW_DISPATCH_INPUTS"
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
+
+      - name: Install mold 3.0.0
+        if: runner.os == 'Linux'
+        run: bash scripts/install-mold.sh
 
       - name: Run CI check
         run: just ci-check
@@ -93,7 +97,7 @@ jobs:
           echo "workflow_dispatch inputs:"
           printf '%s\n' "$WORKFLOW_DISPATCH_INPUTS"
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.1
 
       - name: Validate workflow metadata
         run: |

@@ -13,24 +13,26 @@ DUCKLAKE_DIR="$ROOT_DIR/third_party/ducklake"
 platform="${1:-linux-amd64}"
 
 case "$platform" in
-    linux-amd64)
-        docker_platform="linux/amd64"
-        duckdb_platform="linux_amd64"
-        ;;
-    linux-arm64)
-        docker_platform="linux/arm64"
-        duckdb_platform="linux_arm64"
-        ;;
-    *)
-        echo "unsupported Linux release platform: $platform" >&2
-        exit 1
-        ;;
+linux-amd64)
+    docker_platform="linux/amd64"
+    duckdb_platform="linux_amd64"
+    ;;
+linux-arm64)
+    docker_platform="linux/arm64"
+    duckdb_platform="linux_arm64"
+    ;;
+*)
+    echo "unsupported Linux release platform: $platform" >&2
+    exit 1
+    ;;
 esac
 
 command -v docker >/dev/null 2>&1 || {
     echo "docker is required for Linux release builds" >&2
     exit 1
 }
+
+ducklake_ensure_source_tree "$ROOT_DIR" "$DUCKLAKE_DIR"
 
 output_dir="$ROOT_DIR/build/docker-release/$platform"
 release_version="$(ducklake_release_version "$DUCKLAKE_DIR")"

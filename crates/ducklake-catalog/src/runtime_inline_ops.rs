@@ -12,13 +12,9 @@ use crate::{
         runtime_foundationdb_read_inline_rows_global_stats_batch,
         runtime_foundationdb_register_inline_rows,
     },
-    runtime_inline_rows::{
-        InlineFlushDeletePositionsPayload, InlineRowChangesPayload, ReadInlineRowsPayload,
-        inline_flush_delete_positions_payload,
-    },
+    runtime_inline_rows::{InlineRowChangesPayload, ReadInlineRowsPayload},
     runtime_payload::{
-        optional_payload_string_value, optional_payload_u64_value, payload_string_value,
-        payload_string_values, payload_u64_value,
+        optional_payload_u64_value, payload_string_value, payload_string_values, payload_u64_value,
     },
     runtime_protocol::RuntimeCatalogBackend,
     runtime_snapshot_range::{ChangeFeedEndSnapshot, ChangeFeedStartSnapshot, ReadSnapshot},
@@ -261,7 +257,7 @@ pub(crate) fn inline_file_deletions_exist(
         "InlineFileDeletionsExist missing snapshot_id",
     )?;
     let (file_count, row_count) = {
-        let kv = open_foundationdb_catalog()?;
+        let kv = open_runtime_read_catalog()?;
         inline_file_deletion_counts(&kv, catalog, table_id, snapshot_id)?
     };
     Ok(format!(
@@ -288,7 +284,7 @@ pub(crate) fn list_inline_file_deletions_for_flush(
         "ListInlineFileDeletionsForFlush missing snapshot_id",
     )?;
     {
-        let kv = open_foundationdb_catalog()?;
+        let kv = open_runtime_read_catalog()?;
         inline_file_deletions_for_flush_payload(&kv, catalog, table_id, snapshot_id)
     }
 }
@@ -309,42 +305,9 @@ pub(crate) fn list_inline_file_deletions(
         "ListInlineFileDeletions missing snapshot_id",
     )?;
     {
-        let kv = open_foundationdb_catalog()?;
+        let kv = open_runtime_read_catalog()?;
         inline_file_deletions_payload(&kv, catalog, table_id, snapshot_id)
     }
-}
-
-pub(crate) fn list_inline_flush_delete_positions(
-    backend: RuntimeCatalogBackend,
-    catalog: CatalogId,
-    payload: &[u8],
-) -> CatalogResult<Vec<u8>> {
-    let payload =
-        inline_flush_delete_positions_payload_values(payload, "ListInlineFlushDeletePositions")?;
-    list_inline_flush_delete_positions_for_payload(backend, catalog, payload)
-}
-
-fn list_inline_flush_delete_positions_for_payload(
-    _backend: RuntimeCatalogBackend,
-    catalog: CatalogId,
-    payload: InlineFlushDeletePositionsPayload,
-) -> CatalogResult<Vec<u8>> {
-    {
-        let kv = open_foundationdb_catalog()?;
-        inline_flush_delete_positions_payload(&kv, catalog, payload)
-    }
-}
-
-pub(crate) fn list_current_inline_flush_delete_positions(
-    backend: RuntimeCatalogBackend,
-    catalog: CatalogId,
-    payload: &[u8],
-) -> CatalogResult<Vec<u8>> {
-    let payload = inline_flush_delete_positions_payload_values(
-        payload,
-        "ListCurrentInlineFlushDeletePositions",
-    )?;
-    list_inline_flush_delete_positions_for_payload(backend, catalog, payload)
 }
 
 pub(crate) struct RuntimeInlineRows {
@@ -491,11 +454,22 @@ fn open_foundationdb_catalog() -> CatalogResult<crate::FdbOrderedCatalogKv> {
     crate::runtime_foundationdb::open_foundationdb_catalog()
 }
 
+#[cfg(feature = "foundationdb")]
+fn open_runtime_read_catalog() -> CatalogResult<crate::FdbOrderedCatalogKv> {
+    let kv = open_foundationdb_catalog()?;
+    crate::runtime_file_listing::runtime_read_snapshot_kv(&kv)
+}
+
 #[cfg(not(feature = "foundationdb"))]
 fn open_foundationdb_catalog() -> CatalogResult<crate::FakeOrderedCatalogKv> {
     Err(CatalogError::Backend(
         "foundationdb runtime requires ducklake-catalog --features foundationdb".to_owned(),
     ))
+}
+
+#[cfg(not(feature = "foundationdb"))]
+fn open_runtime_read_catalog() -> CatalogResult<crate::FakeOrderedCatalogKv> {
+    open_foundationdb_catalog()
 }
 
 fn inline_file_deletion_counts(
@@ -939,27 +913,5 @@ fn inline_row_changes_payload_values(
             "end_snapshot_id",
             &format!("{operation} missing end_snapshot_id"),
         )?)),
-    })
-}
-
-fn inline_flush_delete_positions_payload_values(
-    payload: &[u8],
-    operation: &str,
-) -> CatalogResult<InlineFlushDeletePositionsPayload> {
-    Ok(InlineFlushDeletePositionsPayload {
-        table_name: payload_string_value(
-            payload,
-            "inlined_table_name",
-            &format!("{operation} missing inlined_table_name"),
-        )?,
-        snapshot: ReadSnapshot::new(DuckLakeSnapshotId(payload_u64_value(
-            payload,
-            "snapshot_id",
-            &format!("{operation} missing snapshot_id"),
-        )?)),
-        file_order: optional_payload_string_value(payload, "file_order")?,
-        partition_filter: optional_payload_string_value(payload, "partition_filter")?,
-        position_start: optional_payload_u64_value(payload, "position_start")?,
-        position_end: optional_payload_u64_value(payload, "position_end")?,
     })
 }

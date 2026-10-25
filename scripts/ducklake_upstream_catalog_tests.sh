@@ -28,18 +28,18 @@ USAGE
 keep_going=0
 while [[ "${1:-}" == --* ]]; do
     case "$1" in
-        --keep-going)
-            keep_going=1
-            shift
-            ;;
-        --help|-h)
-            usage
-            exit 2
-            ;;
-        *)
-            usage >&2
-            fail "unknown option: $1"
-            ;;
+    --keep-going)
+        keep_going=1
+        shift
+        ;;
+    --help | -h)
+        usage
+        exit 2
+        ;;
+    *)
+        usage >&2
+        fail "unknown option: $1"
+        ;;
     esac
 done
 
@@ -53,12 +53,18 @@ shift
 shift || true
 
 case "$backend" in
-    postgres|fdb) ;;
-    *) usage >&2; fail "backend must be postgres or fdb" ;;
+postgres | fdb) ;;
+*)
+    usage >&2
+    fail "backend must be postgres or fdb"
+    ;;
 esac
 case "$mode" in
-    smoke|full|slow|exhaustive) ;;
-    *) usage >&2; fail "mode must be smoke, full, slow, or exhaustive" ;;
+smoke | full | slow | exhaustive) ;;
+*)
+    usage >&2
+    fail "mode must be smoke, full, slow, or exhaustive"
+    ;;
 esac
 
 build_ducklake_if_needed() {
@@ -106,10 +112,10 @@ discover_exhaustive_tests() {
 tests=("$@")
 if [[ "${#tests[@]}" -eq 0 ]]; then
     case "$mode" in
-        smoke) tests=("${default_smoke_tests[@]}") ;;
-        full) mapfile -t tests < <(cd "$DUCKLAKE_DIR" && discover_full_tests) ;;
-        slow) mapfile -t tests < <(cd "$DUCKLAKE_DIR" && discover_slow_tests) ;;
-        exhaustive) mapfile -t tests < <(cd "$DUCKLAKE_DIR" && discover_exhaustive_tests) ;;
+    smoke) tests=("${default_smoke_tests[@]}") ;;
+    full) mapfile -t tests < <(cd "$DUCKLAKE_DIR" && discover_full_tests) ;;
+    slow) mapfile -t tests < <(cd "$DUCKLAKE_DIR" && discover_slow_tests) ;;
+    exhaustive) mapfile -t tests < <(cd "$DUCKLAKE_DIR" && discover_exhaustive_tests) ;;
     esac
 fi
 
@@ -141,7 +147,8 @@ run_one_test() {
     output_file="$artifact_root/$safe_name.log"
     status=0
     if [[ "$backend" == "fdb" && -z "$provided_fdb_prefix" ]]; then
-        export AUX_DUCKLAKE_FDB_PREFIX="aux-ducklake/upstream/${mode}/${safe_name}/$(date +%s)-$$/"
+        AUX_DUCKLAKE_FDB_PREFIX="aux-ducklake/upstream/${mode}/${safe_name}/$(date +%s)-$$/"
+        export AUX_DUCKLAKE_FDB_PREFIX
         printf 'test_prefix %s %s\n' "$test_path" "$AUX_DUCKLAKE_FDB_PREFIX" >>"$artifact_root/summary.txt"
     fi
     (

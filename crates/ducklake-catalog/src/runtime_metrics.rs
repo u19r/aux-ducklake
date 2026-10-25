@@ -118,6 +118,8 @@ pub(crate) fn record_runtime_request_elapsed(
     let value = counters.entry(key).or_default();
     value.count = value.count.saturating_add(1);
     value.elapsed_micros = value.elapsed_micros.saturating_add(elapsed_micros);
+    drop(counters);
+    write_runtime_trace(operation, status, 0, 0, elapsed_micros);
 }
 
 #[cfg(not(feature = "runtime-metrics"))]

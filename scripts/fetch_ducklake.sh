@@ -3,61 +3,26 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DUCKLAKE_DIR="$ROOT_DIR/third_party/ducklake"
-DUCKLAKE_COMMIT="2856687c875bbee90d523fe15627f8d8fd494622"
-DUCKDB_COMMIT="117e1a46be1c903c5a36ee3c881c125597f93c60"
+. "$ROOT_DIR/scripts/ducklake-upstream-pins.sh"
 PIN_FILE="$DUCKLAKE_DIR/.aux-ducklake-pinned-commit"
 DUCKDB_PIN_FILE="$DUCKLAKE_DIR/.aux-duckdb-pinned-commit"
 PATCH_FILE="$ROOT_DIR/patches/ducklake/0001-add-aux-catalog-metadata-manager.patch"
-POSTGRES_PATCH_DIR="$DUCKLAKE_DIR/duckdb/.github/patches/extensions/postgres_scanner"
-POSTGRES_PATCH_FILE="$ROOT_DIR/patches/ducklake/postgres_scanner/0001-use-table-ref-unique-pointer.patch"
 PATCH_MARKER="$DUCKLAKE_DIR/.aux-ducklake-bridge-patch"
+. "$ROOT_DIR/scripts/ducklake_patch_state.sh"
 
-ducklake_sha256() {
-    local path="$1"
+PATCH_HASH="$(ducklake_patch_hash "$PATCH_FILE")"
 
-    if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$path" | awk '{print $1}'
-    elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$path" | awk '{print $1}'
-    else
-        echo "sha256sum or shasum is required to hash $path" >&2
-        exit 1
-    fi
-}
-
-PATCH_HASH="$(ducklake_sha256 "$PATCH_FILE")"
-
-ducklake_configure_release_extensions() {
-    local extension_config="$DUCKLAKE_DIR/extension_config.cmake"
-
-    mkdir -p "$POSTGRES_PATCH_DIR"
-    cp "$POSTGRES_PATCH_FILE" "$POSTGRES_PATCH_DIR/"
-
-    [[ -f "$extension_config" ]] || return
-    if grep -Fq 'duckdb/.github/config/extensions/httpfs.cmake' "$extension_config"; then
-        return
-    fi
-
-    perl -0pi -e 's#(duckdb_extension_load\(tpch\)\n)#$1    include("\${CMAKE_CURRENT_LIST_DIR}/duckdb/.github/config/extensions/httpfs.cmake")\n#' "$extension_config"
-}
-
-if [[ -d "$DUCKLAKE_DIR/.git" ]] \
-    && [[ -f "$PIN_FILE" ]] \
-    && [[ "$(cat "$PIN_FILE")" == "$DUCKLAKE_COMMIT" ]] \
-    && [[ -f "$DUCKDB_PIN_FILE" ]] \
-    && [[ "$(cat "$DUCKDB_PIN_FILE")" == "$DUCKDB_COMMIT" ]] \
-    && [[ -e "$DUCKLAKE_DIR/duckdb/.git" ]] \
-    && [[ "$(git -C "$DUCKLAKE_DIR/duckdb" rev-parse HEAD)" == "$DUCKDB_COMMIT" ]]; then
-    if [[ -f "$PATCH_MARKER" ]] && [[ "$(cat "$PATCH_MARKER")" == "$PATCH_HASH" ]]; then
-        ducklake_configure_release_extensions
+if [[ -d "$DUCKLAKE_DIR/.git" ]] &&
+    [[ -f "$PIN_FILE" ]] &&
+    [[ "$(cat "$PIN_FILE")" == "$DUCKLAKE_COMMIT" ]] &&
+    [[ -f "$DUCKDB_PIN_FILE" ]] &&
+    [[ "$(cat "$DUCKDB_PIN_FILE")" == "$DUCKDB_COMMIT" ]] &&
+    [[ -e "$DUCKLAKE_DIR/duckdb/.git" ]] &&
+    [[ "$(git -C "$DUCKLAKE_DIR/duckdb" rev-parse HEAD)" == "$DUCKDB_COMMIT" ]]; then
+    if ducklake_ensure_canonical_patch "$DUCKLAKE_DIR" "$PATCH_FILE" "$PATCH_MARKER" "$PATCH_HASH"; then
         exit 0
     fi
-
-    if git -C "$DUCKLAKE_DIR" apply --reverse --check "$PATCH_FILE"; then
-        ducklake_configure_release_extensions
-        printf '%s' "$PATCH_HASH" > "$PATCH_MARKER"
-        exit 0
-    fi
+    exit 1
 fi
 
 rm -rf "$DUCKLAKE_DIR"
@@ -80,16 +45,8 @@ if [[ "$actual_duckdb_commit" != "$DUCKDB_COMMIT" ]]; then
     exit 1
 fi
 
-if git -C "$DUCKLAKE_DIR" apply --check "$PATCH_FILE"; then
-    git -C "$DUCKLAKE_DIR" apply "$PATCH_FILE"
-elif git -C "$DUCKLAKE_DIR" apply --reverse --check "$PATCH_FILE"; then
-    true
-else
-    echo "DuckLake bridge patch cannot be applied cleanly" >&2
-    exit 1
-fi
+ducklake_ensure_canonical_patch "$DUCKLAKE_DIR" "$PATCH_FILE" "$PATCH_MARKER" "$PATCH_HASH"
 
-ducklake_configure_release_extensions
-printf '%s' "$DUCKLAKE_COMMIT" > "$PIN_FILE"
-printf '%s' "$DUCKDB_COMMIT" > "$DUCKDB_PIN_FILE"
-printf '%s' "$PATCH_HASH" > "$PATCH_MARKER"
+printf '%s' "$DUCKLAKE_COMMIT" >"$PIN_FILE"
+printf '%s' "$DUCKDB_COMMIT" >"$DUCKDB_PIN_FILE"
+printf '%s' "$PATCH_HASH" >"$PATCH_MARKER"

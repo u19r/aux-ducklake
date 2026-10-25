@@ -6,21 +6,23 @@ use crate::runtime_metrics::{
 };
 use crate::{
     CatalogError, CatalogId, CatalogResult, TableId,
+    runtime_commit_attempt_ops::*,
     runtime_compaction_ops::commit_compaction_intent,
     runtime_data_mutation_ops::commit_data_and_inline_mutation,
     runtime_inline_ops::{inline_delete_payload, inline_rows_payloads, register_inline_tables},
     runtime_protocol::RuntimeCatalogBackend,
     runtime_schema_change_ops::{RuntimeMutableCatalog, open_runtime_catalog},
 };
-
-use crate::runtime_commit_attempt_ops::*;
 pub(crate) fn commit_attempt(
     backend: RuntimeCatalogBackend,
     catalog: CatalogId,
     payload: &[u8],
+    snapshot_fence: Option<crate::SnapshotFence>,
 ) -> CatalogResult<Vec<u8>> {
     let started = RuntimeMetricStage::start();
-    let intent = commit_attempt_intent(payload)?;
+    let mut intent = commit_attempt_intent(payload)?;
+    intent.snapshot_fence = snapshot_fence;
+    intent.validate_snapshot_fence()?;
     record_commit_attempt_stage("ParseIntent", started);
     let started = RuntimeMetricStage::start();
     let mut kv = open_runtime_catalog(backend)?;
@@ -70,11 +72,25 @@ pub(crate) fn commit_attempt(
     record_commit_attempt_stage("DataMutationIntent", started);
     crate::store::invalidate_runtime_read_context(catalog);
     let mut output = format!(
-        "commit_attempt_intent=true\nducklake_schema_version={schema_version}\nmetadata_intent_count={}\ninline_intent_count={}\ncompaction_intent_count={}\ndata_mutation_payload_bytes={}\ninline_output_bytes={inline_output_bytes}\ncompaction_output_bytes={compaction_output_bytes}\nchanged_table_count={}\ncreated_table_count={}\n",
+        concat!(
+            "commit_attempt_intent=true\n",
+            "ducklake_schema_version={}\n",
+            "metadata_intent_count={}\n",
+            "inline_intent_count={}\n",
+            "compaction_intent_count={}\n",
+            "data_mutation_payload_bytes={}\n",
+            "inline_output_bytes={}\n",
+            "compaction_output_bytes={}\n",
+            "changed_table_count={}\n",
+            "created_table_count={}\n",
+        ),
+        schema_version,
         intent.metadata_intents.len(),
         intent.inline_payloads.len(),
         intent.compaction_intents.len(),
         data_mutation_payload_bytes,
+        inline_output_bytes,
+        compaction_output_bytes,
         metadata.changed_table_count,
         metadata.created_tables.len(),
     );

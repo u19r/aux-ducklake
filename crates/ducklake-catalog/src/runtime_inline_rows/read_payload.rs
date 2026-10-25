@@ -7,11 +7,9 @@ use crate::runtime_protocol::RuntimeCatalogBackend;
 use crate::{
     CatalogId, CatalogResult, DuckLakeSnapshotId, OrderedCatalogKv,
     inline_column_types::inline_columns_payload, inline_data::InlineTablePayloadRow,
-    latest_snapshot, runtime_snapshot_range::ReadSnapshot, snapshot_by_ducklake_sequence,
-    snapshot_by_public_sequence,
+    latest_snapshot, runtime_inline_rows::*, runtime_snapshot_range::ReadSnapshot,
+    snapshot_by_ducklake_sequence, snapshot_by_public_sequence,
 };
-
-use crate::runtime_inline_rows::*;
 
 pub(super) fn read_inline_rows_payload_with_stats_request(
     kv: &impl OrderedCatalogKv,
@@ -63,8 +61,7 @@ pub(super) fn read_inline_rows_payload_with_stats_request_and_mode(
         let started = RuntimeMetricStage::start();
         let mut out = inline_columns_payload(&context.schema_table)?;
         out.push_str("inline_payload_count=0\n");
-        InlineCatalogStats::for_inline_schema(&context.schema_table, &context.table)
-            .append_to(&mut out)?;
+        InlineCatalogStats::for_inline_schema(&context.schema_table).append_to(&mut out)?;
         record_inline_stage(metric_prefix, "Render", started);
         return Ok(out.into_bytes());
     }
@@ -89,8 +86,7 @@ pub(super) fn read_inline_rows_payload_with_stats_request_and_mode(
     let started = RuntimeMetricStage::start();
     let mut out = inline_columns_payload(&context.schema_table)?;
     out.push_str(&format!("inline_payload_count={}\n", payloads.len()));
-    let mut catalog_stats =
-        InlineCatalogStats::for_inline_schema(&context.schema_table, &context.table);
+    let mut catalog_stats = InlineCatalogStats::for_inline_schema(&context.schema_table);
     for inline_payload in payloads {
         append_snapshot_aware_rows(
             SnapshotAwareRowsInput {
@@ -143,8 +139,7 @@ pub(super) fn render_global_inline_stats_payload(
     let started = RuntimeMetricStage::start();
     let mut out = inline_columns_payload(&context.schema_table)?;
     out.push_str(&format!("inline_payload_count={}\n", payloads.len()));
-    let mut catalog_stats =
-        InlineCatalogStats::for_inline_schema(&context.schema_table, &context.table);
+    let mut catalog_stats = InlineCatalogStats::for_inline_schema(&context.schema_table);
     for inline_payload in payloads {
         accumulate_global_inline_stats(
             GlobalInlineStatsInput {
@@ -197,8 +192,7 @@ pub(super) fn render_aggregate_inline_stats_payload(
         };
     record_inline_stage(metric_prefix, "Context", started);
     let started = RuntimeMetricStage::start();
-    let mut catalog_stats =
-        InlineCatalogStats::for_inline_schema(&context.schema_table, &context.table);
+    let mut catalog_stats = InlineCatalogStats::for_inline_schema(&context.schema_table);
     for inline_payload in payloads {
         accumulate_global_inline_stats(
             GlobalInlineStatsInput {
