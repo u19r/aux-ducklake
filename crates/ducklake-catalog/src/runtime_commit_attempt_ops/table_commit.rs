@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use crate::{
     CatalogError, CatalogId, CatalogResult, MutableCatalogKv, OrderedCatalogKv,
     RawSnapshotSequence, SchemaId, SchemaRow, SnapshotCommitMetadata, SnapshotRow, TableId,
-    TableRow, TableVersionReplacement, ViewCommentChange, ViewRename, ViewRow, latest_snapshot,
-    runtime_schema_change_ops::RuntimeMutableCatalog, schema_version_state::load_schema_version_at,
+    TableRow, TableVersionReplacement, ViewCommentChange, ViewRename, ViewRow,
+    runtime_mutable_catalog::RuntimeMutableCatalog, schema_version_state::load_schema_version_at,
 };
 
 use crate::runtime_commit_attempt_ops::*;
@@ -12,6 +12,7 @@ use crate::runtime_commit_attempt_ops::*;
 use crate::{
     KvBatch, ValidityWindow,
     keys::{schema_object_key, table_object_key},
+    latest_snapshot,
     schema_version_state::stage_next_schema_version,
     store::stage_snapshot,
     table_store::{
@@ -30,8 +31,8 @@ impl CommitMetadataResult {
     pub(super) fn table_id_remaps(&self) -> BTreeMap<TableId, TableId> {
         self.created_tables
             .iter()
-            .filter(|table| table.requested_table_id != table.persisted.table_id)
-            .map(|table| (table.requested_table_id, table.persisted.table_id))
+            .filter(|table| table.requested_table_id != table.table_id)
+            .map(|table| (table.requested_table_id, table.table_id))
             .collect()
     }
 }
@@ -51,11 +52,17 @@ impl CurrentCatalogState {
 pub(super) fn current_catalog_state(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
+    recovery: Option<crate::CommitAttemptId>,
 ) -> CatalogResult<CurrentCatalogState> {
-    let started = RuntimeMetricStage::start();
-    let latest = latest_snapshot(kv, catalog)?.ok_or(CatalogError::NotFound("catalog snapshot"))?;
+    let stage = RuntimeSpan::enter("method.runtime_commit_attempt.CurrentCatalogState");
+    let latest = crate::store::prepared_latest_snapshot(
+        kv,
+        catalog,
+        crate::catalog_request_read_set::CatalogHeaderProjection::Mutation(recovery),
+    )?
+    .ok_or(CatalogError::NotFound("catalog snapshot"))?;
     let public_schema_version = load_schema_version_at(kv, catalog, latest.order)?;
-    record_commit_attempt_stage("CurrentCatalogState", started);
+    stage.finish(true);
     Ok(CurrentCatalogState {
         latest,
         public_schema_version,
@@ -86,19 +93,28 @@ pub(super) fn public_schema_changed_by_metadata(
 #[derive(Clone, Debug)]
 pub(super) struct CreatedTable {
     pub(super) requested_table_id: TableId,
-    pub(super) persisted: TableRow,
+    pub(super) table_id: TableId,
+    pub(super) schema_id: crate::SchemaId,
+    pub(super) name: String,
 }
 
 impl CreatedTable {
-    pub(super) fn new(requested_table_id: TableId, persisted: TableRow) -> Self {
+    pub(super) fn new(requested_table_id: TableId, persisted: &TableRow) -> Self {
         Self {
             requested_table_id,
-            persisted,
+            table_id: persisted.table_id,
+            schema_id: persisted.schema_id,
+            name: persisted.name.clone(),
         }
     }
 
     pub(super) fn unremapped(persisted: TableRow) -> Self {
-        Self::new(persisted.table_id, persisted)
+        Self {
+            requested_table_id: persisted.table_id,
+            table_id: persisted.table_id,
+            schema_id: persisted.schema_id,
+            name: persisted.name,
+        }
     }
 }
 

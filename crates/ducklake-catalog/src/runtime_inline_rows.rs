@@ -129,13 +129,18 @@ fn read_inline_rows_global_stats_batch_chunk(
     }
 
     let read_context_id = crate::store::active_runtime_read_context_id();
+    let trace_parent = crate::runtime_trace::RuntimeTraceParent::capture();
     std::thread::scope(|scope| {
         let mut handles = Vec::with_capacity(payloads.len());
         for payload in payloads.iter().cloned() {
             let kv = kv.clone();
             handles.push(scope.spawn(move || {
+                let span = trace_parent.enter("method.inline_stats.Worker");
                 let _read_request = crate::store::begin_runtime_read_request(read_context_id);
-                read_foundationdb_inline_rows_global_stats_exact_payload(&kv, catalog, payload)
+                let result =
+                    read_foundationdb_inline_rows_global_stats_exact_payload(&kv, catalog, payload);
+                span.finish(result.is_ok());
+                result
             }));
         }
 
@@ -243,20 +248,6 @@ impl InlineTableSnapshotContext {
             self.snapshot.order,
         )
     }
-
-    fn render_context(
-        &self,
-        kv: &impl OrderedCatalogKv,
-        catalog: CatalogId,
-    ) -> CatalogResult<InlineReadRenderContext> {
-        load_inline_read_render_context(
-            kv,
-            catalog,
-            self.table.table_id,
-            self.schema_id,
-            self.snapshot.order,
-        )
-    }
 }
 
 #[cfg(not(test))]
@@ -282,10 +273,7 @@ fn inline_table_snapshot_context_cache()
 #[cfg(not(test))]
 pub(crate) fn invalidate_inline_read_context(catalog: CatalogId) {
     if let Some(cache) = INLINE_TABLE_SNAPSHOT_CONTEXT_CACHE.get() {
-        cache.retain(|key, _| key.catalog != catalog);
-    }
-    if let Some(cache) = INLINE_READ_RENDER_CONTEXT_CACHE.get() {
-        cache.retain(|key, _| key.catalog != catalog);
+        cache.retain(|key, _| key.catalog != catalog || key.namespace.has_read_context());
     }
 }
 

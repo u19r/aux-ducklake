@@ -1,6 +1,7 @@
 mod inline_current_rows;
 mod inline_deletions;
 mod inline_file_deletes;
+mod inline_group_orders;
 mod inline_row_deletes;
 mod inline_tables;
 
@@ -14,8 +15,8 @@ use crate::{
 
 #[cfg(feature = "foundationdb")]
 pub(crate) use inline_current_rows::{
-    InlineCurrentRow, list_inline_current_row_metadata_bounded, list_inline_current_rows,
-    load_inline_next_row_id,
+    InlineCurrentRow, decode_inline_next_row_id, list_inline_current_row_metadata_bounded,
+    list_inline_current_rows, list_inline_current_rows_bounded, load_inline_next_row_id,
 };
 pub use inline_deletions::{
     InlineDeletionChunkRow, load_inline_deletion_payload_at, register_inline_deletion_payload,
@@ -43,10 +44,10 @@ pub use inline_tables::{
     register_inline_table_payload_with_table, register_inline_table_payload_with_table_at_snapshot,
 };
 pub(crate) use inline_tables::{
-    assemble_inline_payload, decode_inline_end_marker, decode_inline_table_item,
-    inline_chunk_visible_at, inline_table_all_end_orders, inline_table_end_orders_at,
-    inline_table_payload_prefix, inline_table_prefix, list_unflushed_inline_table_payloads_at,
-    list_unflushed_inline_table_payloads_at_with_end_orders, stage_flush_inline_table_payloads,
+    decode_inline_end_marker, decode_inline_table_item, inline_chunk_visible_at,
+    inline_table_all_end_orders, inline_table_end_orders_at, inline_table_payload_prefix,
+    inline_table_prefix, list_unflushed_inline_table_payloads_at,
+    stage_flush_inline_table_payloads,
 };
 #[cfg(feature = "foundationdb")]
 pub(crate) use inline_tables::{
@@ -133,3 +134,5 @@ pub(crate) fn validate_contiguous_chunks(
         "inline payload expected {chunk_count} chunk(s), got {observed_len}"
     )))
 }
+
+pub(crate) use inline_group_orders::{InlineGroupOrderRequest, assemble_inline_payload};

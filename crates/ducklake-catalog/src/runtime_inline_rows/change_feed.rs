@@ -1,14 +1,8 @@
-use std::collections::BTreeMap;
-#[cfg(not(test))]
-use std::sync::OnceLock;
+use std::collections::BTreeSet;
 
-#[cfg(not(test))]
-use crate::CatalogCacheNamespace;
-#[cfg(not(test))]
-use crate::bounded_cache::{BoundedCache, static_bounded_cache};
 use crate::{
     AttachedDataFile, CatalogId, CatalogOrderId, CatalogResult, DuckLakeSnapshotId,
-    InlineRowChangeKind, OrderedCatalogKv, SchemaId,
+    InlineRowChangeKind, OrderedCatalogKv,
     inline_change_feed::data_file_covers_inline_begin,
     inline_column_types::inline_columns_payload,
     inline_data::InlineTablePayloadRow,
@@ -19,7 +13,7 @@ use crate::{
     runtime_snapshot_range::{ChangeFeedEndSnapshot, ChangeFeedStartSnapshot},
     runtime_snapshots::{
         ducklake_snapshot_order_span as cached_ducklake_snapshot_order_span,
-        public_snapshot_order_span, public_snapshot_sequences_by_order,
+        public_snapshot_order_span,
     },
     snapshot_by_public_sequence,
 };
@@ -139,81 +133,42 @@ pub(super) fn materialized_visible_files(
 
 #[derive(Clone)]
 pub(super) struct InlineReadRenderContext {
-    snapshot_sequences: BTreeMap<CatalogOrderId, u64>,
+    snapshot_sequences: std::collections::BTreeMap<CatalogOrderId, u64>,
     pub(super) materialized_files: InlineMaterializedFiles,
     pub(super) deleted_rows: InlineDeletionIndex,
 }
 
-#[cfg(not(test))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) struct InlineReadRenderContextCacheKey {
-    namespace: CatalogCacheNamespace,
-    pub(super) catalog: CatalogId,
-    table_id: crate::TableId,
-    schema_id: SchemaId,
-    snapshot_order: CatalogOrderId,
-}
-
-#[cfg(not(test))]
-pub(super) static INLINE_READ_RENDER_CONTEXT_CACHE: OnceLock<
-    BoundedCache<InlineReadRenderContextCacheKey, InlineReadRenderContext>,
-> = OnceLock::new();
-
-#[cfg(not(test))]
-pub(super) fn inline_read_render_context_cache()
--> &'static BoundedCache<InlineReadRenderContextCacheKey, InlineReadRenderContext> {
-    static_bounded_cache(&INLINE_READ_RENDER_CONTEXT_CACHE, 512)
-}
-
-pub(super) fn load_inline_read_render_context(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    table_id: crate::TableId,
-    schema_id: SchemaId,
-    snapshot_order: CatalogOrderId,
-) -> CatalogResult<InlineReadRenderContext> {
-    #[cfg(test)]
-    {
-        InlineReadRenderContext::load(kv, catalog, table_id, schema_id, snapshot_order)
-    }
-    #[cfg(not(test))]
-    {
-        let key = InlineReadRenderContextCacheKey {
-            namespace: kv.catalog_cache_namespace(),
-            catalog,
-            table_id,
-            schema_id,
-            snapshot_order,
-        };
-        let cache = inline_read_render_context_cache();
-        if let Some(context) = cache.get(key) {
-            return Ok(context.clone());
-        }
-        let context =
-            InlineReadRenderContext::load(kv, catalog, table_id, schema_id, snapshot_order)?;
-        cache.insert(key, context.clone());
-        Ok(context)
-    }
-}
-
 impl InlineReadRenderContext {
-    fn load(
+    pub(super) fn fetch(
         kv: &impl OrderedCatalogKv,
         catalog: CatalogId,
-        table_id: crate::TableId,
-        schema_id: SchemaId,
-        snapshot_order: CatalogOrderId,
+        request: &InlineTableSnapshotContext,
+        payloads: &[InlineTablePayloadRow],
     ) -> CatalogResult<Self> {
-        let snapshot_sequences = public_snapshot_sequences_by_order(kv, catalog)?;
-        let materialized_files =
-            InlineMaterializedFiles::load(kv, catalog, table_id, snapshot_order)?;
-        let deleted_rows = InlineDeletionIndex::load(
+        let deleted_rows = RawInlineDeletionIndex::load(
             kv,
             catalog,
-            table_id,
-            schema_id,
-            snapshot_order,
-            &snapshot_sequences,
+            request.table.table_id,
+            request.schema_id,
+            request.snapshot.order,
+        )?;
+        let mut orders = payloads
+            .iter()
+            .map(|row| row.begin_order)
+            .collect::<BTreeSet<_>>();
+        orders.extend(deleted_rows.orders());
+        let snapshot_sequences =
+            crate::inline_data_snapshot_sequences::active_data_snapshot_sequences(
+                kv, catalog, &orders,
+            )?;
+        let read_snapshot =
+            resolve_inline_read_sequence(kv, catalog, request.snapshot.order, &snapshot_sequences)?;
+        let deleted_rows = deleted_rows.resolve_sequences(&snapshot_sequences, read_snapshot)?;
+        let materialized_files = InlineMaterializedFiles::load(
+            kv,
+            catalog,
+            request.table.table_id,
+            request.snapshot.order,
         )?;
         Ok(Self {
             snapshot_sequences,
@@ -224,6 +179,20 @@ impl InlineReadRenderContext {
 
     pub(super) fn snapshot_sequence(&self, order: CatalogOrderId) -> Option<u64> {
         self.snapshot_sequences.get(&order).copied()
+    }
+}
+
+fn resolve_inline_read_sequence(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    order: CatalogOrderId,
+    data_sequences: &std::collections::BTreeMap<CatalogOrderId, u64>,
+) -> CatalogResult<u64> {
+    match data_sequences.get(&order) {
+        Some(sequence) => Ok(*sequence),
+        None => public_snapshot_sequence_for_order(kv, catalog, order)?
+            .map(|sequence| sequence.0)
+            .ok_or_else(|| missing_snapshot_order(order)),
     }
 }
 

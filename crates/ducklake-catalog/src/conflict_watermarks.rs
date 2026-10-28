@@ -1,10 +1,11 @@
+#[cfg(test)]
 use std::collections::BTreeMap;
 
 use crate::{
     CatalogError, CatalogId, CatalogResult, KvBatch, OrderedCatalogKv, TableId,
     keys::{
         conflict_max_catalog_id_key, conflict_max_file_id_key, conflict_watermarks_initialized_key,
-        table_next_row_id_key,
+        current_schema_version_key, table_next_row_id_key,
     },
 };
 
@@ -47,19 +48,58 @@ pub(crate) fn load_conflict_watermarks(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
 ) -> CatalogResult<ConflictWatermarkValues> {
+    let values = fetch_conflict_values(kv, catalog, &conflict_watermark_keys(catalog))?;
+    decode_conflict_watermarks(catalog, &values)
+}
+
+pub(crate) fn load_conflict_snapshot_values(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+) -> CatalogResult<(ConflictWatermarkValues, Option<u64>)> {
+    let [marker, catalog_key, file_key] = conflict_watermark_keys(catalog);
     let keys = [
+        marker,
+        catalog_key,
+        file_key,
+        current_schema_version_key(catalog),
+    ];
+    let [marker, catalog_id, file_id, schema] = fetch_conflict_values(kv, catalog, &keys)?;
+    let watermarks = decode_conflict_watermarks(catalog, &[marker, catalog_id, file_id])?;
+    let schema_version = schema
+        .as_deref()
+        .map(|value| crate::schema_version_state::decode_schema_version(&keys[3], value))
+        .transpose()?;
+    Ok((watermarks, schema_version))
+}
+
+fn fetch_conflict_values<const N: usize>(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    keys: &[Vec<u8>; N],
+) -> CatalogResult<[Option<Vec<u8>>; N]> {
+    let values = crate::catalog_request_read_set::find_values(kv, catalog, keys)
+        .map_or_else(|| kv.batch_get(keys), Ok)?;
+    let count = values.len();
+    values.try_into().map_err(|_| {
+        CatalogError::Backend(format!(
+            "conflict watermark batch returned {count} values for {N} keys"
+        ))
+    })
+}
+
+fn conflict_watermark_keys(catalog: CatalogId) -> [Vec<u8>; 3] {
+    [
         conflict_watermarks_initialized_key(catalog),
         conflict_max_catalog_id_key(catalog),
         conflict_max_file_id_key(catalog),
-    ];
-    let values = kv.batch_get(&keys)?;
-    if values.len() != keys.len() {
-        return Err(CatalogError::Backend(format!(
-            "conflict watermark batch returned {} values for {} keys",
-            values.len(),
-            keys.len()
-        )));
-    }
+    ]
+}
+
+fn decode_conflict_watermarks(
+    catalog: CatalogId,
+    values: &[Option<Vec<u8>>; 3],
+) -> CatalogResult<ConflictWatermarkValues> {
+    let keys = conflict_watermark_keys(catalog);
     validate_initialized_marker(&keys[0], values[0].as_deref())?;
     Ok(ConflictWatermarkValues {
         max_catalog_id: decode_optional_u64(&keys[1], values[1].as_deref())?,
@@ -103,32 +143,36 @@ pub(crate) fn load_table_next_row_id(
     Ok(load_u64(kv, &table_next_row_id_key(catalog, table_id))?.unwrap_or_default())
 }
 
-pub(crate) fn load_table_next_row_ids(
-    kv: &(impl OrderedCatalogKv + ?Sized),
+#[cfg(test)]
+pub(crate) fn decode_table_next_row_ids(
     catalog: CatalogId,
     table_ids: &[TableId],
+    values: Vec<Option<Vec<u8>>>,
 ) -> CatalogResult<BTreeMap<TableId, u64>> {
-    let keys = table_ids
-        .iter()
-        .map(|table_id| table_next_row_id_key(catalog, *table_id))
-        .collect::<Vec<_>>();
-    let values = kv.batch_get(&keys)?;
-    if values.len() != keys.len() {
+    if values.len() != table_ids.len() {
         return Err(CatalogError::Backend(format!(
             "table next-row-id batch returned {} values for {} keys",
             values.len(),
-            keys.len()
+            table_ids.len()
         )));
     }
     table_ids
         .iter()
         .copied()
-        .zip(keys.iter().zip(values))
-        .map(|(table_id, (key, value))| {
-            decode_optional_u64(key, value.as_deref())
-                .map(|next_row_id| (table_id, next_row_id.unwrap_or_default()))
+        .zip(values)
+        .map(|(table_id, value)| {
+            decode_table_next_row_id(catalog, table_id, value.as_deref())
+                .map(|next| (table_id, next))
         })
         .collect()
+}
+
+pub(crate) fn decode_table_next_row_id(
+    catalog: CatalogId,
+    table_id: TableId,
+    value: Option<&[u8]>,
+) -> CatalogResult<u64> {
+    Ok(decode_optional_u64(&table_next_row_id_key(catalog, table_id), value)?.unwrap_or_default())
 }
 
 pub(crate) fn stage_table_next_row_id(

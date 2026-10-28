@@ -30,15 +30,14 @@ use crate::{
         list_global_stats_for_snapshot, list_global_stats_inputs_for_snapshot, list_inlined_tables,
         list_null_only_columns, list_snapshot_stats_and_changes_inputs,
         lookup_begin_snapshot_for_schema_version, metadata_exists,
-        render_bounded_append_mirror_sql, render_bounded_delete_file_mirror_sql,
-        render_bounded_partition_info_mirror_sql, render_bounded_scheduled_cleanup_mirror_sql,
+        render_bounded_mutation_mirror_sql, render_bounded_partition_info_mirror_sql,
         resolve_catalog_id, set_config_option,
     },
     runtime_object_ops::{
         change_view_comment, create_macros, create_views, drop_macros, drop_tables, drop_views,
         rename_views,
     },
-    runtime_protocol::RuntimeRequest,
+    runtime_protocol::RuntimeRequestRef,
     runtime_schema_change_ops::{
         add_columns, change_column_defaults, change_column_types, change_comments,
         change_partition_keys, change_sort_keys, drop_columns, rename_columns, rename_tables,
@@ -115,11 +114,9 @@ pub(crate) fn runtime_operation_policy(operation: &str) -> RuntimeOperationPolic
         | "ListCurrentMetadataFileColumnStats"
         | "ListCurrentMetadataFileColumnStatsForDataFileIds"
         | "ListCurrentMetadataDataFiles"
-        | "RenderBoundedAppendMirrorSql"
+        | "RenderBoundedMutationMirrorSql"
         | "ListCurrentMetadataDataFilesForDataFileIds"
         | "ListDataFiles"
-        | "RenderBoundedScheduledCleanupMirrorSql"
-        | "RenderBoundedDeleteFileMirrorSql"
         | "ListDeleteFilesForDeleteFileIds"
         | "ListNullOnlyColumns"
         | "ListInlinedTables"
@@ -165,7 +162,47 @@ pub(crate) fn runtime_operation_policy(operation: &str) -> RuntimeOperationPolic
     }
 }
 
-pub(crate) fn payload_for_request(request: &RuntimeRequest) -> CatalogResult<Vec<u8>> {
+pub(crate) fn payload_for_request(
+    request: &RuntimeRequestRef<'_>,
+) -> CatalogResult<crate::runtime_protocol::RuntimePayload> {
+    let catalog = request.catalog_id;
+    match request.operation {
+        "ListCurrentMetadataDataFiles" => {
+            list_current_metadata_data_file_rows(request.backend, request.catalog_id)
+        }
+        "ListCurrentMetadataFileColumnStats" => {
+            list_current_metadata_file_column_stats_rows(request.backend, request.catalog_id)
+        }
+        "ListFileColumnStats" => list_file_column_stats_rows(request.backend, request.catalog_id),
+        "ListDeleteFiles" => list_delete_file_rows(request.backend, request.catalog_id),
+        "GetConflictSnapshot" => get_conflict_snapshot(request.backend, request.catalog_id),
+        "GetCatalogForSnapshot" => {
+            get_catalog_for_snapshot(request.backend, request.catalog_id, request.payload)
+        }
+        "ListDataFilesAt" => list_data_files_at(request.backend, catalog, &request.payload),
+        "ListCurrentDataFilesForPartitionScan" => {
+            list_current_partition_files(request.backend, catalog, &request.payload)
+        }
+        "ListCurrentDataFilesForPartitionScans" => {
+            list_current_partition_files_batch(request.backend, catalog, &request.payload)
+        }
+        "ListCurrentDataFilesForPartitionPrune" => {
+            list_current_partition_prune_files(request.backend, catalog, &request.payload)
+        }
+        "ListDataFilesForPartitionScanAt" => {
+            list_partition_files_at(request.backend, catalog, &request.payload)
+        }
+        "ListDataFilesForPartitionScansAt" => {
+            list_partition_files_at_batch(request.backend, catalog, &request.payload)
+        }
+        "ListDataFilesForPartitionPruneAt" => {
+            list_partition_prune_files_at(request.backend, catalog, &request.payload)
+        }
+        _ => owned_payload_for_request(request).map(Into::into),
+    }
+}
+
+fn owned_payload_for_request(request: &RuntimeRequestRef<'_>) -> CatalogResult<Vec<u8>> {
     if request.snapshot_fence.is_some()
         && runtime_operation_policy(&request.operation).mutates_catalog
         && request.operation != "CommitAttempt"
@@ -175,7 +212,7 @@ pub(crate) fn payload_for_request(request: &RuntimeRequest) -> CatalogResult<Vec
         ));
     }
     let catalog = request.catalog_id;
-    match request.operation.as_str() {
+    match request.operation {
         "CheckSnapshotFence" => Ok(b"snapshot_fence_version=1\n".to_vec()),
         "ResolveCatalogId" => resolve_catalog_id(request.backend, catalog, &request.payload),
         "AttachMetadata" => attach_metadata(request.backend, catalog, &request.payload),
@@ -196,12 +233,8 @@ pub(crate) fn payload_for_request(request: &RuntimeRequest) -> CatalogResult<Vec
                 &request.payload,
             )
         }
-        "ListFileColumnStats" => list_file_column_stats_rows(request.backend, catalog),
         "RenderBoundedPartitionInfoMirrorSql" => {
             render_bounded_partition_info_mirror_sql(request.backend, catalog, &request.payload)
-        }
-        "ListCurrentMetadataFileColumnStats" => {
-            list_current_metadata_file_column_stats_rows(request.backend, catalog)
         }
         "ListCurrentMetadataFileColumnStatsForDataFileIds" => {
             list_current_metadata_file_column_stats_rows_for_data_file_ids(
@@ -219,11 +252,8 @@ pub(crate) fn payload_for_request(request: &RuntimeRequest) -> CatalogResult<Vec
         "ListSnapshotStatsAndChangesInputs" => {
             list_snapshot_stats_and_changes_inputs(request.backend, catalog, &request.payload)
         }
-        "ListCurrentMetadataDataFiles" => {
-            list_current_metadata_data_file_rows(request.backend, catalog)
-        }
-        "RenderBoundedAppendMirrorSql" => {
-            render_bounded_append_mirror_sql(request.backend, catalog, &request.payload)
+        "RenderBoundedMutationMirrorSql" => {
+            render_bounded_mutation_mirror_sql(request.backend, catalog, &request.payload)
         }
         "ListCurrentMetadataDataFilesForDataFileIds" => {
             list_current_metadata_data_file_rows_for_data_file_ids(
@@ -233,13 +263,6 @@ pub(crate) fn payload_for_request(request: &RuntimeRequest) -> CatalogResult<Vec
             )
         }
         "ListDataFiles" => list_data_file_rows(request.backend, catalog),
-        "ListDeleteFiles" => list_delete_file_rows(request.backend, catalog),
-        "RenderBoundedScheduledCleanupMirrorSql" => {
-            render_bounded_scheduled_cleanup_mirror_sql(request.backend, catalog, &request.payload)
-        }
-        "RenderBoundedDeleteFileMirrorSql" => {
-            render_bounded_delete_file_mirror_sql(request.backend, catalog, &request.payload)
-        }
         "ListDeleteFilesForDeleteFileIds" => {
             list_delete_file_rows_for_delete_file_ids(request.backend, catalog, &request.payload)
         }
@@ -279,39 +302,16 @@ pub(crate) fn payload_for_request(request: &RuntimeRequest) -> CatalogResult<Vec
             request.snapshot_fence,
         ),
         "GetSnapshot" => get_snapshot(request.backend, catalog),
-        "GetConflictSnapshot" => get_conflict_snapshot(request.backend, catalog),
         "GetSnapshotAt" => get_snapshot_at(request.backend, catalog, &request.payload),
         "GetSnapshotAtTimestamp" => {
             get_snapshot_at_timestamp(request.backend, catalog, &request.payload)
-        }
-        "GetCatalogForSnapshot" => {
-            get_catalog_for_snapshot(request.backend, catalog, &request.payload)
         }
         "ListSnapshots" => list_snapshots(request.backend, catalog, &request.payload),
         "ListSnapshotChangesAfter" => {
             list_snapshot_changes_after(request.backend, catalog, &request.payload)
         }
-        "ListDataFilesAt" => list_data_files_at(request.backend, catalog, &request.payload),
         "ListRemovedDataFilesAfter" => {
             list_removed_data_files_after(request.backend, catalog, &request.payload)
-        }
-        "ListCurrentDataFilesForPartitionScan" => {
-            list_current_partition_files(request.backend, catalog, &request.payload)
-        }
-        "ListCurrentDataFilesForPartitionScans" => {
-            list_current_partition_files_batch(request.backend, catalog, &request.payload)
-        }
-        "ListCurrentDataFilesForPartitionPrune" => {
-            list_current_partition_prune_files(request.backend, catalog, &request.payload)
-        }
-        "ListDataFilesForPartitionScanAt" => {
-            list_partition_files_at(request.backend, catalog, &request.payload)
-        }
-        "ListDataFilesForPartitionScansAt" => {
-            list_partition_files_at_batch(request.backend, catalog, &request.payload)
-        }
-        "ListDataFilesForPartitionPruneAt" => {
-            list_partition_prune_files_at(request.backend, catalog, &request.payload)
         }
         "EndRuntimeReadContext" => {
             let read_context_id = request.read_context_id.ok_or_else(|| {

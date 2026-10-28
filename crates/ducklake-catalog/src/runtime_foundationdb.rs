@@ -1,37 +1,6 @@
+use crate::runtime_protocol::RuntimePayload;
 #[cfg(feature = "foundationdb")]
 use std::collections::{BTreeMap, BTreeSet};
-
-#[cfg(feature = "runtime-metrics")]
-#[derive(Clone, Copy)]
-struct DataMutationMetricStage(std::time::Instant);
-
-#[cfg(not(feature = "runtime-metrics"))]
-#[derive(Clone, Copy)]
-struct DataMutationMetricStage;
-
-impl DataMutationMetricStage {
-    fn start() -> Self {
-        #[cfg(feature = "runtime-metrics")]
-        {
-            Self(std::time::Instant::now())
-        }
-        #[cfg(not(feature = "runtime-metrics"))]
-        {
-            Self
-        }
-    }
-}
-
-#[cfg(feature = "runtime-metrics")]
-fn record_data_mutation_stage(stage: &str, started: DataMutationMetricStage) {
-    crate::runtime_metrics::record_runtime_method_elapsed(
-        &format!("method.runtime_foundationdb_data_mutation.{stage}"),
-        u64::try_from(started.0.elapsed().as_micros()).unwrap_or(u64::MAX),
-    );
-}
-
-#[cfg(not(feature = "runtime-metrics"))]
-fn record_data_mutation_stage(_stage: &str, _started: DataMutationMetricStage) {}
 
 use crate::{
     CatalogId, CatalogResult, RawSnapshotSequence, SchemaRow, SnapshotTimestampBound, TableId,
@@ -56,8 +25,8 @@ use crate::{
     kv::OrderedCatalogKv,
     latest_snapshot, list_schemas_at, list_tables_at, load_commit_attempt,
     runtime_catalog_snapshot::{
-        catalog_snapshot_payload_with_kind, conflict_snapshot_payload,
-        conflict_snapshot_payload_for_row, public_snapshot_payload, snapshot_payload,
+        catalog_snapshot_payload_with_kind, conflict_snapshot_payload, public_snapshot_payload,
+        snapshot_payload,
     },
     runtime_change_feed::{data_file_changes_payload, table_deletions_payload},
     runtime_cleanup::{known_files_cleanup_payload, old_files_cleanup_payload},
@@ -71,31 +40,31 @@ use crate::{
     runtime_snapshots::{
         list_snapshots_payload, snapshot_by_public_sequence, snapshot_changes_after_payload,
     },
+    runtime_trace::RuntimeSpan,
     snapshot_by_timestamp,
-    store::latest_snapshot_uncached,
     table_store::{load_current_table_row, load_current_table_rows},
 };
 
 #[cfg(feature = "foundationdb")]
 pub(crate) fn runtime_get_foundationdb_snapshot(catalog: CatalogId) -> CatalogResult<Vec<u8>> {
     let kv = open_foundationdb_catalog()?;
-    snapshot_payload(&kv, catalog, latest_snapshot(&kv, catalog)?)
+    snapshot_payload(
+        &kv,
+        catalog,
+        crate::store::prepared_latest_snapshot(
+            &kv,
+            catalog,
+            crate::catalog_request_read_set::CatalogHeaderProjection::Conflict,
+        )?,
+    )
 }
 
 #[cfg(feature = "foundationdb")]
 pub(crate) fn runtime_get_foundationdb_conflict_snapshot(
     catalog: CatalogId,
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     let kv = open_foundationdb_catalog()?;
-    let latest = if crate::store::runtime_read_context_enabled() {
-        latest_snapshot(&kv, catalog)?
-    } else {
-        latest_snapshot_uncached(&kv, catalog).row?
-    };
-    let Some(latest) = latest else {
-        return conflict_snapshot_payload(&kv, catalog);
-    };
-    conflict_snapshot_payload_for_row(&kv, catalog, latest)
+    conflict_snapshot_payload(&kv, catalog)
 }
 
 #[cfg(feature = "foundationdb")]
@@ -126,8 +95,8 @@ pub(crate) fn runtime_get_foundationdb_catalog_for_snapshot(
     catalog: CatalogId,
     snapshot_id: u64,
     snapshot_kind: CatalogSnapshotIdKind,
-) -> CatalogResult<Vec<u8>> {
-    let kv = open_foundationdb_catalog()?;
+) -> CatalogResult<RuntimePayload> {
+    let kv = open_foundationdb_catalog()?.with_read_version()?;
     catalog_snapshot_payload_with_kind(&kv, catalog, DuckLakeSnapshotId(snapshot_id), snapshot_kind)
 }
 
@@ -153,7 +122,7 @@ pub(crate) fn runtime_list_foundationdb_snapshot_changes_after(
 pub(crate) fn runtime_list_foundationdb_data_files_at(
     catalog: CatalogId,
     payload: ListDataFilesAtPayload,
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     let kv = open_foundationdb_catalog()?;
     foundationdb_data_files_at_payload(&kv, catalog, payload)
 }
@@ -162,7 +131,7 @@ pub(crate) fn runtime_list_foundationdb_data_files_at(
 pub(crate) fn runtime_list_foundationdb_current_partition_files(
     catalog: CatalogId,
     payload: CurrentPartitionFilesPayload,
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     let kv = open_foundationdb_catalog()?;
     foundationdb_current_partition_files_payload(&kv, catalog, payload)
 }
@@ -171,7 +140,7 @@ pub(crate) fn runtime_list_foundationdb_current_partition_files(
 pub(crate) fn runtime_list_foundationdb_current_partition_files_batch(
     catalog: CatalogId,
     payload: CurrentPartitionFilesBatchPayload,
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     let kv = open_foundationdb_catalog()?;
     foundationdb_current_partition_files_batch_payload(&kv, catalog, payload)
 }
@@ -180,7 +149,7 @@ pub(crate) fn runtime_list_foundationdb_current_partition_files_batch(
 pub(crate) fn runtime_list_foundationdb_current_partition_prune_files(
     catalog: CatalogId,
     payload: CurrentPartitionPruneFilesPayload,
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     let kv = open_foundationdb_catalog()?;
     foundationdb_current_partition_prune_files_payload(&kv, catalog, payload)
 }
@@ -189,7 +158,7 @@ pub(crate) fn runtime_list_foundationdb_current_partition_prune_files(
 pub(crate) fn runtime_list_foundationdb_partition_files_at(
     catalog: CatalogId,
     payload: PartitionFilesAtPayload,
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     let kv = open_foundationdb_catalog()?;
     foundationdb_partition_files_at_payload(&kv, catalog, payload)
 }
@@ -198,7 +167,7 @@ pub(crate) fn runtime_list_foundationdb_partition_files_at(
 pub(crate) fn runtime_list_foundationdb_partition_files_at_batch(
     catalog: CatalogId,
     payload: PartitionFilesAtBatchPayload,
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     let kv = open_foundationdb_catalog()?;
     foundationdb_partition_files_at_batch_payload(&kv, catalog, payload)
 }
@@ -207,7 +176,7 @@ pub(crate) fn runtime_list_foundationdb_partition_files_at_batch(
 pub(crate) fn runtime_list_foundationdb_partition_prune_files_at(
     catalog: CatalogId,
     payload: PartitionPruneFilesAtPayload,
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     let kv = open_foundationdb_catalog()?;
     foundationdb_partition_prune_files_at_payload(&kv, catalog, payload)
 }
@@ -542,36 +511,38 @@ pub(crate) fn runtime_foundationdb_commit_data_and_inline_mutation(
     inline_deletes: Vec<crate::runtime_inline_ops::RuntimeInlineDelete>,
     commit_snapshot: Option<DuckLakeSnapshotId>,
 ) -> CatalogResult<(crate::DataMutationCommit, Vec<crate::TableId>)> {
-    let started = DataMutationMetricStage::start();
+    let stage = RuntimeSpan::enter("method.runtime_foundationdb_data_mutation.Open");
     let kv = open_foundationdb_catalog()?;
     if let Some(commit) = crate::fdb_data_mutations::recover_committed_mutation(
         &kv,
         catalog,
         mutation.recovery_attempt_id,
     )? {
+        stage.finish(true);
         return Ok((
             commit,
             crate::runtime_data_mutation_ops::affected_table_ids(&mutation)?,
         ));
     }
-    record_data_mutation_stage("Open", started);
-    let started = DataMutationMetricStage::start();
+    stage.finish(true);
+    let stage = RuntimeSpan::enter("method.runtime_foundationdb_data_mutation.ResolveVisibility");
     crate::runtime_data_mutation_ops::resolve_data_file_visibility(&kv, catalog, &mut mutation)?;
-    record_data_mutation_stage("ResolveVisibility", started);
-    let started = DataMutationMetricStage::start();
+    stage.finish(true);
+    let stage =
+        RuntimeSpan::enter("method.runtime_foundationdb_data_mutation.CompleteInlineFlushes");
     crate::runtime_data_mutation_ops::complete_inline_flushes_from_materialized_files(
         &kv,
         catalog,
         &mut mutation,
     )?;
-    record_data_mutation_stage("CompleteInlineFlushes", started);
-    let started = DataMutationMetricStage::start();
+    stage.finish(true);
+    let stage = RuntimeSpan::enter("method.runtime_foundationdb_data_mutation.RejectStale");
     let validated = reject_stale_data_mutation(&kv, catalog, &mutation)?;
-    record_data_mutation_stage("RejectStale", started);
-    let started = DataMutationMetricStage::start();
+    stage.finish(true);
+    let stage = RuntimeSpan::enter("method.runtime_foundationdb_data_mutation.AffectedTables");
     let affected_table_ids = crate::runtime_data_mutation_ops::affected_table_ids(&mutation)?;
-    record_data_mutation_stage("AffectedTables", started);
-    let started = DataMutationMetricStage::start();
+    stage.finish(true);
+    let stage = RuntimeSpan::enter("method.runtime_foundationdb_data_mutation.PrepareInline");
     let (inline_tables, inline_payloads, inline_deletes) =
         crate::runtime_foundationdb_inline::prepare_foundationdb_inline_mutations(
             &kv,
@@ -580,9 +551,9 @@ pub(crate) fn runtime_foundationdb_commit_data_and_inline_mutation(
             inline_deletes,
             commit_snapshot,
         )?;
-    record_data_mutation_stage("PrepareInline", started);
+    stage.finish(true);
     let materialized_delete_files = mutation.materialized_delete_files();
-    let started = DataMutationMetricStage::start();
+    let stage = RuntimeSpan::enter("method.runtime_foundationdb_data_mutation.Commit");
     let commit = kv.commit_data_and_inline_mutation_versionstamped(
         catalog,
         crate::fdb_data_mutations::FdbMutationAttempt {
@@ -608,7 +579,7 @@ pub(crate) fn runtime_foundationdb_commit_data_and_inline_mutation(
         },
         validated,
     )?;
-    record_data_mutation_stage("Commit", started);
+    stage.finish(true);
     Ok((commit, affected_table_ids))
 }
 
@@ -618,7 +589,8 @@ fn reject_stale_data_mutation(
     catalog: CatalogId,
     mutation: &RuntimeDataMutation,
 ) -> CatalogResult<crate::fdb_data_mutations::FdbMutationReadContext> {
-    let started = DataMutationMetricStage::start();
+    let stage =
+        RuntimeSpan::enter("method.runtime_foundationdb_data_mutation.RejectStaleResolveSnapshot");
     let read_snapshot = if let Some(read_snapshot) = mutation.read_snapshot {
         snapshot_by_public_sequence(kv, catalog, read_snapshot)?
     } else if let Some(flush_snapshot) = mutation
@@ -631,16 +603,16 @@ fn reject_stale_data_mutation(
     } else {
         None
     };
+    stage.finish(true);
     let Some(read_snapshot) = read_snapshot else {
         return Ok(crate::fdb_data_mutations::FdbMutationReadContext {
             snapshot_fence: mutation.snapshot_fence,
             ..Default::default()
         });
     };
-    record_data_mutation_stage("RejectStaleResolveSnapshot", started);
-    let started = DataMutationMetricStage::start();
+    let stage = RuntimeSpan::enter("method.runtime_foundationdb_data_mutation.RejectStaleLatest");
     let latest = latest_snapshot(kv, catalog)?;
-    record_data_mutation_stage("RejectStaleLatest", started);
+    stage.finish(true);
     let proposed_sequence = mutation
         .proposed_commit_snapshot
         .and_then(|snapshot| u64::try_from(snapshot.commit_attempt_id().0).ok())
@@ -654,14 +626,14 @@ fn reject_stale_data_mutation(
             "conflict flushing inline data: catalog changed after read snapshot".to_owned(),
         ));
     }
-    let started = DataMutationMetricStage::start();
+    let stage = RuntimeSpan::enter("method.runtime_foundationdb_data_mutation.RejectStaleAppend");
     let append_partitions = append_partition_expectations(
         &mutation.data_files,
         &mutation.partition_values,
         &mutation.file_partition_sets,
     );
-    record_data_mutation_stage("RejectStaleAppend", started);
-    let started = DataMutationMetricStage::start();
+    stage.finish(true);
+    let stage = RuntimeSpan::enter("method.runtime_foundationdb_data_mutation.RejectStaleDeletes");
     let preloaded_data_files = reject_delete_targets_changed_after_read(
         kv,
         catalog,
@@ -671,7 +643,7 @@ fn reject_stale_data_mutation(
         &mutation.materialized_delete_files(),
         &mutation.dropped_data_file_ids,
     )?;
-    record_data_mutation_stage("RejectStaleDeletes", started);
+    stage.finish(true);
     Ok(crate::fdb_data_mutations::FdbMutationReadContext {
         snapshot_fence: mutation.snapshot_fence,
         order: Some(read_snapshot.order),
@@ -852,7 +824,7 @@ pub(crate) fn runtime_get_foundationdb_snapshot(_catalog: CatalogId) -> CatalogR
 #[cfg(not(feature = "foundationdb"))]
 pub(crate) fn runtime_get_foundationdb_conflict_snapshot(
     _catalog: CatalogId,
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     foundationdb_runtime_error()
 }
 
@@ -878,7 +850,7 @@ pub(crate) fn runtime_get_foundationdb_catalog_for_snapshot(
     _catalog: CatalogId,
     _snapshot_id: u64,
     _snapshot_kind: CatalogSnapshotIdKind,
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     foundationdb_runtime_error()
 }
 
@@ -902,7 +874,7 @@ pub(crate) fn runtime_list_foundationdb_snapshot_changes_after(
 pub(crate) fn runtime_list_foundationdb_data_files_at(
     _catalog: CatalogId,
     _payload: ListDataFilesAtPayload,
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     foundationdb_runtime_error()
 }
 
@@ -910,7 +882,7 @@ pub(crate) fn runtime_list_foundationdb_data_files_at(
 pub(crate) fn runtime_list_foundationdb_current_partition_files(
     _catalog: CatalogId,
     _payload: CurrentPartitionFilesPayload,
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     foundationdb_runtime_error()
 }
 
@@ -918,7 +890,7 @@ pub(crate) fn runtime_list_foundationdb_current_partition_files(
 pub(crate) fn runtime_list_foundationdb_current_partition_files_batch(
     _catalog: CatalogId,
     _payload: CurrentPartitionFilesBatchPayload,
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     foundationdb_runtime_error()
 }
 
@@ -926,7 +898,7 @@ pub(crate) fn runtime_list_foundationdb_current_partition_files_batch(
 pub(crate) fn runtime_list_foundationdb_current_partition_prune_files(
     _catalog: CatalogId,
     _payload: CurrentPartitionPruneFilesPayload,
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     foundationdb_runtime_error()
 }
 
@@ -934,7 +906,7 @@ pub(crate) fn runtime_list_foundationdb_current_partition_prune_files(
 pub(crate) fn runtime_list_foundationdb_partition_files_at(
     _catalog: CatalogId,
     _payload: PartitionFilesAtPayload,
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     foundationdb_runtime_error()
 }
 
@@ -942,7 +914,7 @@ pub(crate) fn runtime_list_foundationdb_partition_files_at(
 pub(crate) fn runtime_list_foundationdb_partition_files_at_batch(
     _catalog: CatalogId,
     _payload: PartitionFilesAtBatchPayload,
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     foundationdb_runtime_error()
 }
 
@@ -950,7 +922,7 @@ pub(crate) fn runtime_list_foundationdb_partition_files_at_batch(
 pub(crate) fn runtime_list_foundationdb_partition_prune_files_at(
     _catalog: CatalogId,
     _payload: PartitionPruneFilesAtPayload,
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     foundationdb_runtime_error()
 }
 

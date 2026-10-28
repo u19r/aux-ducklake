@@ -1,5 +1,5 @@
 ddl_parity_table=orders_archive,orders table
-ddl_parity_column=quantity,BIGINT,'7',order quantity
+ddl_parity_column=quantity,BIGINT,CAST(7 AS BIGINT),order quantity
 ddl_parity_rows=3,17
 ddl_parity_historical=2,10
 ddl_parity_view=orders_view_v2,orders view

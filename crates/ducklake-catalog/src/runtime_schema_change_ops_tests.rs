@@ -30,7 +30,7 @@ mod tests {
         let ddl = DdlPayload {
             commit_snapshot_id: DuckLakeSnapshotId(2),
             read_snapshot_id: None,
-            rows: Vec::new(),
+            text: "",
         };
 
         let base = ddl_base_snapshot(&kv, catalog, &ddl).unwrap();
@@ -59,7 +59,7 @@ mod tests {
         let ddl = DdlPayload {
             commit_snapshot_id: DuckLakeSnapshotId(2),
             read_snapshot_id: Some(DuckLakeSnapshotId(1)),
-            rows: Vec::new(),
+            text: "",
         };
 
         let base = ddl_base_snapshot(&kv, catalog, &ddl).unwrap();

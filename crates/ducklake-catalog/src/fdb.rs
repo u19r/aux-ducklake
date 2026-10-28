@@ -1,3 +1,5 @@
+#[cfg(debug_assertions)]
+use std::sync::{Barrier, Mutex, OnceLock};
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
@@ -5,14 +7,10 @@ use std::{
     sync::Arc,
 };
 
-#[cfg(debug_assertions)]
-use std::sync::{Barrier, Mutex, OnceLock};
-
 use foundationdb::{
     Database,
     options::{MutationType, TransactionOption},
 };
-use futures::executor::block_on;
 
 use crate::{
     CatalogCacheNamespace, CatalogError, CatalogResult, DataFileChangeKind, DataFileRow,
@@ -24,8 +22,8 @@ use crate::{
         append_versionstamp_offset, committed_order, data_file_end_key_order_offset,
         estimate_versionstamped_append_bytes, estimate_versionstamped_expire_bytes,
         incomplete_order, snapshot_data_file_change_key_order_offset, snapshot_key_order_offset,
-        snapshot_timestamp_key_order_offset, strip_namespace,
-        table_data_file_change_key_order_offset, versionstamped_value,
+        snapshot_timestamp_key_order_offset, table_data_file_change_key_order_offset,
+        versionstamped_value,
     },
     keys::{
         conflict_watermarks_initialized_key, current_data_file_key, data_file_begin_key,
@@ -80,8 +78,7 @@ impl FdbOrderedCatalogKv {
         if self.read_version.is_some() {
             return Ok(self.clone());
         }
-        let transaction = self.create_transaction()?;
-        let read_version = block_on(transaction.get_read_version()).map_err(map_fdb_error)?;
+        let read_version = self.fetch_read_version()?;
         Ok(Self {
             db: Arc::clone(&self.db),
             key_prefix: self.key_prefix.clone(),
@@ -95,10 +92,11 @@ impl FdbOrderedCatalogKv {
     }
 
     pub(crate) fn namespaced_key(&self, key: &[u8]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(self.key_prefix.len().saturating_add(key.len()));
-        out.extend_from_slice(&self.key_prefix);
-        out.extend_from_slice(key);
-        out
+        crate::fdb_key_codec::encode_key(&self.key_prefix, key)
+    }
+
+    pub(crate) fn namespaced_range_bound(&self, key: &[u8]) -> Vec<u8> {
+        crate::fdb_key_codec::encode_range_bound(&self.key_prefix, key)
     }
 
     pub(crate) fn catalog_cache_namespace(&self) -> CatalogCacheNamespace {
@@ -109,14 +107,40 @@ impl FdbOrderedCatalogKv {
     }
 
     pub(crate) fn strip_namespace(&self, key: &[u8]) -> CatalogResult<Vec<u8>> {
-        strip_namespace(&self.key_prefix, key)
+        crate::fdb_key_codec::decode_key(&self.key_prefix, key)
     }
 
     pub(crate) fn create_transaction(&self) -> CatalogResult<foundationdb::Transaction> {
+        let trx = self.create_unpinned_transaction()?;
+        if let Some(version) = self.read_version {
+            trx.set_read_version(version);
+        } else if crate::store::active_runtime_read_context_id().is_some() {
+            trx.set_read_version(self.fetch_read_version()?);
+        }
+        Ok(trx)
+    }
+
+    fn fetch_read_version(&self) -> CatalogResult<i64> {
+        if crate::store::active_runtime_read_context_id().is_some() {
+            return crate::runtime_read_versions::fetch_version(
+                self.catalog_cache_namespace(),
+                || self.fetch_fresh_read_version(),
+            );
+        }
+        self.fetch_fresh_read_version()
+    }
+
+    fn fetch_fresh_read_version(&self) -> CatalogResult<i64> {
+        let trx = self.create_unpinned_transaction()?;
+        crate::fdb_runtime::wait_for_fdb("wait.fdb.get_read_version", trx.get_read_version())
+            .map_err(map_fdb_error)
+    }
+
+    fn create_unpinned_transaction(&self) -> CatalogResult<foundationdb::Transaction> {
         let trx = self.db.create_trx().map_err(map_fdb_error)?;
+        crate::runtime_metrics::record_runtime_measurement("fdb.transaction.created", 1, 0);
         trx.set_option(TransactionOption::Timeout(5_000))
             .map_err(map_fdb_error)?;
-        self.apply_read_version(&trx);
         Ok(trx)
     }
 
@@ -125,13 +149,17 @@ impl FdbOrderedCatalogKv {
         transaction: foundationdb::Transaction,
         error: foundationdb::FdbError,
     ) -> CatalogResult<foundationdb::Transaction> {
-        let transaction = block_on(transaction.on_error(error)).map_err(map_fdb_error)?;
+        let transaction =
+            crate::fdb_runtime::wait_for_fdb("wait.fdb.on_error", transaction.on_error(error))
+                .map_err(map_fdb_error)?;
         self.apply_read_version(&transaction);
         Ok(transaction)
     }
 
-    fn apply_read_version(&self, transaction: &foundationdb::Transaction) {
-        if let Some(read_version) = self.read_version {
+    pub(super) fn apply_read_version(&self, transaction: &foundationdb::Transaction) {
+        if let Some(read_version) = self.read_version.or_else(|| {
+            crate::runtime_read_versions::request_version(self.catalog_cache_namespace())
+        }) {
             transaction.set_read_version(read_version);
         }
     }
@@ -156,10 +184,13 @@ impl FdbOrderedCatalogKv {
         let placeholder = incomplete_order();
         let row = SnapshotRow::initial(placeholder);
         let trx = self.create_transaction()?;
-        if block_on(trx.get(
-            &self.namespaced_key(&conflict_watermarks_initialized_key(catalog)),
-            false,
-        ))
+        if crate::fdb_runtime::wait_for_fdb(
+            "wait.fdb.get",
+            trx.get(
+                &self.namespaced_key(&conflict_watermarks_initialized_key(catalog)),
+                false,
+            ),
+        )
         .map_err(map_fdb_error)?
         .is_some()
         {
@@ -178,7 +209,7 @@ impl FdbOrderedCatalogKv {
                 &snapshot_timestamp_key(catalog, row.created_at_micros, placeholder),
                 snapshot_timestamp_key_order_offset(catalog, row.created_at_micros),
             )?,
-            &row.sequence.to_be_bytes(),
+            &row.encode(),
             MutationType::SetVersionstampedKey,
         );
         stage_fdb_snapshot_indexes(self, &trx, catalog, &row)?;
@@ -191,9 +222,15 @@ impl FdbOrderedCatalogKv {
         }
         let versionstamp = trx.get_versionstamp();
         wait_for_sync_initialize_commit_barrier(catalog);
-        block_on(trx.commit()).map_err(map_fdb_commit_error)?;
+        crate::fdb_runtime::record_transaction_usage(&trx);
+        crate::fdb_runtime::wait_for_fdb("wait.fdb.commit", trx.commit())
+            .map_err(map_fdb_commit_error)?;
         inject_sync_initialize_commit_unknown(catalog)?;
-        let order = committed_order(block_on(versionstamp).map_err(map_fdb_error)?.deref())?;
+        let order = committed_order(
+            crate::fdb_runtime::wait_for_fdb("wait.fdb.versionstamp", versionstamp)
+                .map_err(map_fdb_error)?
+                .deref(),
+        )?;
         Ok(SyncInitializeAttempt::Created(
             SnapshotRow::with_created_at_micros(order, row.sequence, row.created_at_micros),
         ))
@@ -323,7 +360,7 @@ impl FdbOrderedCatalogKv {
                 &snapshot_timestamp_key(catalog, snapshot.created_at_micros, placeholder),
                 snapshot_timestamp_key_order_offset(catalog, snapshot.created_at_micros),
             )?,
-            &snapshot.sequence.to_be_bytes(),
+            &snapshot.encode(),
             MutationType::SetVersionstampedKey,
         );
         stage_fdb_snapshot_indexes(self, &trx, catalog, &snapshot)?;
@@ -332,8 +369,14 @@ impl FdbOrderedCatalogKv {
             stage_data_file(self, &trx, catalog, row)?;
         }
         let versionstamp = trx.get_versionstamp();
-        block_on(trx.commit()).map_err(map_fdb_commit_error)?;
-        let order = committed_order(block_on(versionstamp).map_err(map_fdb_error)?.deref())?;
+        crate::fdb_runtime::record_transaction_usage(&trx);
+        crate::fdb_runtime::wait_for_fdb("wait.fdb.commit", trx.commit())
+            .map_err(map_fdb_commit_error)?;
+        let order = committed_order(
+            crate::fdb_runtime::wait_for_fdb("wait.fdb.versionstamp", versionstamp)
+                .map_err(map_fdb_error)?
+                .deref(),
+        )?;
         for row in &mut rows {
             row.validity = ValidityWindow::new(order, None);
         }
@@ -423,8 +466,14 @@ impl FdbOrderedCatalogKv {
             MutationType::SetVersionstampedKey,
         );
         let versionstamp = trx.get_versionstamp();
-        block_on(trx.commit()).map_err(map_fdb_commit_error)?;
-        let order = committed_order(block_on(versionstamp).map_err(map_fdb_error)?.deref())?;
+        crate::fdb_runtime::record_transaction_usage(&trx);
+        crate::fdb_runtime::wait_for_fdb("wait.fdb.commit", trx.commit())
+            .map_err(map_fdb_commit_error)?;
+        let order = committed_order(
+            crate::fdb_runtime::wait_for_fdb("wait.fdb.versionstamp", versionstamp)
+                .map_err(map_fdb_error)?
+                .deref(),
+        )?;
         row.validity.end_order = Some(order);
         Ok(row)
     }
@@ -434,7 +483,10 @@ impl FdbOrderedCatalogKv {
         catalog_key: &[u8],
         order_offset: usize,
     ) -> CatalogResult<Vec<u8>> {
-        let namespaced_offset = self.key_prefix.len().saturating_add(order_offset);
+        let prefix = catalog_key.get(..order_offset).ok_or_else(|| {
+            CatalogError::InvalidMutation("versionstamp offset exceeds its catalog key".to_owned())
+        })?;
+        let namespaced_offset = self.namespaced_key(prefix).len();
         let mut key = self.namespaced_key(catalog_key);
         append_versionstamp_offset(&mut key, namespaced_offset)?;
         Ok(key)

@@ -351,28 +351,17 @@ pub(crate) fn list_scheduled_data_file_cleanup_rows(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
 ) -> CatalogResult<Vec<ScheduledDataFileCleanupRow>> {
-    let scheduled = kv.scan_prefix(
-        &scheduled_data_file_cleanup_prefix(catalog),
-        RangeDirection::Forward,
-        usize::MAX,
-    )?;
-    let data_file_ids = scheduled
-        .iter()
-        .map(|item| decode_cleanup_id(&item.key).map(DataFileId))
-        .collect::<CatalogResult<Vec<_>>>()?;
-    let values = kv.batch_get(
-        &data_file_ids
-            .iter()
-            .map(|data_file_id| data_file_key(catalog, *data_file_id))
-            .collect::<Vec<_>>(),
-    )?;
+    let join = crate::kv::CatalogIndexJoin {
+        index_prefix: scheduled_data_file_cleanup_prefix(catalog),
+        primary_prefix: family_prefix(catalog, KeyFamily::DataFile),
+    };
     let mut rows = Vec::new();
-    for (item, value) in scheduled.iter().zip(values) {
-        if let Some(value) = value {
+    for joined in kv.scan_index_rows(&join)? {
+        if let Some(primary) = joined.primary {
             let (cleanup_kind, schedule_start_micros) =
-                decode_scheduled_data_cleanup_value(&item.value)?;
+                decode_scheduled_data_cleanup_value(&joined.index.value)?;
             rows.push(ScheduledDataFileCleanupRow {
-                data_file: DataFileRow::decode(&value)?,
+                data_file: DataFileRow::decode(&primary.value)?,
                 schedule_start_micros,
                 cleanup_kind,
             });
@@ -422,31 +411,24 @@ pub(crate) fn list_scheduled_delete_file_cleanup_rows(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
 ) -> CatalogResult<Vec<ScheduledDeleteFileCleanupRow>> {
-    let scheduled = kv.scan_prefix(
-        &scheduled_delete_file_cleanup_prefix(catalog),
-        RangeDirection::Forward,
-        usize::MAX,
-    )?;
-    let delete_file_ids = scheduled
-        .iter()
-        .map(|item| decode_cleanup_id(&item.key).map(DeleteFileId))
-        .collect::<CatalogResult<Vec<_>>>()?;
-    let values = kv.batch_get(
-        &delete_file_ids
-            .iter()
-            .map(|delete_file_id| delete_file_key(catalog, *delete_file_id))
-            .collect::<Vec<_>>(),
-    )?;
+    let join = crate::kv::CatalogIndexJoin {
+        index_prefix: scheduled_delete_file_cleanup_prefix(catalog),
+        primary_prefix: family_prefix(catalog, KeyFamily::DeleteFile),
+    };
     let mut rows = Vec::new();
-    for (item, value) in scheduled.iter().zip(values) {
-        if let Some(value) = value {
-            let delete_file = DeleteFileRow::decode(&value)?;
-            let (table_id, schedule_start_micros) =
-                decode_scheduled_delete_cleanup_value(kv, catalog, &item.value, &delete_file)?;
+    for joined in kv.scan_index_rows(&join)? {
+        if let Some(primary) = joined.primary {
+            let delete_file = DeleteFileRow::decode(&primary.value)?;
+            let (table_id, schedule_start_micros) = decode_scheduled_delete_cleanup_value(
+                kv,
+                catalog,
+                &joined.index.value,
+                &delete_file,
+            )?;
             rows.push(ScheduledDeleteFileCleanupRow {
-                schedule_start_micros,
-                table_id,
                 delete_file,
+                table_id,
+                schedule_start_micros,
             });
         }
     }
@@ -659,18 +641,6 @@ fn stage_remove_unreachable_table_metadata(
         batch.delete(item.key);
     }
     Ok(())
-}
-
-fn decode_cleanup_id(key: &[u8]) -> CatalogResult<u64> {
-    let id_start = key.len().saturating_sub(8);
-    if key.len() < 8 {
-        return Err(crate::CatalogError::InvalidKey(
-            "scheduled cleanup key is too short".to_owned(),
-        ));
-    }
-    let mut bytes = [0; 8];
-    bytes.copy_from_slice(&key[id_start..]);
-    Ok(u64::from_be_bytes(bytes))
 }
 
 pub(crate) fn row_is_unreachable(row: &DataFileRow, snapshots: &[SnapshotRow]) -> bool {
@@ -1166,13 +1136,12 @@ fn decode_end_order_entry(catalog: CatalogId, key: &[u8]) -> CatalogResult<Optio
 mod tests {
     use std::cell::Cell;
 
+    use super::data_file_partition_key;
     use crate::{
         CatalogId, CatalogOrderId, CatalogResult, DataFileId, DataFileRow, FakeOrderedCatalogKv,
         FilePartitionValueRow, OrderedCatalogKv, PartitionKeyIndex, RangeDirection, RangeItem,
         TableId, commit_append_data_files, register_file_partition_value,
     };
-
-    use super::data_file_partition_key;
 
     #[test]
     fn given_cleanup_partition_key_loaded_twice_then_second_load_uses_partition_cache() {

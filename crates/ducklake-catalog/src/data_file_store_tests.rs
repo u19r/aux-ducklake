@@ -596,8 +596,8 @@ mod tests {
             vec![DataFileId(4)]
         );
         assert!(
-            kv.partition_prefix_scans() <= 1,
-            "duplicate-suppression partition values should be loaded at most once"
+            kv.partition_prefix_scans() == 0,
+            "duplicate suppression must not scan the catalog-wide partition prefix"
         );
     }
 
@@ -963,7 +963,7 @@ mod tests {
         let kv = CountingPartitionScanKv::new(inner);
 
         let context = TableDataFilesAtContext::load(&kv, catalog, table, snapshot_order).unwrap();
-        let first = context.visible_rows();
+        let first = context.clone().visible_rows();
         let second = context.visible_rows();
 
         assert_eq!(
@@ -1017,7 +1017,7 @@ mod tests {
         let kv = CountingPartitionScanKv::new(inner);
 
         let context = TableDataFilesAtContext::load(&kv, catalog, table, snapshot_order).unwrap();
-        let first = context.visible_rows();
+        let first = context.clone().visible_rows();
         let second = context.visible_rows();
 
         assert_eq!(

@@ -6,6 +6,16 @@ mod tests {
         rc::Rc,
     };
 
+    use super::super::{
+        FileListingRole, InlineSuppressionContext, ListDataFilesAtPayload, data_files_at_payload,
+        file_listing_role, partition_files_payload,
+        should_suppress_unflushed_inline_materialization_file,
+    };
+    #[cfg(feature = "foundationdb")]
+    use super::super::{
+        PartitionBatchFileIndex, PartitionPruneComparison, matching_partition_values,
+        partition_value_matches,
+    };
     #[cfg(feature = "foundationdb")]
     use crate::file_partitions::stage_file_partition_value;
     use crate::{
@@ -25,18 +35,6 @@ mod tests {
     };
     #[cfg(feature = "foundationdb")]
     use crate::{FilePartitionValueRow, KvBatch, PartitionKeyIndex};
-
-    use super::super::{
-        FileListingRequestContext, FileListingRole, InlineSuppressionContext,
-        ListDataFilesAtPayload, data_files_at_payload, file_listing_role,
-        partition_files_payload_with_context,
-        should_suppress_unflushed_inline_materialization_file,
-    };
-    #[cfg(feature = "foundationdb")]
-    use super::super::{
-        PartitionBatchFileIndex, PartitionPruneComparison, matching_partition_values,
-        partition_value_matches,
-    };
 
     #[cfg(feature = "foundationdb")]
     #[test]
@@ -155,15 +153,8 @@ mod tests {
         )];
 
         let payload = String::from_utf8(
-            partition_files_payload_with_context(
-                &kv,
-                catalog,
-                snapshot.order,
-                "all".to_owned(),
-                files,
-                None,
-            )
-            .unwrap(),
+            partition_files_payload(&kv, catalog, snapshot.order, "all".to_owned(), &files)
+                .unwrap(),
         )
         .unwrap();
 
@@ -256,18 +247,9 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let kv = TableObjectScanRecordingKv::new(kv, catalog);
-        let mut request = FileListingRequestContext::from_latest(Some(snapshot.clone()));
 
         let payload = String::from_utf8(
-            partition_files_payload_with_context(
-                &kv,
-                catalog,
-                snapshot.order,
-                "a".to_owned(),
-                files,
-                Some(&mut request),
-            )
-            .unwrap(),
+            partition_files_payload(&kv, catalog, snapshot.order, "a".to_owned(), &files).unwrap(),
         )
         .unwrap();
 
@@ -541,7 +523,7 @@ mod tests {
         replacement.row_id_start_known = false;
 
         let context = InlineSuppressionContext {
-            unmaterialized_inline_begin_orders: vec![begin_order],
+            unmaterialized_inline_begin_orders: std::sync::Arc::new(vec![begin_order]),
         };
 
         assert_eq!(
@@ -570,7 +552,7 @@ mod tests {
         materialization.row_id_start_known = false;
 
         let context = InlineSuppressionContext {
-            unmaterialized_inline_begin_orders: vec![begin_order],
+            unmaterialized_inline_begin_orders: std::sync::Arc::new(vec![begin_order]),
         };
 
         assert_eq!(
@@ -853,7 +835,10 @@ mod tests {
             catalog,
             table,
             schema_id,
-            b"row\t0\ti:1\n".to_vec(),
+            (0..400)
+                .map(|row| format!("row\t{row}\ti:{row}\n"))
+                .collect::<String>()
+                .into_bytes(),
         )
         .unwrap();
         let inline_snapshot = latest_snapshot(&inner, catalog).unwrap().unwrap();
@@ -873,6 +858,30 @@ mod tests {
         .unwrap();
         let kv = InlineEndOrderScanRecordingKv::new(inner, catalog, table_id);
 
+        let allocations = alloc_counter::AllocationGuard::start(
+            module_path!(),
+            "inline_suppression",
+            file!(),
+            line!(),
+            Some("hundred_listings"),
+        );
+        for _ in 0..100 {
+            let payload = data_files_at_payload(
+                &kv,
+                catalog,
+                ListDataFilesAtPayload {
+                    snapshot_id: inline_snapshot.sequence.0,
+                    table_id,
+                },
+            )
+            .unwrap();
+            assert_eq!(payload, b"file_count=0\n");
+        }
+        let allocations = allocations.finish();
+        eprintln!(
+            "suppression_allocations={} bytes={}",
+            allocations.allocation_count, allocations.allocated_bytes
+        );
         let payload = String::from_utf8(
             data_files_at_payload(
                 &kv,
@@ -887,7 +896,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(payload, "file_count=0\n");
-        assert_eq!(kv.end_order_scan_count(), 1);
+        assert_eq!(kv.end_order_scan_count(), 101);
     }
 
     #[test]
@@ -1582,6 +1591,7 @@ mod tests {
         let kv = InlineDeletionScanRecordingKv::new(kv, catalog, table_id, visible_file_id);
         let file_ids = BTreeSet::from([visible_file_id]);
 
+        let _context = crate::store::begin_runtime_read_request(Some(8101));
         let grouped = crate::inline_data::list_inline_file_deletions_for_data_files_at(
             &kv,
             catalog,

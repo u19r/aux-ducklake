@@ -638,7 +638,7 @@ pub(crate) fn inline_rows_payloads(payload: &[u8]) -> CatalogResult<Vec<RuntimeI
                         "RegisterInlineRows row appears before table header".to_owned(),
                     ));
                 };
-                section.payload.push_str(&fields.join("\t"));
+                section.payload.push_str(row.line());
                 section.payload.push('\n');
             }
             ["row_begin", row_id, begin_snapshot, values @ ..] => {

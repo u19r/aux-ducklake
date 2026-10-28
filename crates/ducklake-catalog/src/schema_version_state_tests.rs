@@ -7,11 +7,11 @@ mod tests {
         keys::{catalog_snapshot_version_key, current_schema_version_key},
         latest_snapshot,
         schema_version_state::{
-            load_catalog_snapshot_version, load_current_schema_version,
-            load_schema_version_begin_snapshot, load_schema_versions_at, stage_next_schema_version,
+            load_catalog_snapshot_version, load_schema_version, load_schema_version_begin_snapshot,
+            load_schema_versions_at, stage_next_schema_version,
         },
     };
-    use std::collections::BTreeSet;
+    use std::{cell::Cell, collections::BTreeSet};
 
     #[test]
     fn given_schema_version_key_missing_when_staging_next_version_then_version_becomes_one() {
@@ -23,7 +23,10 @@ mod tests {
         stage_next_schema_version(&kv, &mut batch, catalog, &snapshot).unwrap();
         kv.commit(batch).unwrap();
 
-        assert_eq!(load_current_schema_version(&kv, catalog).unwrap(), Some(1));
+        assert_eq!(
+            load_schema_version(&kv, &current_schema_version_key(catalog)).unwrap(),
+            Some(1)
+        );
         assert_eq!(
             load_catalog_snapshot_version(&kv, catalog).unwrap(),
             Some(1)
@@ -48,7 +51,10 @@ mod tests {
         stage_next_schema_version(&kv, &mut second, catalog, &second_snapshot).unwrap();
         kv.commit(second).unwrap();
 
-        assert_eq!(load_current_schema_version(&kv, catalog).unwrap(), Some(2));
+        assert_eq!(
+            load_schema_version(&kv, &current_schema_version_key(catalog)).unwrap(),
+            Some(2)
+        );
         assert_eq!(
             load_catalog_snapshot_version(&kv, catalog).unwrap(),
             Some(2)
@@ -82,6 +88,111 @@ mod tests {
                 Some(&expected_version)
             );
         }
+    }
+
+    #[test]
+    fn given_long_schema_history_when_reading_recent_orders_then_versions_match_point_reads() {
+        use crate::keys::schema_version_history_key;
+        use crate::schema_version_state::load_schema_version_at;
+        use std::time::Instant;
+        let mut kv = FakeOrderedCatalogKv::new();
+        let catalog = CatalogId(1);
+        let mut batch = KvBatch::new();
+        for value in 1..=20_000_u128 {
+            batch.put(
+                schema_version_history_key(catalog, CatalogOrderId::uuid_v7(value * 2)),
+                (value as u64).to_be_bytes().to_vec(),
+            );
+        }
+        kv.commit(batch).unwrap();
+        for values in [
+            vec![],
+            vec![0],
+            vec![39_990],
+            vec![39_989, 39_990, 39_993, 40_002],
+            vec![0, 40_002],
+        ] {
+            let orders = values
+                .into_iter()
+                .map(CatalogOrderId::uuid_v7)
+                .collect::<BTreeSet<_>>();
+            let expected = orders
+                .iter()
+                .map(|order| {
+                    (
+                        *order,
+                        load_schema_version_at(&kv, catalog, *order).unwrap(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                load_schema_versions_at(&kv, catalog, &orders).unwrap(),
+                expected
+            );
+        }
+        let recent = [39_989, 39_990, 39_993, 40_002]
+            .into_iter()
+            .map(CatalogOrderId::uuid_v7)
+            .collect();
+        let measured = SchemaHistoryCountingKv {
+            inner: &kv,
+            rows: Cell::new(0),
+            scans: Cell::new(0),
+        };
+        load_schema_versions_at(&measured, catalog, &recent).unwrap();
+        assert_eq!(
+            measured.rows.get(),
+            7,
+            "one predecessor and six interval rows, not all 20,000 history entries"
+        );
+        assert_eq!(measured.scans.get(), 2);
+        let full = [0, 40_002]
+            .into_iter()
+            .map(CatalogOrderId::uuid_v7)
+            .collect();
+        let singleton = BTreeSet::from([CatalogOrderId::uuid_v7(39_993)]);
+        for (name, orders) in [("recent", recent), ("full", full), ("singleton", singleton)] {
+            let started = Instant::now();
+            for _ in 0..100 {
+                std::hint::black_box(load_schema_versions_at(&kv, catalog, &orders).unwrap());
+            }
+            eprintln!("schema-history {name} 100 requests {:?}", started.elapsed());
+        }
+        assert!(
+            load_schema_versions_at(
+                &kv,
+                CatalogId(2),
+                &BTreeSet::from([CatalogOrderId::uuid_v7(40_002)])
+            )
+            .unwrap()
+            .values()
+            .all(|value| *value == 0)
+        );
+    }
+
+    #[test]
+    fn given_malformed_selected_schema_version_when_reading_then_error_is_preserved() {
+        use crate::keys::schema_version_history_key;
+        let mut kv = FakeOrderedCatalogKv::new();
+        let catalog = CatalogId(1);
+        let order = CatalogOrderId::uuid_v7(7);
+        let mut batch = KvBatch::new();
+        batch.put(schema_version_history_key(catalog, order), vec![1]);
+        kv.commit(batch).unwrap();
+        for orders in [
+            BTreeSet::from([order]),
+            BTreeSet::from([CatalogOrderId::uuid_v7(0), order]),
+        ] {
+            assert!(matches!(
+                load_schema_versions_at(&kv, catalog, &orders),
+                Err(crate::CatalogError::InvalidKey(_))
+            ));
+        }
+        assert!(
+            load_schema_versions_at(&kv, catalog, &BTreeSet::new())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -158,5 +269,39 @@ mod tests {
             load_catalog_snapshot_version(&kv, catalog).unwrap(),
             Some(catalog_snapshot_version_before + 1)
         );
+    }
+    struct SchemaHistoryCountingKv<'a> {
+        inner: &'a FakeOrderedCatalogKv,
+        rows: Cell<usize>,
+        scans: Cell<usize>,
+    }
+
+    impl crate::OrderedCatalogKv for SchemaHistoryCountingKv<'_> {
+        fn get(&self, key: &[u8]) -> crate::CatalogResult<Option<Vec<u8>>> {
+            Ok(self.inner.get(key))
+        }
+        fn scan_prefix(
+            &self,
+            prefix: &[u8],
+            direction: crate::RangeDirection,
+            limit: usize,
+        ) -> crate::CatalogResult<Vec<crate::RangeItem>> {
+            Ok(self.inner.scan_prefix(prefix, direction, limit))
+        }
+        fn scan_range(
+            &self,
+            start: &[u8],
+            end: &[u8],
+            direction: crate::RangeDirection,
+            limit: usize,
+        ) -> crate::CatalogResult<Vec<crate::RangeItem>> {
+            let rows = self.inner.scan_range(start, end, direction, limit);
+            self.rows.set(self.rows.get() + rows.len());
+            self.scans.set(self.scans.get() + 1);
+            Ok(rows)
+        }
+        fn read_conflict_fence(&self, key: &[u8]) -> crate::CatalogResult<Option<Vec<u8>>> {
+            Ok(self.inner.read_conflict_fence(key))
+        }
     }
 }

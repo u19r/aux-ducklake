@@ -76,7 +76,7 @@ pub(crate) struct TabularFields<'a> {
 }
 
 impl<'a> TabularFields<'a> {
-    fn new(line: &'a str) -> Self {
+    pub(crate) fn new(line: &'a str) -> Self {
         let mut inline = [""; INLINE_FIELD_CAPACITY];
         let mut len = 0;
         let mut fields = line.split('\t');
@@ -91,7 +91,16 @@ impl<'a> TabularFields<'a> {
             inline[len] = field;
             len += 1;
         }
-        let mut overflow = inline.to_vec();
+        let Some(first_overflow) = fields.next() else {
+            return Self {
+                inline,
+                len,
+                overflow: None,
+            };
+        };
+        let mut overflow = Vec::with_capacity(INLINE_FIELD_CAPACITY + 1);
+        overflow.extend(inline);
+        overflow.push(first_overflow);
         overflow.extend(fields);
         Self {
             inline,
@@ -105,14 +114,6 @@ impl<'a> TabularFields<'a> {
             Some(fields) => fields,
             None => &self.inline[..self.len],
         }
-    }
-
-    pub(crate) fn to_vec(&self) -> Vec<&'a str> {
-        self.as_slice().to_vec()
-    }
-
-    pub(crate) fn join(&self, separator: &str) -> String {
-        self.as_slice().join(separator)
     }
 }
 

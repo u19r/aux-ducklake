@@ -131,7 +131,6 @@ pub(crate) fn list_inline_current_rows(
 /// Read at most the number of current rows that the runtime capture budget can
 /// account for. A bounded scan asks for one extra item so a truncated range is
 /// reported as an error instead of being mistaken for a complete snapshot.
-#[cfg(test)]
 pub(crate) fn list_inline_current_rows_bounded(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
@@ -242,7 +241,12 @@ pub(crate) fn load_inline_next_row_id(
     table_id: TableId,
     schema_id: SchemaId,
 ) -> CatalogResult<u64> {
-    let Some(value) = kv.get(&inline_next_row_id_key(catalog, table_id, schema_id))? else {
+    let value = kv.get(&inline_next_row_id_key(catalog, table_id, schema_id))?;
+    decode_inline_next_row_id(value.as_deref())
+}
+
+pub(crate) fn decode_inline_next_row_id(value: Option<&[u8]>) -> CatalogResult<u64> {
+    let Some(value) = value else {
         return Ok(0);
     };
     let bytes: [u8; 8] = value.try_into().map_err(|_| {

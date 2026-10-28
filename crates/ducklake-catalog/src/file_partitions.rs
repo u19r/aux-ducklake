@@ -3,7 +3,6 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-#[cfg(feature = "foundationdb")]
 use crate::RangeItem;
 use crate::{
     AttachedDataFile, CatalogCacheNamespace, CatalogError, CatalogId, CatalogResult, DataFileId,
@@ -164,14 +163,7 @@ pub fn list_file_partition_values(
         .into_iter()
         .map(|item| FilePartitionValueRow::decode(&item.value))
         .collect::<CatalogResult<Vec<_>>>()?;
-    rows.sort_by_key(|row| {
-        (
-            row.table_id.0,
-            row.data_file_id.0,
-            row.partition_key_index.0,
-            row.partition_value.clone(),
-        )
-    });
+    rows.sort_by(compare_partition_values);
     Ok(rows)
 }
 
@@ -188,14 +180,7 @@ pub(crate) fn list_partition_lookup_values_for_key(
         .into_iter()
         .map(|item| partition_lookup_key_row(&item, &prefix, table_id, partition_key_index))
         .collect::<CatalogResult<Vec<_>>>()?;
-    rows.sort_by_key(|row| {
-        (
-            row.table_id.0,
-            row.data_file_id.0,
-            row.partition_key_index.0,
-            row.partition_value.clone(),
-        )
-    });
+    rows.sort_by(compare_partition_values);
     Ok(rows)
 }
 
@@ -244,14 +229,7 @@ pub(crate) fn list_file_partition_values_for_data_files(
         }
     }
     rows.extend(load_missing_file_partition_values(kv, catalog, missing)?);
-    rows.sort_by_key(|row| {
-        (
-            row.table_id.0,
-            row.data_file_id.0,
-            row.partition_key_index.0,
-            row.partition_value.clone(),
-        )
-    });
+    rows.sort_by(compare_partition_values);
     Ok(rows)
 }
 
@@ -308,14 +286,7 @@ pub(crate) fn list_file_partition_values_for_data_files_and_keys(
         }
         rows.push(row);
     }
-    rows.sort_by_key(|row| {
-        (
-            row.table_id.0,
-            row.data_file_id.0,
-            row.partition_key_index.0,
-            row.partition_value.clone(),
-        )
-    });
+    rows.sort_by(compare_partition_values);
     Ok(rows)
 }
 
@@ -332,9 +303,17 @@ fn load_missing_file_partition_values(
         return load_dense_file_partition_values_uncached(kv, catalog, missing);
     }
 
+    let prefixes = missing
+        .iter()
+        .map(|key| file_partition_value_prefix(catalog, key.data_file_id))
+        .collect::<Vec<_>>();
     let mut rows = Vec::new();
-    for key in missing {
-        let file_rows = load_file_partition_values_uncached(kv, catalog, key.data_file_id)?;
+    for (key, items) in
+        missing
+            .into_iter()
+            .zip(kv.scan_prefixes(&prefixes, RangeDirection::Forward, usize::MAX)?)
+    {
+        let file_rows = decode_file_partition_values(items, catalog, key.data_file_id)?;
         insert_file_partition_values(key, file_rows.clone());
         rows.extend(file_rows);
     }
@@ -390,31 +369,20 @@ fn load_dense_file_partition_values_uncached(
     let mut rows = Vec::new();
     for key in missing {
         let mut file_rows = rows_by_file.remove(&key.data_file_id).unwrap_or_default();
-        file_rows.sort_by_key(|row| {
-            (
-                row.table_id.0,
-                row.data_file_id.0,
-                row.partition_key_index.0,
-                row.partition_value.clone(),
-            )
-        });
+        file_rows.sort_by(compare_partition_values);
         insert_file_partition_values(key, file_rows.clone());
         rows.extend(file_rows);
     }
     Ok(rows)
 }
 
-fn load_file_partition_values_uncached(
-    kv: &impl OrderedCatalogKv,
+fn decode_file_partition_values(
+    items: Vec<RangeItem>,
     catalog: CatalogId,
     data_file_id: DataFileId,
 ) -> CatalogResult<Vec<FilePartitionValueRow>> {
     let mut rows = Vec::new();
-    for item in kv.scan_prefix(
-        &file_partition_value_prefix(catalog, data_file_id),
-        RangeDirection::Forward,
-        usize::MAX,
-    )? {
+    for item in items {
         let row = FilePartitionValueRow::decode(&item.value)?;
         if row.data_file_id != data_file_id {
             return Err(CatalogError::Decode(format!(
@@ -424,14 +392,7 @@ fn load_file_partition_values_uncached(
         }
         rows.push(row);
     }
-    rows.sort_by_key(|row| {
-        (
-            row.table_id.0,
-            row.data_file_id.0,
-            row.partition_key_index.0,
-            row.partition_value.clone(),
-        )
-    });
+    rows.sort_by(compare_partition_values);
     Ok(rows)
 }
 
@@ -912,3 +873,21 @@ fn decode_u32(bytes: &[u8], field: &str) -> CatalogResult<u32> {
 #[cfg(test)]
 #[path = "file_partitions_tests.rs"]
 mod file_partitions_tests;
+
+fn compare_partition_values(
+    a: &FilePartitionValueRow,
+    b: &FilePartitionValueRow,
+) -> std::cmp::Ordering {
+    (
+        a.table_id,
+        a.data_file_id,
+        a.partition_key_index,
+        a.partition_value.as_str(),
+    )
+        .cmp(&(
+            b.table_id,
+            b.data_file_id,
+            b.partition_key_index,
+            b.partition_value.as_str(),
+        ))
+}

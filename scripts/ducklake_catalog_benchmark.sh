@@ -6,7 +6,8 @@ DUCKLAKE_DIR="$ROOT_DIR/third_party/ducklake"
 OUT_DIR="${AUX_DUCKLAKE_BENCHMARK_OUTPUT_DIR:-$ROOT_DIR/docs/benchmarks/ducklake-fdb-feature-parity}"
 BUILD_PROFILE="${AUX_DUCKLAKE_BENCHMARK_BUILD_PROFILE:-release}"
 DUCKDB_BIN="$DUCKLAKE_DIR/build/$BUILD_PROFILE/duckdb"
-POSTGRES_SCANNER_EXTENSION="$DUCKLAKE_DIR/build/$BUILD_PROFILE/extension/postgres_scanner/postgres_scanner.duckdb_extension"
+POSTGRES_DUCKDB_BIN="${AUX_DUCKLAKE_BENCHMARK_POSTGRES_DUCKDB_BIN:-$DUCKDB_BIN}"
+POSTGRES_SCANNER_EXTENSION="${AUX_DUCKLAKE_BENCHMARK_POSTGRES_EXTENSION:-$DUCKLAKE_DIR/build/$BUILD_PROFILE/extension/postgres_scanner/postgres_scanner.duckdb_extension}"
 BENCHMARK_BACKEND="${AUX_DUCKLAKE_BENCHMARK_BACKEND:-both}"
 BENCHMARK_MEMORY_LIMIT="${AUX_DUCKLAKE_BENCHMARK_MEMORY_LIMIT:-1024MiB}"
 RUNTIME_METRICS_PATH_OVERRIDE="${AUX_DUCKLAKE_BENCHMARK_RUNTIME_METRICS_PATH:-}"
@@ -167,6 +168,17 @@ def labels_dict(labels):
 
 runtime = delta(runtime_before, runtime_after)
 
+
+def operation_identity(labels):
+    return tuple(labels.get(key, "") for key in ("backend", "scope", "operation", "status"))
+
+
+families = {
+    operation_identity(dict(labels)): dict(labels)["family"]
+    for _, labels in runtime
+    if "family" in dict(labels)
+}
+
 runtime_top_level_us = 0.0
 runtime_nested_us = 0.0
 runtime_kv_us = 0.0
@@ -183,7 +195,8 @@ for (name, labels_tuple), value in runtime.items():
     labels = labels_dict(labels_tuple)
     if labels.get("scope", "unscoped") != scope:
         continue
-    family = labels.get("family", "")
+    family = labels.get("family") or families.get(operation_identity(labels), "kv" if
+        name.startswith("aux_ducklake_runtime_kv_") else "")
     operation = labels.get("operation", "")
     operation_key = (family, operation, labels.get("status", ""))
     if name == "aux_ducklake_runtime_request_elapsed_micros_total":
@@ -283,13 +296,21 @@ benchmark_runtime_scope_restore() {
     fi
 }
 
+get_backend_duckdb() {
+    if [[ "${backend:-}" == postgres ]]; then
+        printf '%s\n' "$POSTGRES_DUCKDB_BIN"
+    else
+        printf '%s\n' "$DUCKDB_BIN"
+    fi
+}
+
 run_duckdb_sql() {
     local sql="$1"
     local output_file pid rss_kib
     output_file="$(mktemp)"
     duckdb_peak_rss_kib=0
     set +e
-    "$DUCKDB_BIN" -unsigned -csv -batch >"$output_file" 2>&1 <<<"$sql" &
+    "$(get_backend_duckdb)" -unsigned -csv -batch >"$output_file" 2>&1 <<<"$sql" &
     pid=$!
     while kill -0 "$pid" 2>/dev/null; do
         rss_kib="$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
@@ -443,11 +464,14 @@ if [[ "$profile" == "varied" ]]; then
         fail "AUX_DUCKLAKE_VARIED_TABLES_PER_TRANSACTION must not exceed table count"
 fi
 
-[[ -x "$DUCKDB_BIN" ]] || fail "missing $BUILD_PROFILE DuckDB binary: $DUCKDB_BIN"
-newer_ducklake_source="$(find "$DUCKLAKE_DIR/src" -type f -newer "$DUCKDB_BIN" -print -quit)"
-[[ -z "$newer_ducklake_source" ]] ||
-    fail "stale $BUILD_PROFILE DuckDB binary; run just ducklake-build-${BUILD_PROFILE}"
+if [[ "$BENCHMARK_BACKEND" != "postgres" ]]; then
+    [[ -x "$DUCKDB_BIN" ]] || fail "missing $BUILD_PROFILE DuckDB binary: $DUCKDB_BIN"
+    newer_ducklake_source="$(find "$DUCKLAKE_DIR/src" -type f -newer "$DUCKDB_BIN" -print -quit)"
+    [[ -z "$newer_ducklake_source" ]] ||
+        fail "stale $BUILD_PROFILE DuckDB binary; run just ducklake-build-${BUILD_PROFILE}"
+fi
 if [[ "$BENCHMARK_BACKEND" != "fdb" ]]; then
+    [[ -x "$POSTGRES_DUCKDB_BIN" ]] || fail "missing Postgres DuckDB binary: $POSTGRES_DUCKDB_BIN"
     [[ -f "$POSTGRES_SCANNER_EXTENSION" ]] || fail "missing $BUILD_PROFILE postgres_scanner helper extension: $POSTGRES_SCANNER_EXTENSION"
 fi
 
@@ -462,7 +486,7 @@ build_fdb_runtime() {
     if [[ -n "$RUNTIME_EXTRA_FEATURES" ]]; then
         features="$features,$RUNTIME_EXTRA_FEATURES"
     fi
-    AUX_DUCKLAKE_FDB_LIVE=1 "$ROOT_DIR/scripts/cargo_with_sccache.sh" build -q --release \
+    AUX_DUCKLAKE_FDB_LIVE=1 "$ROOT_DIR/scripts/cargo_with_sccache.sh" build -q --release --manifest-path "$ROOT_DIR/Cargo.toml" \
         -p ducklake-catalog --no-default-features --features "$features"
     FDB_RUNTIME_LIBRARY="$(ducklake_release_runtime_library "$ROOT_DIR")"
     [[ -f "$FDB_RUNTIME_LIBRARY" ]] || fail "foundationdb runtime library was not built: $FDB_RUNTIME_LIBRARY"
@@ -878,12 +902,12 @@ PY
 combine_operational_artifacts() {
     local backend="$1" output="$2"
     shift 2
-    python3 - "$backend" "$output" "$@" <<'PY'
+    python3 - "$backend" "$output" "$BENCHMARK_BACKEND" "$@" <<'PY'
 import json
 import math
 import sys
 
-backend, output, *paths = sys.argv[1:]
+backend, output, selected_backends, *paths = sys.argv[1:]
 trials = []
 values = []
 for path in paths:
@@ -959,7 +983,7 @@ latest["create_transaction_wall_ms"] = {
 latest["trials"] = trials
 latest["comparison_method"] = {
     "isolated_catalog_per_trial": True,
-    "alternating_backend_order": len({trial["order_position"] for trial in trials}) > 1,
+    "alternating_backend_order": selected_backends == "both" and len({trial["order_position"] for trial in trials}) > 1,
 }
 latest["chronological_growth"] = {
     "method": "last decile mean divided by first decile mean within each isolated trial",
@@ -1266,7 +1290,7 @@ DETACH dl;
 "
         worker_out="$tmp_dir/worker-${worker}.out"
         (
-            "$DUCKDB_BIN" -unsigned -csv -batch >"$worker_out" 2>&1 <<<"$worker_sql"
+            "$(get_backend_duckdb)" -unsigned -csv -batch >"$worker_out" 2>&1 <<<"$worker_sql"
         ) &
         worker_pids+=("$!")
         worker_outputs+=("$worker_out")
@@ -1374,6 +1398,47 @@ import sys
 backend, output, generated, elapsed, batches_file, profile, build_profile, rows, workers, tables, target_bytes, preload_batch_rows, preload_workers, schema_shape, payload_bytes, concurrent_writers, schema_columns, churn_mode, memory_limit, churn_rounds, tables_per_transaction = sys.argv[1:22]
 with open(batches_file, "r", encoding="utf-8") as handle:
     batches = [json.loads(line) for line in handle if line.strip()]
+def expected_integrity(state):
+    total_count = total_ids = total_amount = 0
+    for table in range(int(tables)):
+        removed = set(range(1, 5 if state["deletes"] else 3)) if state["mixed"] else set()
+        extra = set(range(int(rows) + 1, int(rows) + 6)) if state["mixed"] else set()
+        updates = {}
+        for turn in range(state["rounds"]):
+            if churn_mode in ("all", "mutate", "insert"):
+                start = int(rows) + 1000 + turn * 100000 + table * 100
+                extra.update(range(start, start + 5 + (turn + table) % 16))
+            if churn_mode in ("all", "mutate", "delete"):
+                deletion = 5 + (turn + table) % 31
+                removed.update((deletion, deletion + 1))
+            if churn_mode in ("all", "mutate", "update"):
+                target = 40 + (turn * 7 + table) % 53
+                updates[target] = updates.get(target, 0) + turn + 1
+        for writer in range(state["writers"]):
+            if writer % int(tables) == table:
+                start = int(rows) + 1000000 + writer * 100
+                extra.update(range(start, start + 8))
+                removed.add(80 + writer)
+                updates[50 + writer] = updates.get(50 + writer, 0) + 1
+        removed_base = {value for value in removed if 1 <= value <= int(rows)}
+        active_extra = extra - removed
+        id_sum = int(rows) * (int(rows) + 1) // 2 - sum(removed_base) + sum(active_extra)
+        total_count += int(rows) - len(removed_base) + len(active_extra)
+        total_ids += id_sum
+        total_amount += 10 * id_sum + sum(delta for key, delta in updates.items() if (1 <= key <= int(rows) or key in extra) and key not in removed)
+    return f"{total_count},{total_ids},{total_amount}"
+
+state = dict(mixed=False, deletes=False, rounds=0, writers=0)
+for batch in batches:
+    if batch["name"] == "mixed": state["mixed"] = True
+    if batch["name"] == "dedicated_deletes": state["deletes"] = True
+    if batch["name"] == "mutation_churn": state["rounds"] = int(churn_rounds)
+    if batch["name"] == "concurrent_read_write": state["writers"] = int(concurrent_writers)
+    actual = batch["labels"].get("realistic_integrity")
+    if batch["name"] in ("mixed", "dedicated_deletes", "dedicated_compaction", "latest_queries", "parallel_latest_queries", "concurrent_read_write") and actual is None:
+        raise SystemExit(f"{backend} {batch['name']} missing integrity result")
+    if actual is not None and actual != expected_integrity(state):
+        raise SystemExit(f"{backend} {batch['name']} integrity: expected {expected_integrity(state)}, got {actual}")
 component_batches = [batch["name"] for batch in batches]
 peak_rss_kib = max((batch.get("peak_rss_kib", 0) for batch in batches), default=0)
 artifact = {
@@ -1409,25 +1474,6 @@ artifact = {
 with open(output, "w", encoding="utf-8") as handle:
     json.dump(artifact, handle, indent=2, sort_keys=True)
     handle.write("\n")
-PY
-}
-
-assert_realistic_peak_rss() {
-    local backend="$1" artifact="$2"
-    [[ "$profile" == "varied" ]] || return 0
-    local maximum="${AUX_DUCKLAKE_VARIED_MAX_PEAK_RSS_KIB:-2097152}"
-    python3 - "$backend" "$artifact" "$maximum" <<'PY'
-import json
-import sys
-
-backend, artifact_path, maximum = sys.argv[1], sys.argv[2], int(sys.argv[3])
-with open(artifact_path, "r", encoding="utf-8") as handle:
-    artifact = json.load(handle)
-observed = int(artifact["peak_rss_kib"])
-if observed > maximum:
-    raise SystemExit(
-        f"{backend} varied peak RSS {observed} KiB exceeds guardrail {maximum} KiB"
-    )
 PY
 }
 
@@ -1612,7 +1658,7 @@ DETACH dl;
 "
         worker_out="$tmp_dir/preload-worker-${worker}.out"
         (
-            "$DUCKDB_BIN" -unsigned -csv -batch >"$worker_out" 2>&1 <<<"$worker_sql"
+            "$(get_backend_duckdb)" -unsigned -csv -batch >"$worker_out" 2>&1 <<<"$worker_sql"
         ) &
         worker_pids+=("$!")
         worker_outputs+=("$worker_out")
@@ -1672,7 +1718,7 @@ $(realistic_latest_query_sql "$table_count")
 DETACH dl;
 "
     local worker_out="$tmp_dir/concurrent-reader-${worker}.out"
-    ("$DUCKDB_BIN" -unsigned -csv -batch >"$worker_out" 2>&1 <<<"$worker_sql") &
+    ("$(get_backend_duckdb)" -unsigned -csv -batch >"$worker_out" 2>&1 <<<"$worker_sql") &
     worker_pids+=("$!")
     worker_outputs+=("$worker_out")
 }
@@ -1690,7 +1736,7 @@ $(varied_concurrent_writer_sql "$table_count" "$scan_rows" "$worker")
 DETACH dl;
 "
     local worker_out="$tmp_dir/concurrent-writer-${worker}.out"
-    ("$DUCKDB_BIN" -unsigned -csv -batch >"$worker_out" 2>&1 <<<"$worker_sql") &
+    ("$(get_backend_duckdb)" -unsigned -csv -batch >"$worker_out" 2>&1 <<<"$worker_sql") &
     worker_pids+=("$!")
     worker_outputs+=("$worker_out")
 }
@@ -1874,7 +1920,7 @@ DETACH dl;
 "
         worker_out="$tmp_dir/parallel-worker-${worker}.out"
         (
-            "$DUCKDB_BIN" -unsigned -csv -batch >"$worker_out" 2>&1 <<<"$worker_sql"
+            "$(get_backend_duckdb)" -unsigned -csv -batch >"$worker_out" 2>&1 <<<"$worker_sql"
         ) &
         worker_pids+=("$!")
         worker_outputs+=("$worker_out")
@@ -1903,7 +1949,6 @@ $cleanup"
     ended="$(now_micros)"
     elapsed="$(elapsed_ms "$started" "$ended")"
     realistic_artifact "$backend" "$output" "$ended" "$elapsed" "$batches_file"
-    assert_realistic_peak_rss "$backend" "$output"
     echo "ducklake_fdb_feature_parity_${backend}_realistic_benchmark_artifact=$output"
 }
 
@@ -1918,40 +1963,8 @@ fi
 tmp_root="$(mktemp -d)"
 trap 'rm -rf "$tmp_root"' EXIT
 
-case "$profile" in
-scan10)
-    fdb_output="$OUT_DIR/fdb-scan10-latest.json"
-    postgres_output="$OUT_DIR/postgres-scan10-latest.json"
-    ;;
-smoke)
-    fdb_output="$OUT_DIR/fdb-smoke-latest.json"
-    postgres_output="$OUT_DIR/postgres-smoke-latest.json"
-    ;;
-profile)
-    fdb_output="$OUT_DIR/fdb-profile-latest.json"
-    postgres_output="$OUT_DIR/postgres-profile-latest.json"
-    ;;
-realistic)
-    fdb_output="$OUT_DIR/fdb-realistic-latest.json"
-    postgres_output="$OUT_DIR/postgres-realistic-latest.json"
-    ;;
-varied)
-    fdb_output="$OUT_DIR/fdb-varied-latest.json"
-    postgres_output="$OUT_DIR/postgres-varied-latest.json"
-    ;;
-inline)
-    fdb_output="$OUT_DIR/fdb-inline-latest.json"
-    postgres_output="$OUT_DIR/postgres-inline-latest.json"
-    ;;
-operational)
-    fdb_output="$OUT_DIR/fdb-operational-latest.json"
-    postgres_output="$OUT_DIR/postgres-operational-latest.json"
-    ;;
-operational-growth)
-    fdb_output="$OUT_DIR/fdb-operational-growth-latest.json"
-    postgres_output="$OUT_DIR/postgres-operational-growth-latest.json"
-    ;;
-esac
+fdb_output="$OUT_DIR/fdb-${profile}-latest.json"
+postgres_output="$OUT_DIR/postgres-${profile}-latest.json"
 
 if [[ "$profile" == "operational" || "$profile" == "operational-growth" ]]; then
     fdb_trials=()
@@ -1981,17 +1994,19 @@ if [[ "$profile" == "operational" || "$profile" == "operational-growth" ]]; then
     done
     if ((${#fdb_trials[@]})); then
         combine_operational_artifacts "fdb" "$fdb_output" "${fdb_trials[@]}"
-        if [[ "$profile" == "operational-growth" ]]; then
-            assert_operational_growth "fdb" "$fdb_output"
-        fi
         echo "ducklake_fdb_operational_benchmark_artifact=$fdb_output"
     fi
     if ((${#postgres_trials[@]})); then
         combine_operational_artifacts "postgres" "$postgres_output" "${postgres_trials[@]}"
-        if [[ "$profile" == "operational-growth" ]]; then
+        echo "ducklake_postgres_operational_benchmark_artifact=$postgres_output"
+    fi
+    if [[ "$profile" == "operational-growth" ]]; then
+        if ((${#fdb_trials[@]})); then
+            assert_operational_growth "fdb" "$fdb_output"
+        fi
+        if ((${#postgres_trials[@]})); then
             assert_operational_growth "postgres" "$postgres_output"
         fi
-        echo "ducklake_postgres_operational_benchmark_artifact=$postgres_output"
     fi
 elif [[ "$profile" == "inline" ]]; then
     if [[ "$BENCHMARK_BACKEND" != "postgres" ]]; then

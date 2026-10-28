@@ -136,7 +136,20 @@ impl InlineHistoryRequest {
             kv,
             inline_table_prefix(self.catalog, self.table, self.schema),
         );
+        payload.end = crate::keys::prefix_end(&crate::inline_data::inline_table_payload_prefix(
+            self.catalog,
+            self.table,
+            self.schema,
+            self.snapshot,
+        ));
         let mut deletions = InlineHistoryRangeCursor::new(kv, self.deletion_prefix());
+        deletions.end = crate::keys::table_schema_kind_inline_row_change_scan_end(
+            self.catalog,
+            self.table,
+            self.schema,
+            InlineRowChangeKind::Deleted,
+            self.snapshot,
+        );
         let ended = self.load_ended_groups(kv, accumulator.max_history_metadata_bytes)?;
         self.fold_history(&mut payload, &mut deletions, ended, accumulator)
     }
@@ -159,6 +172,9 @@ impl InlineHistoryRequest {
         prefix.extend_from_slice(&self.table.0.to_be_bytes());
         prefix.push(b'/');
         let mut cursor = InlineHistoryRangeCursor::new(kv, prefix.clone());
+        let mut through_snapshot = prefix.clone();
+        through_snapshot.extend_from_slice(&self.snapshot.as_bytes());
+        cursor.end = prefix_end(&through_snapshot);
         let mut ended = BTreeSet::new();
         let mut bytes = 0usize;
         while let Some(marker) = next_inline_end_marker(&mut cursor, &prefix, self.snapshot)? {

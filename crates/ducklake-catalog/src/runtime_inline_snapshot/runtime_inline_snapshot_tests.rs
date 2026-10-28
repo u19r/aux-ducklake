@@ -280,10 +280,19 @@ fn canonical_payload_bound_supports_one_hundred_inline_rows() {
         CapturedInlineRows {
             rows,
             next_row_id: 100,
-        },
+            ..CapturedInlineRows::default()
+        }
+        .into(),
     );
-    let weight = capture_weight(&CapturedInlineRowsBySchema { rows: by_schema }).unwrap();
+    let mut capture = CapturedInlineRowsBySchema { rows: by_schema };
+    let row_weight = capture_weight(&capture).unwrap();
+    let derived = Arc::get_mut(capture.rows.get_mut(&SchemaId(0)).unwrap()).unwrap();
+    derived.global_stats = String::with_capacity(1024);
+    derived.aggregate_stats = String::with_capacity(2048);
+    let derived_bytes = derived.global_stats.capacity() + derived.aggregate_stats.capacity();
+    let weight = capture_weight(&capture).unwrap();
 
+    assert_eq!(weight, row_weight + derived_bytes);
     assert!(weight >= 100 * INLINE_PAYLOAD_LIMIT_BYTES);
     assert!(weight < MAX_CAPTURE_CACHE_BYTES);
 }
@@ -308,7 +317,9 @@ fn canonical_payload_bound_supports_one_hundred_rows_per_schema_version() {
             CapturedInlineRows {
                 rows,
                 next_row_id: 100,
-            },
+                ..CapturedInlineRows::default()
+            }
+            .into(),
         );
     }
     let weight = capture_weight(&CapturedInlineRowsBySchema { rows: by_schema }).unwrap();
@@ -594,7 +605,7 @@ fn active_context_cache_eviction_fails_closed_without_latest_fallback() {
     let mut request = crate::store::begin_runtime_read_request(Some(91));
     let result = captured_inline_current_rows_or_latest(None, true, || {
         fallback_called = true;
-        Ok(Some((Vec::new(), 0)))
+        Ok(Some((Vec::<(u64, InlineCurrentRow)>::new(), 0)))
     });
     assert!(matches!(
         result,
@@ -610,7 +621,7 @@ fn no_context_cache_miss_keeps_latest_fallback() {
     let mut fallback_called = false;
     let result = captured_inline_current_rows_or_latest(None, false, || {
         fallback_called = true;
-        Ok(Some((Vec::new(), 17)))
+        Ok(Some((Vec::<(u64, InlineCurrentRow)>::new(), 17)))
     })
     .unwrap();
 
@@ -635,4 +646,151 @@ fn context_cleanup_requires_namespace_catalog_and_context_identity() {
     assert!(!key.belongs_to(other_namespace, CatalogId(7), 9));
     assert!(!key.belongs_to(namespace, other_catalog, 9));
     assert!(!key.belongs_to(namespace, CatalogId(7), 10));
+}
+
+#[derive(Clone)]
+struct HistoryCapturePause {
+    entered: mpsc::SyncSender<()>,
+    resume: Arc<Mutex<mpsc::Receiver<()>>>,
+}
+
+static HISTORY_CAPTURE_PAUSES: Mutex<BTreeMap<CatalogCacheNamespace, HistoryCapturePause>> =
+    Mutex::new(BTreeMap::new());
+
+pub(super) fn pause_history_capture(namespace: CatalogCacheNamespace) {
+    let pause = HISTORY_CAPTURE_PAUSES
+        .lock()
+        .unwrap()
+        .get(&namespace)
+        .cloned();
+    if let Some(pause) = pause {
+        pause.entered.send(()).unwrap();
+        pause
+            .resume
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+    }
+}
+
+#[test]
+fn given_live_cleanup_during_historical_capture_when_first_read_runs_then_rows_remain_pinned() {
+    if std::env::var("AUX_DUCKLAKE_FDB_LIVE").as_deref() != Ok("1") {
+        return;
+    }
+    use crate::{
+        ColumnId, FdbOrderedCatalogKv, InlinedTableRow, MutableCatalogKv, OrderedCatalogKv,
+        TableColumnRow, TableRow,
+    };
+    let catalog = CatalogId(987_063);
+    let table_id = TableId(1);
+    let schema = SchemaId(1);
+    let context = 70_103;
+    let prefix = format!(
+        "aux-ducklake-test/capture-cleanup/{}/{}/",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let mut kv = FdbOrderedCatalogKv::open_default_with_prefix(prefix.as_bytes()).unwrap();
+    kv.initialize_catalog_if_absent_versionstamped(catalog)
+        .unwrap();
+    let mut table = TableRow::with_catalog_metadata(
+        table_id,
+        SchemaId(0),
+        "capture-race",
+        "capture_race",
+        "main/capture_race",
+        vec![TableColumnRow::new(
+            ColumnId(1),
+            "value",
+            "INTEGER",
+            false,
+            None,
+        )],
+        CatalogOrderId::uuid_v7(0),
+    );
+    table = kv
+        .create_table_versionstamped(catalog, table, None)
+        .unwrap();
+    table
+        .inlined_data_tables
+        .push(InlinedTableRow::new("ducklake_inlined_data_1_1", 1));
+    kv.register_inline_table_payload_with_table_versionstamped(
+        catalog,
+        table.clone(),
+        schema,
+        b"row\t0\ti:1\n".to_vec(),
+    )
+    .unwrap();
+    let snapshot = {
+        let _request = crate::store::begin_runtime_read_request(Some(context));
+        crate::latest_snapshot(&kv, catalog).unwrap().unwrap()
+    };
+    kv.commit_delete_inline_table_rows_versionstamped(catalog, table_id, schema, &[0], None)
+        .unwrap();
+    kv.register_inline_table_payload_with_table_versionstamped(
+        catalog,
+        table,
+        schema,
+        b"row\t0\ti:2\n".to_vec(),
+    )
+    .unwrap();
+    let namespace = kv
+        .catalog_cache_namespace()
+        .with_read_context(Some(context));
+    // Exercise historical reconstruction after a physical lease renewal.
+    crate::runtime_read_versions::end_context(namespace, context);
+    let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+    let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+    HISTORY_CAPTURE_PAUSES.lock().unwrap().insert(
+        namespace,
+        HistoryCapturePause {
+            entered: entered_tx,
+            resume: Arc::new(Mutex::new(resume_rx)),
+        },
+    );
+    let reader = kv.clone();
+    let worker = thread::spawn(move || {
+        let _request = crate::store::begin_runtime_read_request(Some(context));
+        let payload = crate::runtime_inline_rows::read_foundationdb_inline_rows_payload(
+            &reader,
+            catalog,
+            crate::runtime_inline_rows::ReadInlineRowsPayload {
+                table_name: "ducklake_inlined_data_1_1".to_owned(),
+                snapshot: Some(crate::runtime_snapshot_range::ReadSnapshot::new(
+                    crate::DuckLakeSnapshotId(snapshot.sequence.0),
+                )),
+                include_flushed: false,
+                include_deleted: false,
+            },
+        );
+        super::capture::end_runtime_read_context(&reader, catalog, context);
+        payload
+    });
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let mut cleanup = KvBatch::new();
+    for prefix in [
+        crate::inline_data::inline_table_prefix(catalog, table_id, schema),
+        crate::keys::inline_current_row_prefix(catalog, table_id, schema),
+    ] {
+        for item in kv
+            .scan_prefix(&prefix, crate::RangeDirection::Forward, usize::MAX)
+            .unwrap()
+        {
+            cleanup.delete(item.key);
+        }
+    }
+    kv.commit(cleanup).unwrap();
+    resume_tx.send(()).unwrap();
+    let payload = String::from_utf8(worker.join().unwrap().unwrap()).unwrap();
+    HISTORY_CAPTURE_PAUSES.lock().unwrap().remove(&namespace);
+    assert_eq!(payload.matches("row_change\t").count(), 1, "{payload}");
+    assert!(payload.contains("\ti:1\n"), "{payload}");
+    assert!(!payload.contains("\ti:2\n"), "{payload}");
+    let database = crate::fdb_runtime::shared_foundationdb_database(None).unwrap();
+    crate::clear_foundationdb_prefix(&database, kv.key_prefix()).unwrap();
 }

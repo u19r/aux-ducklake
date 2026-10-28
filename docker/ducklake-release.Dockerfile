@@ -1,8 +1,9 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.28
+# Versions: software-versions.snapshot.json; details in software-version-consumers.md.
 
 FROM registry.access.redhat.com/ubi9/ubi:9.8@sha256:217dd5692d369799d34d09ffb6f5f3404efebc7900834490fdf9ae92fd6721d4 AS builder
 
-ARG FDB_VERSION=7.4.6
+ARG FDB_VERSION=7.4.8
 ARG CROARING_VERSION=5.3.2
 ARG POSTGRES_VERSION=18.6
 ARG DUCKDB_PLATFORM=linux_amd64
@@ -102,7 +103,7 @@ ARG CURL_SHA256=8dadd7d2536a314f982ad05a651b713f426bf7d02cc2c76cffb9796f2218e6c5
 RUN set -eux; \
     dnf install -y libnghttp2-devel zlib-devel; \
     dnf clean all; \
-    curl -fsSLo /tmp/curl.tar.xz "https://curl.se/download/curl-${CURL_VERSION}.tar.xz"; \
+    curl -fsSLo /tmp/curl.tar.xz "https://github.com/curl/curl/releases/download/curl-8_23_0/curl-8.23.0.tar.xz"; \
     printf '%s  %s\n' "$CURL_SHA256" /tmp/curl.tar.xz | sha256sum -c -; \
     tar -xf /tmp/curl.tar.xz -C /tmp; \
     cmake -G Ninja -S "/tmp/curl-${CURL_VERSION}" -B /tmp/curl-build \

@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     io::Write as _,
 };
@@ -22,7 +23,32 @@ pub(super) fn payload_with_commit_header(
     include_read_snapshot: bool,
     include_commit_metadata: bool,
 ) -> CatalogResult<Vec<u8>> {
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(
+        payload
+            .len()
+            .saturating_add(crate::constants::COMMIT_HEADER_RESERVE_BYTES)
+            .saturating_add(
+                intent
+                    .commit_metadata
+                    .author
+                    .as_ref()
+                    .map_or(0, String::len),
+            )
+            .saturating_add(
+                intent
+                    .commit_metadata
+                    .commit_message
+                    .as_ref()
+                    .map_or(0, String::len),
+            )
+            .saturating_add(
+                intent
+                    .commit_metadata
+                    .commit_extra_info
+                    .as_ref()
+                    .map_or(0, String::len),
+            ),
+    );
     writeln!(
         &mut out,
         "commit_snapshot\t{}",
@@ -92,11 +118,11 @@ pub(super) fn include_read_snapshot_for_storage_intents(
     intent.metadata_intents.is_empty()
 }
 
-pub(super) fn remap_inline_payload(
+pub(super) fn remap_inline_payload<'a>(
     operation: RuntimeInlineOperation,
-    payload: &[u8],
+    payload: &'a [u8],
     table_id_remaps: &BTreeMap<TableId, TableId>,
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<Cow<'a, [u8]>> {
     remap_tabular_payload(payload, table_id_remaps, |fields, remaps| match operation {
         RuntimeInlineOperation::RegisterInlineTables
         | RuntimeInlineOperation::RegisterInlineRows
@@ -115,11 +141,11 @@ pub(super) fn remap_inline_payload(
     })
 }
 
-pub(super) fn remap_compaction_payload(
+pub(super) fn remap_compaction_payload<'a>(
     operation: RuntimeCompactionOperation,
-    payload: &[u8],
+    payload: &'a [u8],
     table_id_remaps: &BTreeMap<TableId, TableId>,
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<Cow<'a, [u8]>> {
     remap_tabular_payload(payload, table_id_remaps, |fields, remaps| match operation {
         RuntimeCompactionOperation::MergeAdjacentFiles
         | RuntimeCompactionOperation::RewriteDeleteFiles
@@ -153,12 +179,12 @@ pub(super) fn remap_compaction_payload(
     })
 }
 
-pub(super) fn remap_data_mutation_payload(
-    payload: &[u8],
+pub(super) fn remap_data_mutation_payload<'a>(
+    payload: &'a [u8],
     table_id_remaps: &BTreeMap<TableId, TableId>,
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<Cow<'a, [u8]>> {
     remap_tabular_payload(payload, table_id_remaps, |fields, remaps| {
-        match fields.first().map(String::as_str) {
+        match fields.first().map(AsRef::as_ref) {
             Some("file") => remap_table_id_field(fields, 2, remaps)?,
             Some("file_partition") => remap_table_id_field(fields, 2, remaps)?,
             Some("file_partition_set") => remap_table_id_field(fields, 2, remaps)?,
@@ -173,29 +199,36 @@ pub(super) fn remap_data_mutation_payload(
     })
 }
 
-pub(super) fn remap_tabular_payload(
-    payload: &[u8],
+pub(super) fn remap_tabular_payload<'a>(
+    payload: &'a [u8],
     table_id_remaps: &BTreeMap<TableId, TableId>,
-    mut remap_row: impl FnMut(&mut Vec<String>, &BTreeMap<TableId, TableId>) -> CatalogResult<()>,
-) -> CatalogResult<Vec<u8>> {
+    mut remap_row: impl FnMut(&mut [Cow<'a, str>], &BTreeMap<TableId, TableId>) -> CatalogResult<()>,
+) -> CatalogResult<Cow<'a, [u8]>> {
     if table_id_remaps.is_empty() || payload.is_empty() {
-        return Ok(payload.to_vec());
+        return Ok(Cow::Borrowed(payload));
     }
     let text = std::str::from_utf8(payload).map_err(|error| {
         CatalogError::Decode(format!("CommitAttempt payload is not UTF-8: {error}"))
     })?;
-    let mut out = String::new();
+    let mut out = String::with_capacity(payload.len());
+    let mut fields = Vec::new();
     for line in text.lines() {
-        let mut fields = line.split('\t').map(ToOwned::to_owned).collect::<Vec<_>>();
+        fields.clear();
+        fields.extend(line.split('\t').map(Cow::Borrowed));
         remap_row(&mut fields, table_id_remaps)?;
-        out.push_str(&fields.join("\t"));
+        for (index, field) in fields.iter().enumerate() {
+            if index != 0 {
+                out.push('\t');
+            }
+            out.push_str(field);
+        }
         out.push('\n');
     }
-    Ok(out.into_bytes())
+    Ok(Cow::Owned(out.into_bytes()))
 }
 
 pub(super) fn remap_table_id_field(
-    fields: &mut [String],
+    fields: &mut [Cow<'_, str>],
     index: usize,
     table_id_remaps: &BTreeMap<TableId, TableId>,
 ) -> CatalogResult<()> {
@@ -204,26 +237,39 @@ pub(super) fn remap_table_id_field(
     };
     let table_id = TableId(parse_u64_field(COMMIT_ATTEMPT, value, "table id remap")?);
     if let Some(remapped) = table_id_remaps.get(&table_id) {
-        fields[index] = remapped.0.to_string();
+        fields[index] = Cow::Owned(remapped.0.to_string());
     }
     Ok(())
 }
 
 pub(super) fn remap_inline_table_name_field(
-    fields: &mut [String],
+    fields: &mut [Cow<'_, str>],
     index: usize,
     table_id_remaps: &BTreeMap<TableId, TableId>,
 ) {
     let Some(value) = fields.get_mut(index) else {
         return;
     };
-    for (requested, persisted) in table_id_remaps {
-        let prefix = format!("ducklake_inlined_data_{}_", requested.0);
-        if let Some(suffix) = value.strip_prefix(&prefix) {
-            *value = format!("ducklake_inlined_data_{}_{}", persisted.0, suffix);
-            return;
-        }
+    let Some(rest) = value.strip_prefix("ducklake_inlined_data_") else {
+        return;
+    };
+    let Some((id, suffix)) = rest.split_once('_') else {
+        return;
+    };
+    if id.is_empty()
+        || !id.bytes().all(|byte| byte.is_ascii_digit())
+        || (id.len() > 1 && id.starts_with('0'))
+    {
+        return;
     }
+    let Some(persisted) = id
+        .parse::<u64>()
+        .ok()
+        .and_then(|id| table_id_remaps.get(&TableId(id)))
+    else {
+        return;
+    };
+    *value = Cow::Owned(format!("ducklake_inlined_data_{}_{}", persisted.0, suffix));
 }
 
 pub(super) fn commit_snapshot_u64(snapshot: ProposedCommitSnapshot) -> CatalogResult<u64> {

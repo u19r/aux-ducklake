@@ -196,4 +196,49 @@ mod tests {
 
         assert!(error.to_string().contains("unsupported characters"));
     }
+    #[test]
+    fn given_borrowed_request_when_decoded_then_payload_points_into_frame() {
+        let request = RuntimeRequest::new(
+            "borrowed",
+            RuntimeCatalogBackend::FoundationDb,
+            "CheckSnapshotFence",
+            vec![b'x'; 65536],
+        )
+        .unwrap();
+        let frame = request.encode().unwrap();
+        let guard = alloc_counter::AllocationGuard::start(
+            module_path!(),
+            "borrowed_frame",
+            file!(),
+            line!(),
+            None,
+        );
+        let decoded = RuntimeRequestRef::decode(&frame).unwrap();
+        let report = guard.finish();
+        assert_eq!(report.allocation_count, 0);
+        assert_eq!(decoded.payload, request.payload);
+        assert_eq!(
+            decoded.payload.as_ptr(),
+            frame[frame.len() - decoded.payload.len()..].as_ptr()
+        );
+    }
+
+    #[test]
+    fn given_shared_payload_when_paged_then_frames_equal_owned_payload_frames() {
+        let bytes = vec![b'x'; MAX_RUNTIME_PAGE_PAYLOAD_BYTES + 7];
+        let shared = RuntimePayload::from(std::sync::Arc::new(bytes.clone()));
+        let first = paged_runtime_response("shared".into(), shared.clone(), 0, None).unwrap();
+        let owned = paged_runtime_response("shared".into(), bytes.clone(), 0, None).unwrap();
+        assert_eq!(first.encode().unwrap(), owned.encode().unwrap());
+        let offset = first.next_page_offset.unwrap();
+        let next = paged_runtime_response(
+            "shared".into(),
+            shared.clone(),
+            offset,
+            first.page_etag.as_deref(),
+        )
+        .unwrap();
+        assert_eq!(next.payload.as_ref(), &bytes[offset..]);
+        assert!(paged_runtime_response("shared".into(), shared, offset, Some("00")).is_err());
+    }
 }

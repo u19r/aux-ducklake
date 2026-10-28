@@ -63,7 +63,7 @@ impl FdbOrderedCatalogKv {
                 &snapshot_timestamp_key(catalog, snapshot.created_at_micros, placeholder),
                 snapshot_timestamp_key_order_offset(catalog, snapshot.created_at_micros),
             )?,
-            &snapshot.sequence.to_be_bytes(),
+            &snapshot.encode(),
             MutationType::SetVersionstampedKey,
         );
         stage_fdb_snapshot_indexes(self, &trx, catalog, &snapshot)?;
@@ -144,7 +144,7 @@ impl FdbOrderedCatalogKv {
                 &snapshot_timestamp_key(catalog, snapshot.created_at_micros, placeholder),
                 snapshot_timestamp_key_order_offset(catalog, snapshot.created_at_micros),
             )?,
-            &snapshot.sequence.to_be_bytes(),
+            &snapshot.encode(),
             MutationType::SetVersionstampedKey,
         );
         stage_fdb_snapshot_indexes(self, &trx, catalog, &snapshot)?;
@@ -222,5 +222,5 @@ fn estimate_versionstamped_snapshot_bytes(
         .saturating_add(
             snapshot_timestamp_key(catalog, snapshot.created_at_micros, snapshot.order).len(),
         )
-        .saturating_add(8)
+        .saturating_add(snapshot.encode().len())
 }

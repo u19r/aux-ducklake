@@ -1,7 +1,6 @@
 use std::ops::Deref;
 
 use foundationdb::options::MutationType;
-use futures::executor::block_on;
 
 use crate::{
     CatalogError, CatalogId, CatalogResult, CommitAttemptId, CommitAttemptRow, FdbOrderedCatalogKv,
@@ -109,7 +108,7 @@ impl FdbOrderedCatalogKv {
                 &snapshot_timestamp_key(catalog, snapshot.created_at_micros, placeholder),
                 snapshot_timestamp_key_order_offset(catalog, snapshot.created_at_micros),
             )?,
-            &snapshot.sequence.to_be_bytes(),
+            &snapshot.encode(),
             MutationType::SetVersionstampedKey,
         );
         stage_fdb_snapshot_indexes(self, &trx, catalog, &snapshot)?;
@@ -131,8 +130,14 @@ impl FdbOrderedCatalogKv {
             stage_fdb_max_catalog_id_watermark(self, &trx, catalog, max_table_id);
         }
         let versionstamp = trx.get_versionstamp();
-        block_on(trx.commit()).map_err(map_fdb_commit_error)?;
-        let order = committed_order(block_on(versionstamp).map_err(map_fdb_error)?.deref())?;
+        crate::fdb_runtime::record_transaction_usage(&trx);
+        crate::fdb_runtime::wait_for_fdb("wait.fdb.commit", trx.commit())
+            .map_err(map_fdb_commit_error)?;
+        let order = committed_order(
+            crate::fdb_runtime::wait_for_fdb("wait.fdb.versionstamp", versionstamp)
+                .map_err(map_fdb_error)?
+                .deref(),
+        )?;
         Ok(created
             .into_iter()
             .map(|mut table| {
@@ -210,7 +215,7 @@ impl FdbOrderedCatalogKv {
                 &snapshot_timestamp_key(catalog, snapshot.created_at_micros, placeholder),
                 snapshot_timestamp_key_order_offset(catalog, snapshot.created_at_micros),
             )?,
-            &snapshot.sequence.to_be_bytes(),
+            &snapshot.encode(),
             MutationType::SetVersionstampedKey,
         );
         stage_fdb_snapshot_indexes(self, &trx, catalog, &snapshot)?;
@@ -275,7 +280,9 @@ impl FdbOrderedCatalogKv {
         if let Some(max_table_id) = max_table_id {
             stage_fdb_max_catalog_id_watermark(self, &trx, catalog, max_table_id);
         }
-        block_on(trx.commit()).map_err(map_fdb_commit_error)?;
+        crate::fdb_runtime::record_transaction_usage(&trx);
+        crate::fdb_runtime::wait_for_fdb("wait.fdb.commit", trx.commit())
+            .map_err(map_fdb_commit_error)?;
         Ok(())
     }
 }
@@ -463,7 +470,7 @@ pub(crate) fn estimate_table_change_bytes(
         .saturating_add(
             snapshot_timestamp_key(catalog, snapshot.created_at_micros, snapshot.order).len(),
         )
-        .saturating_add(8);
+        .saturating_add(snapshot.encode().len());
     let replacement_bytes = replacements
         .iter()
         .map(|replacement| {
@@ -559,7 +566,7 @@ fn estimate_tables_create_bytes(
         .saturating_add(
             snapshot_timestamp_key(catalog, snapshot.created_at_micros, snapshot.order).len(),
         )
-        .saturating_add(8);
+        .saturating_add(snapshot.encode().len());
     let attempt_bytes = recovery_id.map_or(0, |attempt_id| {
         commit_attempt_key(catalog, attempt_id)
             .len()

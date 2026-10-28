@@ -1,3 +1,4 @@
+use crate::runtime_protocol::RuntimePayload;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::typed_scalar::{
@@ -6,15 +7,14 @@ use crate::typed_scalar::{
 };
 use crate::{
     CatalogId, CatalogResult, ColumnId, DataFileId, DataFileRow, FileColumnStatsRow,
-    PartitionKeyIndex, TableId, TableRow, list_column_mappings, list_data_files,
-    list_file_column_stats, put_column_mappings, runtime_protocol::RuntimeCatalogBackend,
+    PartitionKeyIndex, TableId, TableRow, list_column_mappings, list_file_column_stats,
+    put_column_mappings, runtime_protocol::RuntimeCatalogBackend,
 };
 
 #[cfg(feature = "foundationdb")]
 use crate::{
     DuckLakeSnapshotId, runtime_catalog_snapshot::conflict_snapshot_payload_for_row,
     runtime_payload::payload_u64_value, runtime_snapshots::snapshot_changes_after_payload,
-    store::latest_snapshot_uncached,
 };
 
 use crate::runtime_metadata_ops::*;
@@ -259,7 +259,7 @@ impl MirrorColumnStats {
 pub(crate) fn list_file_column_stats_rows(
     backend: RuntimeCatalogBackend,
     catalog: CatalogId,
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     #[cfg(test)]
     let _ = backend;
     #[cfg(not(test))]
@@ -270,96 +270,37 @@ pub(crate) fn list_file_column_stats_rows(
         let kv = open_foundationdb_catalog()?;
         list_file_column_stats(&kv, catalog)?
     };
-    file_column_stats_payload(rows)
-}
-
-pub(crate) fn render_bounded_append_mirror_sql(
-    _backend: RuntimeCatalogBackend,
-    catalog: CatalogId,
-    payload: &[u8],
-) -> CatalogResult<Vec<u8>> {
-    let (data_file_ids, partition_rows) = bounded_append_mirror_payload_values(payload)?;
-    let kv = open_foundationdb_catalog()?;
-    let changed_data_files = list_data_files_for_data_file_ids(&kv, catalog, &data_file_ids)?;
-    let affected_table_ids = changed_data_files
-        .iter()
-        .map(|row| row.table_id)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let data_files = changed_data_files
-        .into_iter()
-        .filter(|row| row.validity.end_order.is_none())
-        .collect::<Vec<_>>();
-    let current_data_file_ids = data_files
-        .iter()
-        .map(|row| row.data_file_id)
-        .collect::<BTreeSet<_>>();
-    let file_stats = list_file_column_stats_for_data_file_ids(&kv, catalog, &data_file_ids)?
-        .into_iter()
-        .filter(|row| current_data_file_ids.contains(&row.data_file_id))
-        .collect::<Vec<_>>();
-    let affected_table_id_set = affected_table_ids.iter().copied().collect::<BTreeSet<_>>();
-    let current_data_files = list_data_files(&kv, catalog)?
-        .into_iter()
-        .filter(|row| {
-            row.validity.end_order.is_none() && affected_table_id_set.contains(&row.table_id)
-        })
-        .collect::<Vec<_>>();
-    let all_file_stats = list_file_column_stats(&kv, catalog)?;
-    let tables = crate::table_store::load_current_table_rows(&kv, catalog, &affected_table_id_set)?;
-    let table_column_stats =
-        recompute_table_column_stats(&tables, &current_data_files, &all_file_stats);
-    let snapshot_orders = data_files
-        .iter()
-        .flat_map(|row| {
-            [
-                Some(row.validity.begin_order),
-                row.validity.end_order,
-                row.max_partial_order,
-            ]
-        })
-        .flatten()
-        .collect();
-    let snapshots = list_snapshots_for_orders(&kv, catalog, snapshot_orders)?;
-    Ok(bounded_append_mirror_sql(
-        &data_file_ids,
-        &affected_table_ids,
-        partition_rows,
-        &data_files,
-        &file_stats,
-        &table_column_stats,
-        &snapshots,
-    )
-    .into_bytes())
+    file_column_stats_payload(&rows).map(Into::into)
 }
 
 #[cfg(not(test))]
 pub(super) fn cached_foundationdb_file_column_stats_rows(
     catalog: CatalogId,
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     let kv = open_foundationdb_catalog()?;
     let key = VersionedFileColumnStatsPayloadCacheKey {
         namespace: kv.catalog_cache_namespace(),
         catalog,
-        version: crate::OrderedCatalogKv::get(
+        version: crate::catalog_request_read_set::fetch_value(
             &kv,
+            catalog,
             &crate::keys::catalog_file_stats_version_key(catalog),
         )?,
     };
     let cache = file_column_stats_payload_cache();
     if let Some(payload) = cache.get_ref(&key) {
-        return Ok(payload);
+        return Ok(payload.into());
     }
-    let payload = file_column_stats_payload(list_file_column_stats(&kv, catalog)?)?;
+    let payload = file_column_stats_payload(&list_file_column_stats(&kv, catalog)?)?;
+    let payload = std::sync::Arc::new(payload);
     cache.insert(key, payload.clone());
-    Ok(payload)
+    Ok(payload.into())
 }
 
 pub(crate) fn list_current_metadata_file_column_stats_rows(
     backend: RuntimeCatalogBackend,
     catalog: CatalogId,
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     #[cfg(test)]
     let _ = backend;
     #[cfg(not(test))]
@@ -370,20 +311,7 @@ pub(crate) fn list_current_metadata_file_column_stats_rows(
         let kv = open_foundationdb_catalog()?;
         current_metadata_file_column_stats(&kv, catalog)?
     };
-    file_column_stats_payload(rows)
-}
-
-pub(crate) fn list_current_metadata_file_column_stats_rows_for_data_file_ids(
-    _backend: RuntimeCatalogBackend,
-    catalog: CatalogId,
-    payload: &[u8],
-) -> CatalogResult<Vec<u8>> {
-    let data_file_ids = data_file_ids_payload_values(payload)?;
-    let rows = {
-        let kv = open_foundationdb_catalog()?;
-        list_file_column_stats_for_data_file_ids(&kv, catalog, &data_file_ids)?
-    };
-    file_column_stats_payload(rows)
+    file_column_stats_payload(&rows).map(Into::into)
 }
 
 pub(crate) fn list_global_stats_inputs_for_snapshot(
@@ -480,13 +408,19 @@ pub(crate) fn list_snapshot_stats_and_changes_inputs(
         )?;
         let kv = open_foundationdb_catalog()?;
         let read_kv = crate::runtime_file_listing::runtime_read_snapshot_kv(&kv)?;
-        let Some(latest) = latest_snapshot_uncached(&read_kv, catalog).row? else {
+        let Some(latest) = crate::store::prepared_snapshot_read(
+            &read_kv,
+            catalog,
+            crate::catalog_request_read_set::CatalogHeaderProjection::Conflict,
+        )
+        .row?
+        else {
             return Ok(b"catalog_snapshot_exists=false\n".to_vec());
         };
         let latest_snapshot_id = latest.sequence.0;
-        let mut out = String::from_utf8(conflict_snapshot_payload_for_row(
-            &read_kv, catalog, latest,
-        )?)
+        let mut out = String::from_utf8(
+            conflict_snapshot_payload_for_row(&read_kv, catalog, latest)?.into_vec(),
+        )
         .map_err(|error| {
             crate::CatalogError::Decode(format!("conflict snapshot payload is not utf-8: {error}"))
         })?;

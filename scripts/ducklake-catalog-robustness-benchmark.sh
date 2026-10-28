@@ -3,7 +3,8 @@ set -euo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 benchmark="$root_dir/scripts/ducklake_catalog_benchmark.sh"
-artifact_dir="$root_dir/docs/benchmarks/ducklake-fdb-feature-parity"
+artifact_dir="${AUX_DUCKLAKE_BENCHMARK_OUTPUT_DIR:-$root_dir/docs/benchmarks/ducklake-fdb-feature-parity}"
+benchmark_backend="${AUX_DUCKLAKE_BENCHMARK_BACKEND:-both}"
 output="$artifact_dir/robustness-latest.json"
 tmp_dir="$(mktemp -d)"
 benchmark_output_dir="$tmp_dir/component-artifacts"
@@ -16,8 +17,16 @@ fail() {
 
 require_environment() {
     command -v jq >/dev/null 2>&1 || fail "jq is required"
-    [[ -n "${AUX_DUCKLAKE_FDB_CLUSTER_FILE:-}" ]] || fail "AUX_DUCKLAKE_FDB_CLUSTER_FILE is required"
-    [[ -n "${AUX_DUCKLAKE_POSTGRES_DSN:-}" ]] || fail "AUX_DUCKLAKE_POSTGRES_DSN is required"
+    case "$benchmark_backend" in
+    both | fdb | postgres) ;;
+    *) fail "AUX_DUCKLAKE_BENCHMARK_BACKEND must be both, fdb, or postgres" ;;
+    esac
+    if [[ "$benchmark_backend" != postgres ]]; then
+        [[ -n "${AUX_DUCKLAKE_FDB_CLUSTER_FILE:-}" ]] || fail "AUX_DUCKLAKE_FDB_CLUSTER_FILE is required"
+    fi
+    if [[ "$benchmark_backend" != fdb ]]; then
+        [[ -n "${AUX_DUCKLAKE_POSTGRES_DSN:-}" ]] || fail "AUX_DUCKLAKE_POSTGRES_DSN is required"
+    fi
 }
 
 run_backend() {
@@ -38,40 +47,28 @@ run_backend() {
         "$log" >"$target"
 }
 
-run_paired() {
+run_scenario() {
     local profile="$1" name="$2" sequence="$3"
     local fdb_artifact="$tmp_dir/$name-fdb.json"
     local postgres_artifact="$tmp_dir/$name-postgres.json"
-    if [[ "$sequence" == "fdb-first" ]]; then
-        run_backend fdb "$profile" "$fdb_artifact"
-        run_backend postgres "$profile" "$postgres_artifact"
-    else
-        run_backend postgres "$profile" "$postgres_artifact"
-        run_backend fdb "$profile" "$fdb_artifact"
-    fi
+    local backend
+    local backend_order=(fdb postgres)
+    [[ "$sequence" == fdb-first ]] || backend_order=(postgres fdb)
+    printf 'null\n' >"$fdb_artifact"
+    printf 'null\n' >"$postgres_artifact"
+    for backend in "${backend_order[@]}"; do
+        if [[ "$benchmark_backend" == both || "$benchmark_backend" == "$backend" ]]; then
+            run_backend "$backend" "$profile" "$tmp_dir/$name-$backend.json"
+        fi
+    done
     jq -cn \
         --arg name "$name" \
         --arg profile "$profile" \
         --arg execution_order "$sequence" \
+        --arg backends "$benchmark_backend" \
         --slurpfile fdb "$fdb_artifact" \
         --slurpfile postgres "$postgres_artifact" \
-        '$fdb[0] as $f | $postgres[0] as $p | {
-            name: $name,
-            profile: $profile,
-            execution_order: $execution_order,
-            comparison: (if ($f.elapsed_ms and $p.elapsed_ms) then {
-                    status: "complete",
-                    fdb_elapsed_ms: $f.elapsed_ms,
-                    postgres_elapsed_ms: $p.elapsed_ms,
-                    fdb_postgres_ratio: ($f.elapsed_ms / $p.elapsed_ms)
-                } else {
-                    status: "failed",
-                    fdb_status: ($f.status // "complete"),
-                    postgres_status: ($p.status // "complete")
-                } end),
-            fdb: $f,
-            postgres: $p
-        }' \
+        -f "$root_dir/scripts/ducklake-catalog-robustness-scenario.jq" \
         >>"$tmp_dir/scenarios.jsonl"
 }
 
@@ -92,7 +89,7 @@ run_varied_scenario() {
         AUX_DUCKLAKE_VARIED_PARALLEL_WORKERS="$readers" \
         AUX_DUCKLAKE_VARIED_CHURN_ROUNDS="$churn" \
         AUX_DUCKLAKE_VARIED_CONCURRENT_WRITERS="$writers" \
-        bash -c "run_paired varied \"\$1\" \"\$2\"" _ "$name" "$sequence"
+        bash -c "run_scenario varied \"\$1\" \"\$2\"" _ "$name" "$sequence"
 }
 
 run_inline_scenario() {
@@ -108,7 +105,7 @@ run_inline_scenario() {
         AUX_DUCKLAKE_INLINE_DELETE_ROWS=1 \
         AUX_DUCKLAKE_INLINE_PRELOAD_TABLES="$preload_tables" \
         AUX_DUCKLAKE_INLINE_PRELOAD_ROWS=2 \
-        bash -c "run_paired inline \"\$1\" \"\$2\"" _ "$name" "$sequence"
+        bash -c "run_scenario inline \"\$1\" \"\$2\"" _ "$name" "$sequence"
 }
 
 write_artifact() {
@@ -116,10 +113,10 @@ write_artifact() {
         "$tmp_dir/scenarios.jsonl" >"$output"
 }
 
-export -f run_backend run_paired
-export benchmark benchmark_output_dir tmp_dir
+export -f run_backend run_scenario
+export benchmark benchmark_output_dir tmp_dir root_dir benchmark_backend
 require_environment
-mkdir -p "$benchmark_output_dir"
+mkdir -p "$benchmark_output_dir" "$artifact_dir"
 : >"$tmp_dir/scenarios.jsonl"
 
 varied_scenarios=(

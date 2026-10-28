@@ -63,6 +63,18 @@ mod tests {
         .unwrap();
 
         assert_eq!(resolved.order, latest.order);
+        let output = read_inline_rows_payload(
+            &kv,
+            catalog,
+            ReadInlineRowsPayload {
+                table_name: "ducklake_inlined_data_10_0".to_owned(),
+                snapshot: Some(ReadSnapshot::new(DuckLakeSnapshotId(latest.sequence.0 + 8))),
+                include_flushed: true,
+                include_deleted: true,
+            },
+        )
+        .unwrap();
+        assert!(String::from_utf8(output).unwrap().contains("\t0\ti:1\n"));
         assert_eq!(kv.snapshot_timestamp_scan_count(), 0);
     }
 

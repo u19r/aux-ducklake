@@ -55,6 +55,34 @@ impl RuntimeDataMutation {
     }
 }
 
+struct InlineFlushTargets<'a> {
+    flushes: &'a mut Vec<InlineTableFlush>,
+    delete_files: &'a mut [DeleteFileMaterialization],
+}
+
+impl InlineFlushTargets<'_> {
+    fn complete_inline_flush(
+        &mut self,
+        file: &DataFileRow,
+        schema_id: SchemaId,
+        public_sequence: u64,
+    ) {
+        let flush = InlineTableFlush::new(
+            file.table_id,
+            schema_id,
+            crate::RawSnapshotSequence(public_sequence),
+        );
+        if !self.flushes.contains(&flush) {
+            self.flushes.push(flush);
+        }
+        for delete_file in self.delete_files.iter_mut() {
+            if delete_file.data_file_id() == file.data_file_id {
+                delete_file.mark_materializes_inline_deletes();
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct RuntimeDataFileVisibility {
     pub(crate) data_file_id: DataFileId,
@@ -231,14 +259,16 @@ pub(crate) fn complete_inline_flushes_from_materialized_files(
     catalog: CatalogId,
     mutation: &mut RuntimeDataMutation,
 ) -> CatalogResult<()> {
-    let files = mutation
+    let mut targets = InlineFlushTargets {
+        flushes: &mut mutation.inline_flushes,
+        delete_files: &mut mutation.materialized_delete_files,
+    };
+    for file in mutation
         .data_files
         .iter()
         .filter(|file| file.max_partial_order.is_some())
-        .cloned()
-        .collect::<Vec<_>>();
-    for file in files {
-        complete_inline_flushes_for_materialized_file(kv, catalog, mutation, &file)?;
+    {
+        complete_inline_flushes_for_materialized_file(kv, catalog, &mut targets, file)?;
     }
     Ok(())
 }
@@ -246,7 +276,7 @@ pub(crate) fn complete_inline_flushes_from_materialized_files(
 fn complete_inline_flushes_for_materialized_file(
     kv: &impl crate::OrderedCatalogKv,
     catalog: CatalogId,
-    mutation: &mut RuntimeDataMutation,
+    targets: &mut InlineFlushTargets<'_>,
     file: &DataFileRow,
 ) -> CatalogResult<()> {
     let Some(max_partial_order) = file.max_partial_order else {
@@ -263,31 +293,25 @@ fn complete_inline_flushes_for_materialized_file(
             schema_id,
             max_partial_order,
         )?;
+        let orders = payloads
+            .iter()
+            .filter(|payload| data_file_covers_inline_begin(file, payload.begin_order))
+            .map(|payload| payload.begin_order)
+            .collect();
+        let sequences = crate::inline_data_snapshot_sequences::active_data_snapshot_sequences(
+            kv, catalog, &orders,
+        )?;
         for payload in payloads {
             if !data_file_covers_inline_begin(file, payload.begin_order) {
                 continue;
             }
-            let Some(public_sequence) =
-                crate::public_snapshot_sequence_for_order(kv, catalog, payload.begin_order)?
-            else {
+            let Some(public_sequence) = sequences.get(&payload.begin_order) else {
                 return Err(crate::CatalogError::Decode(format!(
                     "inline payload for table {} at order {} has no public snapshot sequence",
                     file.table_id.0, payload.begin_order
                 )));
             };
-            let flush = InlineTableFlush::new(
-                file.table_id,
-                schema_id,
-                crate::RawSnapshotSequence(public_sequence.0),
-            );
-            if !mutation.inline_flushes.contains(&flush) {
-                mutation.inline_flushes.push(flush);
-            }
-            for delete_file in &mut mutation.materialized_delete_files {
-                if delete_file.data_file_id() == file.data_file_id {
-                    delete_file.mark_materializes_inline_deletes();
-                }
-            }
+            targets.complete_inline_flush(file, schema_id, *public_sequence);
         }
     }
     Ok(())

@@ -106,6 +106,46 @@ fn clear_foundationdb_database_cache() {
     }
 }
 
+/// Measure synchronous FDB waits without changing polling, retries or errors.
+pub(crate) fn wait_for_fdb<T, E>(
+    operation: &str,
+    future: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<T, E> {
+    let span = crate::runtime_trace::RuntimeSpan::enter(operation);
+    let result = futures::executor::block_on(future);
+    span.finish(result.is_ok());
+    result
+}
+
+/// Sample each covered read attempt once, or each write attempt before commit.
+/// Binding counters include native range batches, not just logical scan pages.
+pub(crate) fn record_transaction_usage(transaction: &foundationdb::Transaction) {
+    #[cfg(feature = "runtime-metrics")]
+    {
+        let usage = transaction.attempt_usage();
+        for (operation, items, bytes) in [
+            ("fdb.usage.sampled_attempt", 1, 0),
+            ("fdb.usage.get", usage.call_get, 0),
+            ("fdb.usage.range_batch", usage.call_get_range, 0),
+            (
+                "fdb.usage.fetched",
+                usage.keys_values_fetched,
+                usage.bytes_read,
+            ),
+            ("fdb.usage.set", usage.call_set, usage.bytes_written),
+            ("fdb.usage.clear", usage.call_clear, 0),
+            ("fdb.usage.clear_range", usage.call_clear_range, 0),
+            ("fdb.usage.atomic", usage.call_atomic_op, 0),
+        ] {
+            if items != 0 || bytes != 0 {
+                crate::runtime_metrics::record_runtime_measurement(operation, items, bytes);
+            }
+        }
+    }
+    #[cfg(not(feature = "runtime-metrics"))]
+    let _ = transaction;
+}
+
 #[cfg(test)]
 #[path = "fdb_runtime_tests.rs"]
 mod fdb_runtime_tests;

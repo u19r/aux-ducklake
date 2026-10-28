@@ -3,16 +3,13 @@ use std::collections::BTreeMap;
 #[cfg(feature = "foundationdb")]
 use std::sync::OnceLock;
 
-use crate::CatalogCacheNamespace;
 #[cfg(feature = "foundationdb")]
 use crate::bounded_cache::{BoundedCache, static_bounded_cache};
-
 use crate::{
-    CatalogId, CatalogResult, InlineRowChangeKind, InlineTableChunkRow,
+    CatalogCacheNamespace, CatalogId, CatalogResult, InlineRowChangeKind, InlineTableChunkRow,
     runtime_inline_ops::{RuntimeInlineDelete, RuntimeInlineRows},
     runtime_inline_rows::{InlineRowChangesPayload, ReadInlineRowsPayload},
 };
-
 #[cfg(feature = "foundationdb")]
 use crate::{
     runtime_foundationdb::open_foundationdb_catalog,
@@ -22,7 +19,7 @@ use crate::{
         read_inline_rows_global_stats_batch_payload,
     },
     snapshot_by_ducklake_sequence,
-    table_store::load_current_table_row,
+    table_store::load_current_table_rows,
 };
 
 #[cfg(feature = "foundationdb")]
@@ -31,8 +28,7 @@ pub(crate) fn runtime_foundationdb_read_inline_rows(
     payload: ReadInlineRowsPayload,
 ) -> CatalogResult<Vec<u8>> {
     let kv = open_foundationdb_catalog()?;
-    let read_kv = crate::runtime_file_listing::runtime_read_snapshot_kv(&kv)?;
-    read_foundationdb_inline_rows_payload(&read_kv, catalog, payload)
+    read_foundationdb_inline_rows_payload(&kv, catalog, payload)
 }
 
 #[cfg(feature = "foundationdb")]
@@ -61,10 +57,9 @@ pub(crate) fn runtime_foundationdb_read_inline_rows_global_stats_batch(
     payloads: Vec<ReadInlineRowsPayload>,
 ) -> CatalogResult<Vec<u8>> {
     let kv = open_foundationdb_catalog()?;
-    let read_kv = crate::runtime_file_listing::runtime_read_snapshot_kv(&kv)?;
-    if crate::store::runtime_read_context_enabled() {
-        let key = InlineGlobalStatsBatchCacheKey {
-            namespace: read_kv.catalog_cache_namespace(),
+    let cache_key =
+        crate::store::runtime_read_context_enabled().then(|| InlineGlobalStatsBatchCacheKey {
+            namespace: kv.catalog_cache_namespace(),
             catalog,
             requests: payloads
                 .iter()
@@ -75,16 +70,19 @@ pub(crate) fn runtime_foundationdb_read_inline_rows_global_stats_batch(
                     )
                 })
                 .collect(),
-        };
-        let cache = inline_global_stats_batch_cache();
-        if let Some(payload) = cache.get_ref(&key) {
-            return Ok(payload);
-        }
-        let result = read_inline_rows_global_stats_batch_payload(read_kv, catalog, payloads)?;
-        cache.insert(key, result.clone());
-        return Ok(result);
+        });
+    if let Some(payload) = cache_key
+        .as_ref()
+        .and_then(|key| inline_global_stats_batch_cache().get_ref(key))
+    {
+        return Ok(payload);
     }
-    read_inline_rows_global_stats_batch_payload(read_kv, catalog, payloads)
+    let read_kv = crate::runtime_file_listing::runtime_read_snapshot_kv(&kv)?;
+    let result = read_inline_rows_global_stats_batch_payload(read_kv, catalog, payloads)?;
+    if let Some(key) = cache_key {
+        inline_global_stats_batch_cache().insert(key, result.clone());
+    }
+    Ok(result)
 }
 
 #[cfg(feature = "foundationdb")]
@@ -188,7 +186,7 @@ pub(crate) fn runtime_foundationdb_commit_inline_mutations(
 
 #[cfg(feature = "foundationdb")]
 pub(crate) fn prepare_foundationdb_inline_mutations(
-    kv: &crate::FdbOrderedCatalogKv,
+    kv: &impl crate::OrderedCatalogKv,
     catalog: CatalogId,
     requests: Vec<RuntimeInlineRows>,
     deletes: Vec<RuntimeInlineDelete>,
@@ -198,21 +196,26 @@ pub(crate) fn prepare_foundationdb_inline_mutations(
     Vec<crate::fdb_inline_tables::InlineTablePayload>,
     Vec<crate::fdb_inline_tables::InlineTableDeletePayload>,
 )> {
-    let mut tables = BTreeMap::<crate::TableId, crate::TableRow>::new();
+    let table_ids = requests.iter().map(|request| request.table_id).collect();
+    let mut tables = load_current_table_rows(kv, catalog, &table_ids)?
+        .into_iter()
+        .map(|table| (table.table_id, table))
+        .collect::<BTreeMap<_, _>>();
     let mut changed_tables = std::collections::BTreeSet::new();
     let mut validated_tables = std::collections::BTreeSet::new();
     let mut payloads = BTreeMap::<(crate::TableId, crate::SchemaId), Vec<u8>>::new();
     for request in requests {
         if validated_tables.insert((request.table_id, request.read_snapshot)) {
-            reject_stale_inline_table_metadata(kv, catalog, &request)?;
+            reject_stale_inline_table_metadata(
+                kv,
+                catalog,
+                &request,
+                tables.get(&request.table_id),
+            )?;
         }
-        let table = match tables.entry(request.table_id) {
-            std::collections::btree_map::Entry::Vacant(entry) => entry.insert(
-                load_current_table_row(kv, catalog, request.table_id)?
-                    .ok_or(crate::CatalogError::NotFound("inline table"))?,
-            ),
-            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
-        };
+        let table = tables
+            .get_mut(&request.table_id)
+            .ok_or(crate::CatalogError::NotFound("inline table"))?;
         if crate::runtime_inline_ops::register_inlined_table(
             table,
             request.table_name,
@@ -225,23 +228,7 @@ pub(crate) fn prepare_foundationdb_inline_mutations(
             .or_default()
             .extend_from_slice(request.payload.as_bytes());
     }
-    let mut delete_payloads =
-        BTreeMap::<(crate::TableId, crate::SchemaId), std::collections::BTreeSet<u64>>::new();
-    for delete in deletes {
-        if delete.commit_snapshot != commit_snapshot {
-            return Err(crate::CatalogError::InvalidMutation(
-                "inline delete commit snapshot differs from CommitAttempt".to_owned(),
-            ));
-        }
-        for target in delete.targets {
-            let schema_id =
-                crate::runtime_inline_ops::inline_delete_schema_id(kv, catalog, &target)?;
-            delete_payloads
-                .entry((target.table_id, schema_id))
-                .or_default()
-                .extend(target.row_ids);
-        }
-    }
+    let delete_payloads = prepare_inline_delete_payloads(kv, catalog, deletes, commit_snapshot)?;
     Ok((
         tables
             .into_iter()
@@ -271,10 +258,38 @@ pub(crate) fn prepare_foundationdb_inline_mutations(
 }
 
 #[cfg(feature = "foundationdb")]
+fn prepare_inline_delete_payloads(
+    kv: &impl crate::OrderedCatalogKv,
+    catalog: CatalogId,
+    deletes: Vec<RuntimeInlineDelete>,
+    commit_snapshot: Option<crate::DuckLakeSnapshotId>,
+) -> CatalogResult<BTreeMap<(crate::TableId, crate::SchemaId), std::collections::BTreeSet<u64>>> {
+    let mut delete_payloads =
+        BTreeMap::<(crate::TableId, crate::SchemaId), std::collections::BTreeSet<u64>>::new();
+    for delete in deletes {
+        if delete.commit_snapshot != commit_snapshot {
+            return Err(crate::CatalogError::InvalidMutation(
+                "inline delete commit snapshot differs from CommitAttempt".to_owned(),
+            ));
+        }
+        for target in delete.targets {
+            let schema_id =
+                crate::runtime_inline_ops::inline_delete_schema_id(kv, catalog, &target)?;
+            delete_payloads
+                .entry((target.table_id, schema_id))
+                .or_default()
+                .extend(target.row_ids);
+        }
+    }
+    Ok(delete_payloads)
+}
+
+#[cfg(feature = "foundationdb")]
 fn reject_stale_inline_table_metadata(
     kv: &impl crate::OrderedCatalogKv,
     catalog: CatalogId,
     request: &RuntimeInlineRows,
+    current_table: Option<&crate::TableRow>,
 ) -> CatalogResult<()> {
     let Some(read_snapshot) = request.read_snapshot else {
         return Ok(());
@@ -282,18 +297,21 @@ fn reject_stale_inline_table_metadata(
     let Some(read_snapshot) = snapshot_by_ducklake_sequence(kv, catalog, read_snapshot)? else {
         return Ok(());
     };
-    let Some(current_table) = load_current_table_row(kv, catalog, request.table_id)? else {
+    let Some(current_table) = current_table else {
         return Err(crate::CatalogError::InvalidMutation(format!(
             "conflict committing inline rows: table {} was dropped after read snapshot",
             request.table_id.0
         )));
     };
+    if current_table.validity.is_visible_at(read_snapshot.order) {
+        return Ok(());
+    }
     let Some(read_table) =
         crate::load_table_at(kv, catalog, request.table_id, read_snapshot.order)?
     else {
         return Ok(());
     };
-    if !same_user_visible_table_for_inline_insert(&read_table, &current_table) {
+    if !same_user_visible_table_for_inline_insert(&read_table, current_table) {
         return Err(crate::CatalogError::InvalidMutation(format!(
             "conflict committing inline rows: table {} metadata changed after read snapshot",
             request.table_id.0
@@ -301,7 +319,8 @@ fn reject_stale_inline_table_metadata(
     }
     if read_table.partition != current_table.partition {
         return Err(crate::CatalogError::InvalidMutation(format!(
-            "conflict committing inline rows: table {} partition metadata changed after read snapshot",
+            "conflict committing inline rows: table {} partition metadata changed after read \
+             snapshot",
             request.table_id.0
         )));
     }

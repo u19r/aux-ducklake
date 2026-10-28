@@ -1,40 +1,34 @@
+use crate::runtime_protocol::RuntimePayload;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 #[cfg(not(test))]
 use std::sync::OnceLock;
 
 #[cfg(not(test))]
-use crate::CatalogCacheNamespace;
-#[cfg(not(test))]
 use crate::bounded_cache::{BoundedCache, static_bounded_cache};
 #[cfg(feature = "runtime-metrics")]
 use crate::runtime_metrics::record_runtime_method_elapsed;
+#[cfg(not(test))]
+use crate::{CatalogCacheNamespace, runtime_read_context::CatalogSnapshotPayloadIdentity};
 use crate::{
     CatalogId, CatalogOrderId, CatalogResult, DuckLakeSnapshotId, OrderedCatalogKv, SnapshotRow,
-    conflict_watermarks::load_conflict_watermarks,
-    latest_snapshot,
+    conflict_watermarks::{
+        ConflictWatermarkValues, load_conflict_snapshot_values, load_conflict_watermarks,
+    },
     runtime_metrics::RuntimeMetricStage,
     runtime_read_context::{CatalogSnapshotReadContext, CatalogSnapshotRequestContext},
-    schema_version_state::{load_current_schema_version, load_schema_version_at},
+    schema_version_state::load_schema_version_at,
 };
 
 #[cfg(not(test))]
 static CATALOG_SNAPSHOT_PAYLOAD_CACHE: OnceLock<
-    BoundedCache<CatalogSnapshotPayloadCacheKey, Vec<u8>>,
+    BoundedCache<CatalogSnapshotPayloadIdentity, std::sync::Arc<Vec<u8>>>,
 > = OnceLock::new();
 
 #[cfg(not(test))]
 static CONFLICT_SNAPSHOT_PAYLOAD_CACHE: OnceLock<
-    BoundedCache<ConflictSnapshotPayloadCacheKey, Vec<u8>>,
+    BoundedCache<ConflictSnapshotPayloadCacheKey, std::sync::Arc<Vec<u8>>>,
 > = OnceLock::new();
-
-#[cfg(not(test))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct CatalogSnapshotPayloadCacheKey {
-    namespace: CatalogCacheNamespace,
-    catalog: CatalogId,
-    snapshot_id: DuckLakeSnapshotId,
-    kind: CatalogSnapshotIdKind,
-}
 
 #[cfg(not(test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -82,9 +76,14 @@ pub(crate) fn public_snapshot_payload(
 pub(crate) fn conflict_snapshot_payload(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
-) -> CatalogResult<Vec<u8>> {
-    let Some(row) = latest_snapshot(kv, catalog)? else {
-        return Ok(b"catalog_snapshot_exists=false\n".to_vec());
+) -> CatalogResult<RuntimePayload> {
+    let Some(row) = crate::store::prepared_latest_snapshot(
+        kv,
+        catalog,
+        crate::catalog_request_read_set::CatalogHeaderProjection::Conflict,
+    )?
+    else {
+        return Ok(b"catalog_snapshot_exists=false\n".to_vec().into());
     };
     conflict_snapshot_payload_for_row(kv, catalog, row)
 }
@@ -93,7 +92,7 @@ pub(crate) fn conflict_snapshot_payload_for_row(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
     row: SnapshotRow,
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     #[cfg(not(test))]
     {
         let key = ConflictSnapshotPayloadCacheKey {
@@ -103,15 +102,16 @@ pub(crate) fn conflict_snapshot_payload_for_row(
         };
         let cache = static_bounded_cache(&CONFLICT_SNAPSHOT_PAYLOAD_CACHE, 1024);
         if let Some(payload) = cache.get(key) {
-            return Ok(payload);
+            return Ok(payload.into());
         }
         let payload = render_conflict_snapshot_payload(kv, catalog, row)?;
+        let payload = std::sync::Arc::new(payload);
         cache.insert(key, payload.clone());
-        Ok(payload)
+        Ok(payload.into())
     }
     #[cfg(test)]
     {
-        render_conflict_snapshot_payload(kv, catalog, row)
+        render_conflict_snapshot_payload(kv, catalog, row).map(Into::into)
     }
 }
 
@@ -121,13 +121,15 @@ fn render_conflict_snapshot_payload(
     row: SnapshotRow,
 ) -> CatalogResult<Vec<u8>> {
     let stage_started = RuntimeMetricStage::start();
-    let watermarks = conflict_snapshot_watermarks(kv, catalog, row.order)?;
+    let (values, schema_version) = load_conflict_snapshot_values(kv, catalog)?;
+    let watermarks = SnapshotWatermarks::from(values);
     record_runtime_stage(
         "method.runtime_catalog_snapshot.conflict_snapshot_payload.watermarks",
         stage_started,
     );
     let stage_started = RuntimeMetricStage::start();
-    let schema_version = current_conflict_snapshot_schema_version(kv, catalog, row.order)?;
+    let schema_version =
+        schema_version.map_or_else(|| snapshot_schema_version_at(kv, catalog, row.order), Ok)?;
     record_runtime_stage(
         "method.runtime_catalog_snapshot.conflict_snapshot_payload.schema_version",
         stage_started,
@@ -159,32 +161,12 @@ fn snapshot_schema_version_at(
     })
 }
 
-fn current_conflict_snapshot_schema_version(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    order: CatalogOrderId,
-) -> CatalogResult<u64> {
-    let started = RuntimeMetricStage::start();
-    if let Some(version) = load_current_schema_version(kv, catalog)? {
-        record_runtime_stage(
-            "method.runtime_catalog_snapshot.current_conflict_schema_version.hit",
-            started,
-        );
-        return Ok(version);
-    }
-    record_runtime_stage(
-        "method.runtime_catalog_snapshot.current_conflict_schema_version.miss",
-        started,
-    );
-    snapshot_schema_version_at(kv, catalog, order)
-}
-
 #[cfg(test)]
 pub(crate) fn catalog_snapshot_payload(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
     ducklake_snapshot_id: u64,
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     catalog_snapshot_payload_with_kind(
         kv,
         catalog,
@@ -204,46 +186,55 @@ pub(crate) fn catalog_snapshot_payload_with_kind(
     catalog: CatalogId,
     snapshot_id: DuckLakeSnapshotId,
     kind: CatalogSnapshotIdKind,
-) -> CatalogResult<Vec<u8>> {
-    #[cfg(not(test))]
-    if crate::store::runtime_read_context_enabled() {
-        let key = CatalogSnapshotPayloadCacheKey {
-            namespace: kv.catalog_cache_namespace(),
-            catalog,
-            snapshot_id,
-            kind,
-        };
-        let cache = static_bounded_cache(&CATALOG_SNAPSHOT_PAYLOAD_CACHE, 1024);
-        if let Some(payload) = cache.get(key) {
-            return Ok(payload);
-        }
-        let mut request = CatalogSnapshotRequestContext::for_current_catalog(kv, catalog)?;
-        let requested = request.resolve_snapshot(kv, catalog, snapshot_id, kind)?;
-        let catalog_context = request.snapshot_context_for(kv, catalog, requested)?;
-        let payload = render_catalog_snapshot_payload(catalog_context);
-        cache.insert(key, payload.clone());
-        return Ok(payload);
-    }
+) -> CatalogResult<RuntimePayload> {
+    let stage = crate::runtime_trace::RuntimeSpan::enter("method.catalog_payload.ResolveSnapshot");
     let mut request = CatalogSnapshotRequestContext::for_current_catalog(kv, catalog)?;
     let requested = request.resolve_snapshot(kv, catalog, snapshot_id, kind)?;
-    #[cfg(test)]
-    {
-        let catalog_context = request.snapshot_context_for(kv, catalog, requested)?;
-        Ok(render_catalog_snapshot_payload(catalog_context))
-    }
+    stage.finish(true);
     #[cfg(not(test))]
-    {
-        let catalog_context = request.snapshot_context_for(kv, catalog, requested)?;
-        Ok(render_catalog_snapshot_payload(catalog_context))
+    if crate::store::runtime_read_context_enabled() {
+        let key = crate::runtime_read_context::catalog_snapshot_payload_identity(
+            kv, catalog, &requested,
+        )?;
+        let cache = static_bounded_cache(&CATALOG_SNAPSHOT_PAYLOAD_CACHE, 1024);
+        if let Some(payload) = cache.get(key) {
+            crate::runtime_metrics::record_runtime_measurement(
+                "cache.catalog_payload.version_hit",
+                1,
+                payload.len() as u64,
+            );
+            return Ok(payload.into());
+        }
+        let payload = render_requested_catalog(kv, catalog, &mut request, requested)?;
+        let payload = std::sync::Arc::new(payload);
+        cache.insert(key, payload.clone());
+        return Ok(payload.into());
     }
+    render_requested_catalog(kv, catalog, &mut request, requested).map(Into::into)
+}
+
+fn render_requested_catalog(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    request: &mut CatalogSnapshotRequestContext,
+    requested: SnapshotRow,
+) -> CatalogResult<Vec<u8>> {
+    let stage = crate::runtime_trace::RuntimeSpan::enter("method.catalog_payload.BuildContext");
+    let context = request.snapshot_context_for(kv, catalog, requested)?;
+    stage.finish(true);
+    let stage = crate::runtime_trace::RuntimeSpan::enter("method.catalog_payload.Render");
+    let payload = render_catalog_snapshot_payload(context);
+    stage.finish(true);
+    Ok(payload)
 }
 
 fn render_catalog_snapshot_payload(context: CatalogSnapshotReadContext) -> Vec<u8> {
     let _snapshot_order = context.snapshot.order;
     let mut out = String::new();
-    out.push_str(&format!("schema_count={}\n", context.schemas.len()));
-    for schema in context.schemas {
-        out.push_str(&format!(
+    write!(out, "schema_count={}\n", context.schemas.len()).expect("writing to String cannot fail");
+    for schema in context.schemas.iter() {
+        write!(
+            out,
             "schema\t{}\t{}\t{}\t{}\t{}\n",
             schema.schema_id.0,
             schema.uuid,
@@ -253,11 +244,13 @@ fn render_catalog_snapshot_payload(context: CatalogSnapshotReadContext) -> Vec<u
                 .parent_schema_id
                 .map(|id| id.0.to_string())
                 .unwrap_or_default()
-        ));
+        )
+        .expect("writing to String cannot fail");
     }
-    out.push_str(&format!("table_count={}\n", context.tables.len()));
-    for table in context.tables {
-        out.push_str(&format!(
+    write!(out, "table_count={}\n", context.tables.len()).expect("writing to String cannot fail");
+    for table in context.tables.iter() {
+        write!(
+            out,
             "table\t{}\t{}\t{}\t{}\t{}\t{}\n",
             table.table_id.0,
             table.schema_id.0,
@@ -265,9 +258,11 @@ fn render_catalog_snapshot_payload(context: CatalogSnapshotReadContext) -> Vec<u
             table.name,
             table.path,
             table.comment.clone().unwrap_or_default()
-        ));
+        )
+        .expect("writing to String cannot fail");
         for column in columns_parent_before_children(&table.columns) {
-            out.push_str(&format!(
+            write!(
+                out,
                 "column\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                 table.table_id.0,
                 column.column_id.0,
@@ -277,33 +272,39 @@ fn render_catalog_snapshot_payload(context: CatalogSnapshotReadContext) -> Vec<u
                 column
                     .parent_id
                     .map_or(String::new(), |id| id.0.to_string()),
-                column.comment.unwrap_or_default(),
-                column.initial_default.unwrap_or_default(),
-                column.default_value.unwrap_or_else(|| "NULL".to_owned()),
+                column.comment.as_deref().unwrap_or_default(),
+                column.initial_default.as_deref().unwrap_or_default(),
+                column.default_value.as_deref().unwrap_or("NULL"),
                 column.default_value_type
-            ));
+            )
+            .expect("writing to String cannot fail");
         }
-        for inlined_table in table.inlined_data_tables {
-            out.push_str(&format!(
+        for inlined_table in &table.inlined_data_tables {
+            write!(
+                out,
                 "inlined_table\t{}\t{}\t{}\n",
                 table.table_id.0, inlined_table.table_name, inlined_table.schema_version
-            ));
+            )
+            .expect("writing to String cannot fail");
         }
-        if let Some(partition) = table.partition {
-            for field in partition.fields {
-                out.push_str(&format!(
+        if let Some(partition) = &table.partition {
+            for field in &partition.fields {
+                write!(
+                    out,
                     "partition\t{}\t{}\t{}\t{}\t{}\n",
                     table.table_id.0,
                     partition.partition_id,
                     field.partition_key_index,
                     field.column_id.0,
                     field.transform
-                ));
+                )
+                .expect("writing to String cannot fail");
             }
         }
-        if let Some(sort) = table.sort {
-            for field in sort.fields {
-                out.push_str(&format!(
+        if let Some(sort) = &table.sort {
+            for field in &sort.fields {
+                write!(
+                    out,
                     "sort\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                     table.table_id.0,
                     sort.sort_id,
@@ -312,13 +313,15 @@ fn render_catalog_snapshot_payload(context: CatalogSnapshotReadContext) -> Vec<u
                     field.dialect,
                     field.sort_direction,
                     field.null_order
-                ));
+                )
+                .expect("writing to String cannot fail");
             }
         }
     }
-    out.push_str(&format!("view_count={}\n", context.views.len()));
-    for view in context.views {
-        out.push_str(&format!(
+    write!(out, "view_count={}\n", context.views.len()).expect("writing to String cannot fail");
+    for view in context.views.iter() {
+        write!(
+            out,
             "view\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             view.view_id.0,
             view.schema_id.0,
@@ -327,26 +330,32 @@ fn render_catalog_snapshot_payload(context: CatalogSnapshotReadContext) -> Vec<u
             view.dialect,
             view.sql,
             view.column_aliases.join("\x1f"),
-            view.comment.unwrap_or_default()
-        ));
+            view.comment.as_deref().unwrap_or_default()
+        )
+        .expect("writing to String cannot fail");
     }
-    out.push_str(&format!("macro_count={}\n", context.macros.len()));
-    for macro_row in context.macros {
-        out.push_str(&format!(
+    write!(out, "macro_count={}\n", context.macros.len()).expect("writing to String cannot fail");
+    for macro_row in context.macros.iter() {
+        write!(
+            out,
             "macro\t{}\t{}\t{}\n",
             macro_row.macro_id.0, macro_row.schema_id.0, macro_row.name
-        ));
+        )
+        .expect("writing to String cannot fail");
         for (impl_id, implementation) in macro_row.implementations.iter().enumerate() {
-            out.push_str(&format!(
+            write!(
+                out,
                 "macro_impl\t{}\t{}\t{}\t{}\t{}\n",
                 macro_row.macro_id.0,
                 impl_id,
                 implementation.dialect,
                 implementation.sql,
                 implementation.macro_type
-            ));
+            )
+            .expect("writing to String cannot fail");
             for (param_id, parameter) in implementation.parameters.iter().enumerate() {
-                out.push_str(&format!(
+                write!(
+                    out,
                     "macro_param\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                     macro_row.macro_id.0,
                     impl_id,
@@ -355,14 +364,17 @@ fn render_catalog_snapshot_payload(context: CatalogSnapshotReadContext) -> Vec<u
                     duckdb_type_name(&parameter.parameter_type),
                     parameter.default_value,
                     duckdb_type_name(&parameter.default_value_type)
-                ));
+                )
+                .expect("writing to String cannot fail");
             }
         }
     }
     out.into_bytes()
 }
 
-fn columns_parent_before_children(columns: &[crate::TableColumnRow]) -> Vec<crate::TableColumnRow> {
+fn columns_parent_before_children(
+    columns: &[crate::TableColumnRow],
+) -> Vec<&crate::TableColumnRow> {
     let mut children = BTreeMap::<crate::ColumnId, Vec<usize>>::new();
     let mut ready = BTreeSet::new();
     let mut remaining = (0..columns.len()).collect::<BTreeSet<_>>();
@@ -380,7 +392,7 @@ fn columns_parent_before_children(columns: &[crate::TableColumnRow]) -> Vec<crat
             continue;
         }
         let column = &columns[index];
-        ordered.push(column.clone());
+        ordered.push(column);
         if let Some(child_indexes) = children.get(&column.column_id) {
             ready.extend(
                 child_indexes
@@ -407,26 +419,23 @@ pub(crate) struct SnapshotWatermarks {
     pub(crate) next_file_id: u64,
 }
 
-pub(crate) fn conflict_snapshot_watermarks(
+pub(crate) fn snapshot_watermarks(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
     _order: CatalogOrderId,
 ) -> CatalogResult<SnapshotWatermarks> {
-    let watermarks = load_conflict_watermarks(kv, catalog)?;
-    Ok(SnapshotWatermarks {
-        next_catalog_id: watermarks
-            .max_catalog_id
-            .map_or(0, |id| id.saturating_add(1)),
-        next_file_id: watermarks.max_file_id.map_or(0, |id| id.saturating_add(1)),
-    })
+    load_conflict_watermarks(kv, catalog).map(SnapshotWatermarks::from)
 }
 
-pub(crate) fn snapshot_watermarks(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    order: CatalogOrderId,
-) -> CatalogResult<SnapshotWatermarks> {
-    conflict_snapshot_watermarks(kv, catalog, order)
+impl From<ConflictWatermarkValues> for SnapshotWatermarks {
+    fn from(watermarks: ConflictWatermarkValues) -> Self {
+        Self {
+            next_catalog_id: watermarks
+                .max_catalog_id
+                .map_or(0, |id| id.saturating_add(1)),
+            next_file_id: watermarks.max_file_id.map_or(0, |id| id.saturating_add(1)),
+        }
+    }
 }
 
 #[cfg(feature = "runtime-metrics")]

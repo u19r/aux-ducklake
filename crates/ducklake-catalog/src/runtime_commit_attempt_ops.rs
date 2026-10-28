@@ -1,6 +1,5 @@
 use crate::{
     CatalogError, CatalogResult, CommitAttemptId, DuckLakeSnapshotId, SnapshotCommitMetadata,
-    runtime_metrics::RuntimeMetricStage,
     runtime_object_ops::{CHANGE_VIEW_COMMENT, CREATE_VIEWS, DROP_VIEWS, RENAME_VIEWS},
     runtime_schema_change_payload::{
         ADD_COLUMNS, CHANGE_COLUMN_DEFAULTS, CHANGE_COLUMN_TYPES, CHANGE_COMMENTS,
@@ -9,6 +8,7 @@ use crate::{
     runtime_schema_ops::{CREATE_SCHEMAS, DROP_SCHEMAS},
     runtime_snapshot_range::ProposedCommitSnapshot,
     runtime_table_ops::{CREATE_TABLES, REPLACE_TABLES},
+    runtime_trace::RuntimeSpan,
 };
 
 const COMMIT_ATTEMPT: &str = "CommitAttempt";

@@ -1,3 +1,4 @@
+use crate::runtime_protocol::RuntimePayload;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 #[cfg(feature = "runtime-metrics")]
@@ -7,9 +8,10 @@ use crate::{
     runtime_metrics::{RuntimeMetricStage, RuntimeMetricStatus},
     runtime_operations::{payload_for_request, runtime_operation_policy},
     runtime_protocol::{
-        RuntimeCatalogBackend, RuntimeRequest, RuntimeResponse, RuntimeResponseStatus,
+        RuntimeCatalogBackend, RuntimeRequestRef, RuntimeResponse, RuntimeResponseStatus,
         paged_runtime_response,
     },
+    runtime_trace::RuntimeSpan,
 };
 
 #[repr(C)]
@@ -63,42 +65,25 @@ pub unsafe extern "C" fn ducklake_catalog_runtime_probe(
     // SAFETY: The caller provides a non-null pointer and length for the duration of
     // this call.
     let request_bytes = unsafe { std::slice::from_raw_parts(request_ptr, request_len) };
-    let probe = match catch_unwind(AssertUnwindSafe(|| runtime_probe_response(request_bytes))) {
+    let mut span = RuntimeSpan::enter("ffi.request");
+    let probe = match catch_unwind(AssertUnwindSafe(|| {
+        runtime_probe_response(request_bytes, &mut span)
+    })) {
         Ok(probe) => probe,
         Err(panic) => RuntimeProbeResult {
             backend: None,
-            operation: "panic".to_owned(),
+            operation: "panic",
             response: panic_response(panic_message(&panic)),
         },
     };
-    let encode_started = RuntimeMetricStage::start();
-    let encoded = encode_response(probe.response);
-    if let Some(backend) = probe.backend {
-        record_runtime_request_stage(
-            backend,
-            &format!("{}:encode", probe.operation),
-            RuntimeMetricStatus::Ok,
-            encode_started,
-        );
+    let is_ok = probe.response.status == RuntimeResponseStatus::Ok;
+    let (status, buffer) = encode_probe_response(probe);
+    span.finish(is_ok && status == FFI_OK);
+    // SAFETY: `out` is non-null, writable and exclusively owned by the caller.
+    unsafe {
+        *out = leak_buffer(buffer);
     }
-    match encoded {
-        Ok(buffer) => {
-            // SAFETY: `out` was validated as non-null and is exclusively owned by the
-            // caller.
-            unsafe {
-                *out = leak_buffer(buffer);
-            }
-            FFI_OK
-        }
-        Err(buffer) => {
-            // SAFETY: `out` was validated as non-null and is exclusively owned by the
-            // caller.
-            unsafe {
-                *out = leak_buffer(buffer);
-            }
-            FFI_RUNTIME_ERROR
-        }
-    }
+    status
 }
 
 #[unsafe(no_mangle)]
@@ -123,22 +108,96 @@ pub unsafe extern "C" fn ducklake_catalog_runtime_free(ptr: *mut u8, len: usize)
 #[unsafe(no_mangle)]
 pub extern "C" fn ducklake_catalog_runtime_shutdown() -> i32 {
     crate::runtime_metrics::flush_runtime_metrics();
+    crate::runtime_trace::flush_runtime_trace();
     #[cfg(feature = "foundationdb")]
     crate::fdb_runtime::abandon_foundationdb_for_process_shutdown();
     FFI_OK
 }
 
-#[cfg_attr(not(feature = "runtime-metrics"), allow(dead_code))]
-struct RuntimeProbeResult {
-    backend: Option<RuntimeCatalogBackend>,
-    operation: String,
-    response: RuntimeResponse,
+#[unsafe(no_mangle)]
+/// Starts a synchronous C++ diagnostic scope; disabled builds return null.
+///
+/// # Safety
+/// `operation` references `len` readable UTF-8 bytes during this call.
+/// End the returned scope exactly once, on this thread, in reverse nesting order.
+pub unsafe extern "C" fn ducklake_catalog_runtime_trace_begin(
+    operation: *const u8,
+    len: usize,
+) -> *mut std::ffi::c_void {
+    #[cfg(feature = "runtime-metrics")]
+    {
+        if operation.is_null() {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: The caller retains the operation bytes throughout this call.
+        let bytes = unsafe { std::slice::from_raw_parts(operation, len) };
+        let Ok(operation) = std::str::from_utf8(bytes) else {
+            return std::ptr::null_mut();
+        };
+        Box::into_raw(Box::new(RuntimeSpan::enter(operation))).cast()
+    }
+    #[cfg(not(feature = "runtime-metrics"))]
+    {
+        let _ = (operation, len);
+        std::ptr::null_mut()
+    }
 }
 
-fn runtime_probe_response(bytes: &[u8]) -> RuntimeProbeResult {
+#[unsafe(no_mangle)]
+/// Ends a scope returned by `ducklake_catalog_runtime_trace_begin`.
+///
+/// # Safety
+/// `span` is null or an unfreed scope from this thread at the top of its trace stack.
+pub unsafe extern "C" fn ducklake_catalog_runtime_trace_end(
+    span: *mut std::ffi::c_void,
+    is_ok: i32,
+) {
+    if !span.is_null() {
+        // SAFETY: The caller supplies its unique live scope on the originating thread.
+        let span = unsafe { Box::from_raw(span.cast::<RuntimeSpan>()) };
+        span.finish(is_ok != 0);
+    }
+}
+
+#[cfg_attr(not(feature = "runtime-metrics"), allow(dead_code))]
+struct RuntimeProbeResult<'a> {
+    backend: Option<RuntimeCatalogBackend>,
+    operation: &'a str,
+    response: RuntimeResponse<RuntimePayload>,
+}
+
+fn encode_probe_response(probe: RuntimeProbeResult<'_>) -> (i32, Vec<u8>) {
+    #[cfg(feature = "runtime-metrics")]
+    let started = RuntimeMetricStage::start();
+    let encoded = encode_response(probe.response);
+    #[cfg(feature = "runtime-metrics")]
+    if let Some(backend) = probe.backend {
+        let status = if encoded.is_ok() {
+            RuntimeMetricStatus::Ok
+        } else {
+            RuntimeMetricStatus::Error
+        };
+        #[cfg(feature = "runtime-metrics")]
+        record_runtime_request_stage(
+            backend,
+            &format!("{}:encode", probe.operation),
+            status,
+            started,
+        );
+    }
+    match encoded {
+        Ok(buffer) => (FFI_OK, buffer),
+        Err(buffer) => (FFI_RUNTIME_ERROR, buffer),
+    }
+}
+
+fn runtime_probe_response<'a>(bytes: &'a [u8], span: &mut RuntimeSpan) -> RuntimeProbeResult<'a> {
+    #[cfg(feature = "runtime-metrics")]
     let decode_started = RuntimeMetricStage::start();
-    let request = match RuntimeRequest::decode(bytes) {
+    let request = match RuntimeRequestRef::decode(bytes) {
         Ok(request) => {
+            span.bind_request(request.catalog_id.0, request.read_context_id);
+            #[cfg(feature = "runtime-metrics")]
             record_runtime_request_stage(
                 request.backend,
                 &format!("{}:decode", request.operation),
@@ -148,20 +207,21 @@ fn runtime_probe_response(bytes: &[u8]) -> RuntimeProbeResult {
             request
         }
         Err(error) => {
-            let response = RuntimeResponse::error("decode-error", error.to_string().into_bytes())
-                .unwrap_or_else(|_| {
-                    error_response(crate::CatalogError::Decode(
-                        "failed to encode decode error".to_owned(),
-                    ))
-                });
+            let response =
+                RuntimeResponse::error("decode-error", error.to_string().into_bytes().into())
+                    .unwrap_or_else(|_| {
+                        error_response(crate::CatalogError::Decode(
+                            "failed to encode decode error".to_owned(),
+                        ))
+                    });
             return RuntimeProbeResult {
                 backend: None,
-                operation: "decode-error".to_owned(),
+                operation: "decode-error",
                 response,
             };
         }
     };
-    let operation = request.operation.clone();
+    let operation = request.operation;
     let backend = request.backend;
     let response = runtime_response_from_request(request).map_err(error_response);
     let response = match response {
@@ -174,7 +234,9 @@ fn runtime_probe_response(bytes: &[u8]) -> RuntimeProbeResult {
     }
 }
 
-fn runtime_response_from_request(request: RuntimeRequest) -> CatalogResult<RuntimeResponse> {
+fn runtime_response_from_request(
+    request: RuntimeRequestRef<'_>,
+) -> CatalogResult<RuntimeResponse<RuntimePayload>> {
     let started = RuntimeMetricStage::start();
     let mutates_catalog = runtime_operation_policy(&request.operation).mutates_catalog;
     // Commit validation must observe commits made after the caller's pinned read
@@ -190,7 +252,11 @@ fn runtime_response_from_request(request: RuntimeRequest) -> CatalogResult<Runti
         crate::store::invalidate_runtime_read_context(request.catalog_id);
         read_request.invalidate_catalog_on_drop(request.catalog_id, request.read_context_id);
     }
-    let payload = match payload_for_request(&request) {
+    #[cfg(feature = "foundationdb")]
+    let result = crate::runtime_read_versions::read_with_retry(|| payload_for_request(&request));
+    #[cfg(not(feature = "foundationdb"))]
+    let result = payload_for_request(&request);
+    let payload = match result {
         Ok(payload) => {
             record_runtime_request_stage(
                 request.backend,
@@ -210,23 +276,18 @@ fn runtime_response_from_request(request: RuntimeRequest) -> CatalogResult<Runti
             return Err(error);
         }
     };
-    let request_id = request.request_id;
+    let request_id = request.request_id.to_owned();
     if request.operation == "EndRuntimeReadContext" {
         read_request.end_context();
     }
     if mutates_catalog {
         RuntimeResponse::ok(request_id, payload)
     } else {
-        paged_runtime_response(
-            request_id,
-            payload,
-            request.page_offset,
-            request.page_etag.as_deref(),
-        )
+        paged_runtime_response(request_id, payload, request.page_offset, request.page_etag)
     }
 }
 
-fn encode_response(response: RuntimeResponse) -> Result<Vec<u8>, Vec<u8>> {
+fn encode_response(response: RuntimeResponse<RuntimePayload>) -> Result<Vec<u8>, Vec<u8>> {
     response.encode().map_err(|error| {
         RuntimeResponse::error("encode-error", error.to_string().into_bytes())
             .and_then(|response| response.encode())
@@ -237,27 +298,30 @@ fn encode_response(response: RuntimeResponse) -> Result<Vec<u8>, Vec<u8>> {
     })
 }
 
-fn error_response(error: crate::CatalogError) -> RuntimeResponse {
-    RuntimeResponse::error("runtime-error", error.to_string().into_bytes()).unwrap_or_else(|_| {
-        RuntimeResponse {
+fn error_response(error: crate::CatalogError) -> RuntimeResponse<RuntimePayload> {
+    RuntimeResponse::error("runtime-error", error.to_string().into_bytes().into()).unwrap_or_else(
+        |_| RuntimeResponse {
             request_id: "runtime-error".to_owned(),
             status: RuntimeResponseStatus::Error,
-            payload: Vec::new(),
+            payload: Vec::new().into(),
             next_page_offset: None,
             page_etag: None,
-        }
-    })
+        },
+    )
 }
 
-fn panic_response(message: String) -> RuntimeResponse {
-    RuntimeResponse::error("panic", format!("runtime panic: {message}").into_bytes())
-        .unwrap_or_else(|_| RuntimeResponse {
-            request_id: "panic".to_owned(),
-            status: RuntimeResponseStatus::Error,
-            payload: Vec::new(),
-            next_page_offset: None,
-            page_etag: None,
-        })
+fn panic_response(message: String) -> RuntimeResponse<RuntimePayload> {
+    RuntimeResponse::error(
+        "panic",
+        format!("runtime panic: {message}").into_bytes().into(),
+    )
+    .unwrap_or_else(|_| RuntimeResponse {
+        request_id: "panic".to_owned(),
+        status: RuntimeResponseStatus::Error,
+        payload: Vec::new().into(),
+        next_page_offset: None,
+        page_etag: None,
+    })
 }
 
 fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {

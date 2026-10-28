@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-
+use std::sync::Arc;
 #[cfg(not(test))]
 use std::sync::OnceLock;
 
@@ -7,7 +7,6 @@ use std::sync::OnceLock;
 use crate::CatalogCacheNamespace;
 #[cfg(not(test))]
 use crate::bounded_cache::{BoundedCache, static_bounded_cache};
-use crate::runtime_snapshots::SnapshotReadContext;
 #[cfg(not(test))]
 use crate::schema_version_state::load_catalog_snapshot_version;
 use crate::{
@@ -21,41 +20,39 @@ use crate::{
     inline_data::inline_file_deletion_begin_order,
     keys::{KeyFamily, family_prefix, inline_file_deletion_table_prefix},
     list_file_column_stats, list_snapshots,
-    macro_store::list_macro_rows,
-    schema_store::list_schema_rows,
+    runtime_snapshots::SnapshotReadContext,
     store::latest_snapshot,
-    table_store::{list_current_table_rows, list_table_rows},
-    view_store::list_view_rows,
+    table_store::list_current_table_rows,
 };
 
 #[derive(Clone)]
 #[allow(dead_code)]
 pub(crate) struct CatalogReadContext {
     latest: Option<SnapshotRow>,
-    snapshots: Vec<SnapshotRow>,
-    current_tables: Vec<TableRow>,
-    current_data_files: Vec<DataFileRow>,
-    current_file_column_stats: Vec<FileColumnStatsRow>,
-    current_file_partition_values: Vec<FilePartitionValueRow>,
+    snapshots: Arc<Vec<SnapshotRow>>,
+    current_tables: Arc<Vec<TableRow>>,
+    current_data_files: Arc<Vec<DataFileRow>>,
+    current_file_column_stats: Arc<Vec<FileColumnStatsRow>>,
+    current_file_partition_values: Arc<Vec<FilePartitionValueRow>>,
 }
 
 #[derive(Clone)]
 #[allow(dead_code)]
 pub(crate) struct CatalogCurrentFilesContext {
-    current_data_files: Vec<DataFileRow>,
+    current_data_files: Arc<Vec<DataFileRow>>,
 }
 
 #[derive(Clone)]
 #[allow(dead_code)]
 pub(crate) struct CatalogCurrentFileColumnStatsContext {
     latest: Option<SnapshotRow>,
-    current_file_column_stats: Vec<FileColumnStatsRow>,
+    current_file_column_stats: Arc<Vec<FileColumnStatsRow>>,
 }
 
 #[derive(Clone)]
 #[allow(dead_code)]
 pub(crate) struct CatalogCurrentFilePartitionValuesContext {
-    current_file_partition_values: Vec<FilePartitionValueRow>,
+    current_file_partition_values: Arc<Vec<FilePartitionValueRow>>,
 }
 
 #[derive(Clone)]
@@ -68,12 +65,12 @@ pub(crate) struct CatalogSnapshotRequestContext {
 #[derive(Clone)]
 struct CatalogSnapshotFacts {
     latest: Option<SnapshotRow>,
-    schemas: Vec<SchemaRow>,
-    tables: Vec<TableRow>,
+    schemas: Arc<Vec<SchemaRow>>,
+    tables: Arc<Vec<TableRow>>,
     table_scope: CatalogSnapshotTableScope,
-    current_tables: Vec<TableRow>,
-    views: Vec<crate::ViewRow>,
-    macros: Vec<crate::MacroRow>,
+    current_tables: Arc<Vec<TableRow>>,
+    views: Arc<Vec<crate::ViewRow>>,
+    macros: Arc<Vec<crate::MacroRow>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,13 +82,13 @@ enum CatalogSnapshotTableScope {
 #[derive(Clone)]
 #[allow(dead_code)]
 pub(crate) struct InlineDeletionReadContext {
-    rows: Vec<InlineFileDeletionRow>,
+    rows: Arc<Vec<InlineFileDeletionRow>>,
 }
 
 #[derive(Clone)]
 #[allow(dead_code)]
 pub(crate) struct CatalogInlineDeletionReadContext {
-    rows: Vec<InlineFileDeletionRow>,
+    rows: Arc<Vec<InlineFileDeletionRow>>,
 }
 
 #[allow(dead_code)]
@@ -141,7 +138,9 @@ impl CatalogInlineDeletionReadContext {
                 row.validity.begin_order,
             )
         });
-        Ok(Self { rows })
+        Ok(Self {
+            rows: Arc::new(rows),
+        })
     }
 }
 
@@ -152,24 +151,43 @@ impl InlineDeletionReadContext {
         catalog: CatalogId,
         table_id: TableId,
     ) -> CatalogResult<Self> {
+        Self::for_scope(kv, catalog, table_id, None)
+    }
+
+    pub(crate) fn for_file(
+        kv: &impl OrderedCatalogKv,
+        catalog: CatalogId,
+        table_id: TableId,
+        file_id: DataFileId,
+    ) -> CatalogResult<Self> {
+        Self::for_scope(kv, catalog, table_id, Some(file_id))
+    }
+
+    fn for_scope(
+        kv: &impl OrderedCatalogKv,
+        catalog: CatalogId,
+        table_id: TableId,
+        file_id: Option<DataFileId>,
+    ) -> CatalogResult<Self> {
         #[cfg(not(test))]
         {
             let key = InlineDeletionContextKey {
                 namespace: kv.catalog_cache_namespace(),
                 catalog,
                 table_id,
+                file_id,
             };
             let cache = inline_deletion_context_cache();
             if let Some(context) = cache.get(key) {
                 return Ok(context);
             }
-            let context = Self::load(kv, catalog, table_id)?;
+            let context = Self::load(kv, catalog, table_id, file_id)?;
             cache.insert(key, context.clone());
             Ok(context)
         }
         #[cfg(test)]
         {
-            Self::load(kv, catalog, table_id)
+            Self::load(kv, catalog, table_id, file_id)
         }
     }
 
@@ -188,20 +206,23 @@ impl InlineDeletionReadContext {
         kv: &impl OrderedCatalogKv,
         catalog: CatalogId,
         table_id: TableId,
+        file_id: Option<DataFileId>,
     ) -> CatalogResult<Self> {
+        let prefix = file_id.map_or_else(
+            || inline_file_deletion_table_prefix(catalog, table_id),
+            |file| crate::keys::inline_file_deletion_file_prefix(catalog, table_id, file),
+        );
         let mut rows = Vec::new();
-        for item in kv.scan_prefix(
-            &inline_file_deletion_table_prefix(catalog, table_id),
-            RangeDirection::Forward,
-            usize::MAX,
-        )? {
+        for item in kv.scan_prefix(&prefix, RangeDirection::Forward, usize::MAX)? {
             let mut row = InlineFileDeletionRow::decode(&item.value)?;
             row.validity.begin_order =
                 inline_file_deletion_begin_order(catalog, &item.key, row.validity.begin_order)?;
             rows.push(row);
         }
         rows.sort_by_key(|row| (row.data_file_id, row.row_id, row.validity.begin_order));
-        Ok(Self { rows })
+        Ok(Self {
+            rows: Arc::new(rows),
+        })
     }
 }
 
@@ -260,7 +281,7 @@ impl CatalogCurrentFilesContext {
     ) -> CatalogResult<Self> {
         let Some(latest) = latest_snapshot(kv, catalog)? else {
             return Ok(Self {
-                current_data_files: Vec::new(),
+                current_data_files: Arc::default(),
             });
         };
         #[cfg(test)]
@@ -286,18 +307,18 @@ impl CatalogCurrentFilesContext {
         &self.current_data_files
     }
 
-    pub(crate) fn current_data_files_for_table(&self, table_id: TableId) -> Vec<DataFileRow> {
+    pub(crate) fn current_data_files_for_table(&self, table_id: TableId) -> &[DataFileRow] {
         let start = self
             .current_data_files
             .partition_point(|row| row.table_id < table_id);
         let end = self.current_data_files[start..].partition_point(|row| row.table_id == table_id)
             + start;
-        self.current_data_files[start..end].to_vec()
+        &self.current_data_files[start..end]
     }
 
     fn load(kv: &impl OrderedCatalogKv, catalog: CatalogId) -> CatalogResult<Self> {
         Ok(Self {
-            current_data_files: list_all_current_data_files(kv, catalog)?,
+            current_data_files: Arc::new(list_all_current_data_files(kv, catalog)?),
         })
     }
 }
@@ -308,10 +329,15 @@ impl CatalogCurrentFileColumnStatsContext {
         kv: &impl OrderedCatalogKv,
         catalog: CatalogId,
     ) -> CatalogResult<Self> {
-        let Some(latest) = latest_snapshot(kv, catalog)? else {
+        let Some(latest) = crate::store::prepared_latest_snapshot(
+            kv,
+            catalog,
+            crate::catalog_request_read_set::CatalogHeaderProjection::FileStatistics,
+        )?
+        else {
             return Ok(Self {
                 latest: None,
-                current_file_column_stats: Vec::new(),
+                current_file_column_stats: Arc::default(),
             });
         };
         let current_tables = list_current_table_rows(kv, catalog)?;
@@ -368,12 +394,12 @@ impl CatalogCurrentFileColumnStatsContext {
     ) -> CatalogResult<Self> {
         Ok(Self {
             latest: Some(latest),
-            current_file_column_stats: current_file_column_stats(
+            current_file_column_stats: Arc::new(current_file_column_stats(
                 kv,
                 catalog,
                 current_tables,
                 current_data_files,
-            )?,
+            )?),
         })
     }
 }
@@ -386,7 +412,7 @@ impl CatalogCurrentFilePartitionValuesContext {
     ) -> CatalogResult<Self> {
         let Some(latest) = latest_snapshot(kv, catalog)? else {
             return Ok(Self {
-                current_file_partition_values: Vec::new(),
+                current_file_partition_values: Arc::default(),
             });
         };
         #[cfg(test)]
@@ -415,11 +441,11 @@ impl CatalogCurrentFilePartitionValuesContext {
     fn load(kv: &impl OrderedCatalogKv, catalog: CatalogId) -> CatalogResult<Self> {
         let current_files_context = CatalogCurrentFilesContext::for_current_files(kv, catalog)?;
         Ok(Self {
-            current_file_partition_values: current_file_partition_values(
+            current_file_partition_values: Arc::new(current_file_partition_values(
                 kv,
                 catalog,
                 current_files_context.current_data_files(),
-            )?,
+            )?),
         })
     }
 }
@@ -489,22 +515,22 @@ impl CatalogReadContext {
             current_file_column_stats(kv, catalog, &current_tables, &current_data_files)?;
         Ok(Self {
             latest,
-            snapshots,
-            current_tables,
-            current_data_files,
-            current_file_column_stats,
-            current_file_partition_values,
+            snapshots: Arc::new(snapshots),
+            current_tables: Arc::new(current_tables),
+            current_data_files: Arc::new(current_data_files),
+            current_file_column_stats: Arc::new(current_file_column_stats),
+            current_file_partition_values: Arc::new(current_file_partition_values),
         })
     }
 
     fn empty() -> Self {
         Self {
             latest: None,
-            snapshots: Vec::new(),
-            current_tables: Vec::new(),
-            current_data_files: Vec::new(),
-            current_file_column_stats: Vec::new(),
-            current_file_partition_values: Vec::new(),
+            snapshots: Arc::default(),
+            current_tables: Arc::default(),
+            current_data_files: Arc::default(),
+            current_file_column_stats: Arc::default(),
+            current_file_partition_values: Arc::default(),
         }
     }
 }
@@ -515,7 +541,11 @@ impl CatalogSnapshotRequestContext {
         catalog: CatalogId,
     ) -> CatalogResult<Self> {
         Ok(Self {
-            latest: latest_snapshot(kv, catalog)?,
+            latest: crate::store::prepared_latest_snapshot(
+                kv,
+                catalog,
+                crate::catalog_request_read_set::CatalogHeaderProjection::Catalog,
+            )?,
             snapshots: None,
             facts: None,
         })
@@ -595,18 +625,10 @@ impl CatalogSnapshotRequestContext {
             .is_none_or(|facts| !facts.can_render_snapshot(snapshot.order))
         {
             self.facts = Some(match self.snapshots.as_ref() {
-                Some(snapshots) => CatalogSnapshotFacts::from_snapshot_context(
-                    kv,
-                    catalog,
-                    self.latest.clone(),
-                    snapshots,
-                )?,
-                None => CatalogSnapshotFacts::for_catalog(
-                    kv,
-                    catalog,
-                    self.latest.clone(),
-                    snapshot.order,
-                )?,
+                Some(snapshots) => {
+                    CatalogSnapshotFacts::from_snapshot_context(kv, catalog, snapshots)?
+                }
+                None => CatalogSnapshotFacts::for_catalog(kv, catalog, snapshot.order)?,
             });
         }
         self.facts
@@ -640,26 +662,32 @@ impl CatalogSnapshotFacts {
     fn from_snapshot_context(
         kv: &impl OrderedCatalogKv,
         catalog: CatalogId,
-        latest: Option<SnapshotRow>,
         snapshots: &SnapshotReadContext,
     ) -> CatalogResult<Self> {
         Ok(Self {
-            latest,
-            schemas: snapshots.schemas().to_vec(),
-            tables: snapshots.tables().to_vec(),
+            latest: crate::store::latest_snapshot_uncached(kv, catalog).row?,
+            schemas: Arc::new(snapshots.schemas().to_vec()),
+            tables: Arc::new(snapshots.tables().to_vec()),
             table_scope: CatalogSnapshotTableScope::CompleteHistory,
-            current_tables: list_current_table_rows(kv, catalog)?,
-            views: snapshots.views().to_vec(),
-            macros: snapshots.macros().to_vec(),
+            current_tables: Arc::new(crate::table_store::list_current_table_rows_uncached(
+                kv, catalog,
+            )?),
+            views: Arc::new(snapshots.views().to_vec()),
+            macros: Arc::new(snapshots.macros().to_vec()),
         })
     }
 
     fn for_catalog(
         kv: &impl OrderedCatalogKv,
         catalog: CatalogId,
-        latest: Option<SnapshotRow>,
         requested_order: CatalogOrderId,
     ) -> CatalogResult<Self> {
+        let latest = crate::store::prepared_snapshot_read(
+            kv,
+            catalog,
+            crate::catalog_request_read_set::CatalogHeaderProjection::Catalog,
+        )
+        .row?;
         let table_scope = table_scope_for_request(latest.as_ref(), requested_order);
         #[cfg(not(test))]
         {
@@ -686,19 +714,21 @@ impl CatalogSnapshotFacts {
         latest: Option<SnapshotRow>,
         table_scope: CatalogSnapshotTableScope,
     ) -> CatalogResult<Self> {
-        let current_tables = list_current_table_rows(kv, catalog)?;
+        let current_tables = crate::table_store::list_current_table_rows_uncached(kv, catalog)?;
         let tables = match table_scope {
-            CatalogSnapshotTableScope::CompleteHistory => list_table_rows(kv, catalog)?,
+            CatalogSnapshotTableScope::CompleteHistory => {
+                crate::table_store::list_table_rows_uncached(kv, catalog)?
+            }
             CatalogSnapshotTableScope::CurrentOnly => Vec::new(),
         };
         Ok(Self {
             latest,
-            schemas: list_schema_rows(kv, catalog)?,
-            tables,
+            schemas: Arc::new(crate::schema_store::list_schema_rows_uncached(kv, catalog)?),
+            tables: Arc::new(tables),
             table_scope,
-            current_tables,
-            views: list_view_rows(kv, catalog)?,
-            macros: list_macro_rows(kv, catalog)?,
+            current_tables: Arc::new(current_tables),
+            views: Arc::new(crate::view_store::list_view_rows_uncached(kv, catalog)?),
+            macros: Arc::new(crate::macro_store::list_macro_rows_uncached(kv, catalog)?),
         })
     }
 
@@ -718,7 +748,7 @@ impl CatalogSnapshotFacts {
         }
     }
 
-    fn visible_tables_at(&self, snapshot_order: CatalogOrderId) -> Vec<TableRow> {
+    fn visible_tables_at(&self, snapshot_order: CatalogOrderId) -> Arc<Vec<TableRow>> {
         if self
             .latest
             .as_ref()
@@ -755,10 +785,10 @@ fn table_scope_for_request(
 
 pub(crate) struct CatalogSnapshotReadContext {
     pub(crate) snapshot: SnapshotRow,
-    pub(crate) schemas: Vec<SchemaRow>,
-    pub(crate) tables: Vec<TableRow>,
-    pub(crate) views: Vec<crate::ViewRow>,
-    pub(crate) macros: Vec<crate::MacroRow>,
+    pub(crate) schemas: Arc<Vec<SchemaRow>>,
+    pub(crate) tables: Arc<Vec<TableRow>>,
+    pub(crate) views: Arc<Vec<crate::ViewRow>>,
+    pub(crate) macros: Arc<Vec<crate::MacroRow>>,
 }
 
 trait CatalogVisibleRow {
@@ -789,26 +819,34 @@ impl CatalogVisibleRow for crate::MacroRow {
     }
 }
 
-fn visible_rows_at<Row: CatalogVisibleRow>(
-    rows: Vec<Row>,
+fn visible_rows_at<Row: CatalogVisibleRow + Clone>(
+    rows: Arc<Vec<Row>>,
     snapshot_order: CatalogOrderId,
-) -> Vec<Row> {
-    rows.into_iter()
-        .filter(|row| row.is_visible_at(snapshot_order))
-        .collect()
+) -> Arc<Vec<Row>> {
+    if rows.iter().all(|row| row.is_visible_at(snapshot_order)) {
+        return rows;
+    }
+    Arc::new(
+        rows.iter()
+            .filter(|row| row.is_visible_at(snapshot_order))
+            .cloned()
+            .collect(),
+    )
 }
 
 #[cfg(not(test))]
 pub(crate) fn invalidate_catalog_read_context(catalog: CatalogId) {
+    crate::runtime_metrics::record_runtime_measurement("cache.catalog.invalidate", 1, 0);
     if let Some(cache) = CURRENT_METADATA_CONTEXT_CACHE.get() {
         cache.retain(|key, _| key.1 != catalog);
     }
     if let Some(cache) = CURRENT_FILES_CONTEXT_CACHE.get() {
         cache.retain(|key, _| key.1 != catalog);
     }
-    // This context is keyed by current file membership plus table stats version keys, so generic
-    // snapshot churn must not discard it. Mutations that change files or stats produce a different
-    // key and naturally miss the cache.
+    // This context is keyed by current file membership plus table stats version
+    // keys, so generic snapshot churn must not discard it. Mutations that
+    // change files or stats produce a different key and naturally miss the
+    // cache.
     if let Some(cache) = CURRENT_FILE_PARTITION_VALUES_CONTEXT_CACHE.get() {
         cache.retain(|key, _| key.1 != catalog);
     }
@@ -930,8 +968,12 @@ fn catalog_snapshot_facts_context_key(
             CatalogSnapshotFactsVersion::LatestOrder(row.order)
         }),
     };
+    let namespace = kv.catalog_cache_namespace();
     Ok(CatalogSnapshotFactsContextKey {
-        namespace: kv.catalog_cache_namespace(),
+        namespace: match version {
+            CatalogSnapshotFactsVersion::Maintained(_) => namespace.without_read_context(),
+            _ => namespace,
+        },
         catalog,
         version,
         table_scope: match table_scope {
@@ -940,6 +982,46 @@ fn catalog_snapshot_facts_context_key(
             }
             CatalogSnapshotTableScope::CurrentOnly => CatalogSnapshotTableScopeKey::CurrentOnly,
         },
+    })
+}
+
+#[cfg(not(test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct CatalogSnapshotPayloadIdentity {
+    facts: CatalogSnapshotFactsContextKey,
+    historical_order: Option<CatalogOrderId>,
+}
+
+#[cfg(not(test))]
+pub(crate) fn catalog_snapshot_payload_identity(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    requested: &SnapshotRow,
+) -> CatalogResult<CatalogSnapshotPayloadIdentity> {
+    // The physical header can be newer than the context's pinned logical
+    // snapshot.
+    let latest = crate::store::prepared_snapshot_read(
+        kv,
+        catalog,
+        crate::catalog_request_read_set::CatalogHeaderProjection::Catalog,
+    )
+    .row?;
+    let scope = table_scope_for_request(latest.as_ref(), requested.order);
+    let facts = catalog_snapshot_facts_context_key(kv, catalog, latest.as_ref(), scope)?;
+    let is_current_version = matches!(facts.version, CatalogSnapshotFactsVersion::Maintained(_))
+        && scope == CatalogSnapshotTableScope::CurrentOnly;
+    crate::runtime_metrics::record_runtime_measurement(
+        if is_current_version {
+            "catalog_payload.current_identity"
+        } else {
+            "catalog_payload.historical_identity"
+        },
+        1,
+        0,
+    );
+    Ok(CatalogSnapshotPayloadIdentity {
+        facts,
+        historical_order: (!is_current_version).then_some(requested.order),
     })
 }
 
@@ -976,18 +1058,22 @@ fn current_file_column_stats_context_key(
         catalog,
         current_file_ids,
         table_columns,
-        stats_version: kv.get(&crate::keys::catalog_file_stats_version_key(catalog))?,
+        stats_version: crate::catalog_request_read_set::fetch_value(
+            kv,
+            catalog,
+            &crate::keys::catalog_file_stats_version_key(catalog),
+        )?,
     })
 }
 
 fn schemas_with_implicit_main_if_needed(
-    mut schemas: Vec<SchemaRow>,
+    mut schemas: Arc<Vec<SchemaRow>>,
     tables: &[TableRow],
-) -> Vec<SchemaRow> {
+) -> Arc<Vec<SchemaRow>> {
     let has_main_schema = schemas.iter().any(|schema| schema.schema_id == SchemaId(0));
     let needs_main_schema = tables.iter().any(|table| table.schema_id == SchemaId(0));
     if !has_main_schema && needs_main_schema {
-        schemas.push(SchemaRow::new(
+        Arc::make_mut(&mut schemas).push(SchemaRow::new(
             SchemaId(0),
             "00000000-0000-0000-0000-000000000000",
             "main",
@@ -1040,6 +1126,7 @@ struct InlineDeletionContextKey {
     namespace: CatalogCacheNamespace,
     catalog: CatalogId,
     table_id: TableId,
+    file_id: Option<DataFileId>,
 }
 
 #[cfg(not(test))]
@@ -1133,13 +1220,13 @@ mod tests {
     #[test]
     fn given_sorted_catalog_current_files_when_listing_table_then_only_table_range_is_returned() {
         let context = CatalogCurrentFilesContext {
-            current_data_files: vec![
+            current_data_files: Arc::new(vec![
                 data_file(1, 1),
                 data_file(2, 1),
                 data_file(5, 3),
                 data_file(8, 4),
                 data_file(13, 4),
-            ],
+            ]),
         };
 
         let rows = context.current_data_files_for_table(TableId(4));
@@ -1153,7 +1240,7 @@ mod tests {
     #[test]
     fn given_sorted_catalog_current_files_when_table_is_absent_then_empty_range_is_returned() {
         let context = CatalogCurrentFilesContext {
-            current_data_files: vec![data_file(1, 1), data_file(5, 3), data_file(8, 4)],
+            current_data_files: Arc::new(vec![data_file(1, 1), data_file(5, 3), data_file(8, 4)]),
         };
 
         let rows = context.current_data_files_for_table(TableId(2));

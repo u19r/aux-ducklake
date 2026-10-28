@@ -1,3 +1,4 @@
+use crate::runtime_protocol::RuntimePayload;
 use crate::{
     CatalogId, CatalogResult, DuckLakeSnapshotId, SnapshotTimestampBound,
     runtime_catalog_snapshot::CatalogSnapshotIdKind,
@@ -25,7 +26,7 @@ pub(crate) fn get_snapshot(
 pub(crate) fn get_conflict_snapshot(
     _backend: RuntimeCatalogBackend,
     catalog: CatalogId,
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     runtime_get_foundationdb_conflict_snapshot(catalog)
 }
 
@@ -56,7 +57,7 @@ pub(crate) fn get_catalog_for_snapshot(
     _backend: RuntimeCatalogBackend,
     catalog: CatalogId,
     payload: &[u8],
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     let snapshot_id = snapshot_id_payload_value(payload)?;
     let snapshot_kind = snapshot_id_kind_payload_value(payload)?;
     runtime_get_foundationdb_catalog_for_snapshot(catalog, snapshot_id, snapshot_kind)

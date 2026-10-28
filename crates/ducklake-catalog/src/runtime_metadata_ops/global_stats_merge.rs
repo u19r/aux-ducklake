@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 
 use crate::{CatalogResult, DataFileId, TableId, runtime_payload::optional_payload_str_value};
 
@@ -199,11 +200,12 @@ pub(super) fn collect_data_file_ids_from_payload(
         crate::CatalogError::Decode(format!("global stats file payload is not utf-8: {error}"))
     })?;
     for line in payload.lines() {
-        let fields = line.split('\t').collect::<Vec<_>>();
-        if fields.first().copied() != Some("file") {
+        let fields = crate::runtime_tabular_payload::TabularFields::new(line);
+        if fields.as_slice().first().copied() != Some("file") {
             continue;
         }
         let data_file_id = fields
+            .as_slice()
             .get(1)
             .ok_or_else(|| crate::CatalogError::Decode(format!("invalid file row: {line}")))?
             .parse::<u64>()
@@ -226,21 +228,19 @@ pub(super) fn append_table_inline_stats(
     for line in payload.lines() {
         let Some(rest) = line.strip_prefix("inline_table_stats\t") else {
             if let Some(rest) = line.strip_prefix("inline_column_stats\t") {
-                out.push_str(&format!(
-                    "table_inline_column_stats\t{}\t{rest}\n",
-                    table_id.0
-                ));
+                write!(out, "table_inline_column_stats\t{}\t{rest}\n", table_id.0)
+                    .expect("writing to String cannot fail");
             } else if let Some(rest) = line.strip_prefix("inline_aggregate_stats\t") {
-                out.push_str(&format!("table_inline_stats\t{}\t{rest}\n", table_id.0));
+                write!(out, "table_inline_stats\t{}\t{rest}\n", table_id.0)
+                    .expect("writing to String cannot fail");
             } else if let Some(rest) = line.strip_prefix("inline_aggregate_column_stats\t") {
-                out.push_str(&format!(
-                    "table_inline_column_stats\t{}\t{rest}\n",
-                    table_id.0
-                ));
+                write!(out, "table_inline_column_stats\t{}\t{rest}\n", table_id.0)
+                    .expect("writing to String cannot fail");
             }
             continue;
         };
-        out.push_str(&format!("table_inline_stats\t{}\t{rest}\n", table_id.0));
+        write!(out, "table_inline_stats\t{}\t{rest}\n", table_id.0)
+            .expect("writing to String cannot fail");
     }
     Ok(())
 }

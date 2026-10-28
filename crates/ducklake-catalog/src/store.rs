@@ -66,13 +66,7 @@ static SNAPSHOT_LIST_CACHE: OnceLock<
 > = OnceLock::new();
 
 pub(crate) fn invalidate_runtime_read_context(catalog: CatalogId) {
-    REQUEST_LATEST_SNAPSHOT_CACHE.with(|cache| {
-        if let Some(cache) = cache.borrow_mut().as_mut() {
-            cache.retain(|(namespace, cached_catalog), _| {
-                *cached_catalog != catalog || namespace.has_read_context()
-            });
-        }
-    });
+    crate::catalog_request_read_set::invalidate_after_mutation(catalog);
     #[cfg(not(test))]
     {
         if let Some(cache) = LATEST_SNAPSHOT_CACHE.get() {
@@ -106,18 +100,13 @@ pub(crate) fn invalidate_runtime_read_context(catalog: CatalogId) {
 /// cache deliberately is not touched: an active query may still be consuming
 /// the file/inline payload captured before a concurrent mutation.
 pub(crate) fn invalidate_runtime_read_context_snapshot(catalog: CatalogId, read_context_id: u64) {
+    #[cfg(feature = "foundationdb")]
+    crate::runtime_read_versions::invalidate_context(read_context_id);
     if let Ok(mut caches) = runtime_read_context_snapshot_caches().lock() {
         caches.retain(|key, _| key.catalog != catalog || key.read_context_id != read_context_id);
     }
-    REQUEST_LATEST_SNAPSHOT_CACHE.with(|cache| {
-        if let Some(cache) = cache.borrow_mut().as_mut() {
-            cache.retain(|(_, cached_catalog), _| *cached_catalog != catalog);
-        }
-    });
+    crate::catalog_request_read_set::invalidate_snapshot(catalog);
 }
-
-type LatestSnapshotRequestCache =
-    BTreeMap<(crate::CatalogCacheNamespace, CatalogId), Option<SnapshotRow>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct RuntimeReadContextKey {
@@ -152,39 +141,35 @@ pub(crate) fn end_runtime_read_context(
     catalog: CatalogId,
     read_context_id: u64,
 ) {
+    #[cfg(feature = "foundationdb")]
+    crate::runtime_read_versions::end_context(namespace, read_context_id);
     let key = runtime_read_context_key(namespace, catalog, read_context_id);
     if let Ok(mut caches) = runtime_read_context_snapshot_caches().lock() {
         caches.remove(&key);
     }
-    REQUEST_LATEST_SNAPSHOT_CACHE.with(|cache| {
-        if let Some(cache) = cache.borrow_mut().as_mut() {
-            cache.retain(|(cached_namespace, cached_catalog), _| {
-                (*cached_catalog, *cached_namespace)
-                    != (catalog, namespace.with_read_context(Some(read_context_id)))
-            });
-        }
-    });
+    crate::catalog_request_read_set::end_context(namespace, catalog, read_context_id);
 }
 
 thread_local! {
-    static REQUEST_LATEST_SNAPSHOT_CACHE: RefCell<Option<LatestSnapshotRequestCache>> =
-        const { RefCell::new(None) };
     static ACTIVE_RUNTIME_READ_CONTEXT: RefCell<Option<u64>> = const { RefCell::new(None) };
 }
 
 pub(crate) struct RuntimeReadRequestGuard {
-    previous: Option<LatestSnapshotRequestCache>,
+    _reads: crate::catalog_request_read_set::RequestReadSetGuard,
+    #[cfg(feature = "foundationdb")]
+    _versions: crate::runtime_read_versions::ReadVersionRequestGuard,
     previous_context: Option<u64>,
     context_id: Option<u64>,
     invalidate_catalog: Option<(CatalogId, Option<u64>)>,
 }
 
 pub(crate) fn begin_runtime_read_request(context_id: Option<u64>) -> RuntimeReadRequestGuard {
-    let request_cache = BTreeMap::new();
-    let previous = REQUEST_LATEST_SNAPSHOT_CACHE.with(|cache| cache.replace(Some(request_cache)));
+    let reads = crate::catalog_request_read_set::begin();
     let previous_context = ACTIVE_RUNTIME_READ_CONTEXT.with(|active| active.replace(context_id));
     RuntimeReadRequestGuard {
-        previous,
+        _reads: reads,
+        #[cfg(feature = "foundationdb")]
+        _versions: crate::runtime_read_versions::begin_request(),
         previous_context,
         context_id,
         invalidate_catalog: None,
@@ -201,9 +186,7 @@ impl RuntimeReadRequestGuard {
             return;
         };
         let _ = context_id;
-        REQUEST_LATEST_SNAPSHOT_CACHE.with(|cache| {
-            cache.replace(Some(BTreeMap::new()));
-        });
+        crate::catalog_request_read_set::clear();
     }
 
     pub(crate) fn invalidate_catalog_on_drop(
@@ -223,10 +206,6 @@ impl Drop for RuntimeReadRequestGuard {
                 invalidate_runtime_read_context_snapshot(catalog, read_context_id);
             }
         }
-        let previous = self.previous.take();
-        REQUEST_LATEST_SNAPSHOT_CACHE.with(|cache| {
-            cache.replace(previous);
-        });
         ACTIVE_RUNTIME_READ_CONTEXT.with(|active| {
             active.replace(self.previous_context.take());
         });
@@ -264,11 +243,41 @@ pub fn latest_snapshot(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
 ) -> CatalogResult<Option<SnapshotRow>> {
-    let cache_key = (kv.catalog_cache_namespace(), catalog);
-    if let Some(snapshot) = REQUEST_LATEST_SNAPSHOT_CACHE
-        .with(|cache| cache.borrow().as_ref()?.get(&cache_key).cloned())
-    {
+    resolve_latest_snapshot(kv, catalog, latest_snapshot_uncached)
+}
+
+#[track_caller]
+pub(crate) fn prepared_latest_snapshot(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    projection: crate::catalog_request_read_set::CatalogHeaderProjection,
+) -> CatalogResult<Option<SnapshotRow>> {
+    resolve_latest_snapshot(kv, catalog, |kv, catalog| {
+        prepared_snapshot_read(kv, catalog, projection)
+    })
+}
+
+#[track_caller]
+fn resolve_latest_snapshot<K: OrderedCatalogKv>(
+    kv: &K,
+    catalog: CatalogId,
+    fetch: impl FnOnce(&K, CatalogId) -> LatestSnapshotRead,
+) -> CatalogResult<Option<SnapshotRow>> {
+    if let Some(snapshot) = find_cached_snapshot(kv, catalog)? {
         return Ok(snapshot);
+    }
+    let result = fetch(kv, catalog);
+    record_latest_snapshot_callsite!(result.started);
+    pin_latest_snapshot(kv, catalog, result.row?)
+}
+
+fn find_cached_snapshot(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+) -> CatalogResult<Option<Option<SnapshotRow>>> {
+    let cache_key = (kv.catalog_cache_namespace(), catalog);
+    if let Some(snapshot) = crate::catalog_request_read_set::find_snapshot(kv, catalog) {
+        return Ok(Some(snapshot));
     }
     if let Some(read_context_id) = active_runtime_read_context_id()
         && let Some(snapshot) = runtime_read_context_snapshot_caches()
@@ -284,23 +293,25 @@ pub fn latest_snapshot(
                 read_context_id,
             ))
     {
-        REQUEST_LATEST_SNAPSHOT_CACHE.with(|cache| {
-            if let Some(cache) = cache.borrow_mut().as_mut() {
-                cache.insert(cache_key, snapshot.clone());
-            }
-        });
-        return Ok(snapshot.clone());
+        crate::catalog_request_read_set::remember_snapshot(kv, catalog, snapshot.clone());
+        return Ok(Some(snapshot.clone()));
     }
     #[cfg(not(test))]
     if active_runtime_read_context_id().is_none()
         && runtime_read_context_enabled()
         && let Some(snapshot) = latest_snapshot_cache().get(cache_key)
     {
-        return Ok(snapshot);
+        return Ok(Some(snapshot));
     }
-    let result = latest_snapshot_uncached(kv, catalog);
-    record_latest_snapshot_callsite!(result.started);
-    let uncached = result.row?;
+    Ok(None)
+}
+
+fn pin_latest_snapshot(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    snapshot: Option<SnapshotRow>,
+) -> CatalogResult<Option<SnapshotRow>> {
+    let cache_key = (kv.catalog_cache_namespace(), catalog);
     let result = if let Some(read_context_id) = active_runtime_read_context_id() {
         let key = runtime_read_context_key(cache_key.0, catalog, read_context_id);
         let mut caches = runtime_read_context_snapshot_caches().lock().map_err(|_| {
@@ -310,24 +321,30 @@ pub fn latest_snapshot(
         })?;
         match caches.entry(key) {
             std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(uncached.clone());
-                uncached
+                entry.insert(snapshot.clone());
+                snapshot
             }
             std::collections::btree_map::Entry::Occupied(entry) => entry.get().clone(),
         }
     } else {
-        uncached
+        snapshot
     };
-    REQUEST_LATEST_SNAPSHOT_CACHE.with(|cache| {
-        if let Some(cache) = cache.borrow_mut().as_mut() {
-            cache.insert(cache_key, result.clone());
-        }
-    });
+    crate::catalog_request_read_set::remember_snapshot(kv, catalog, result.clone());
     #[cfg(not(test))]
     if active_runtime_read_context_id().is_none() && runtime_read_context_enabled() {
         latest_snapshot_cache().insert(cache_key, result.clone());
     }
     Ok(result)
+}
+
+pub(crate) fn prepared_snapshot_read(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    projection: crate::catalog_request_read_set::CatalogHeaderProjection,
+) -> LatestSnapshotRead {
+    let started = RuntimeMetricStage::start();
+    let row = crate::catalog_request_read_set::fetch_preparation_snapshot(kv, catalog, projection);
+    LatestSnapshotRead { row, started }
 }
 
 pub(crate) struct LatestSnapshotRead {
@@ -340,21 +357,8 @@ pub(crate) fn latest_snapshot_uncached(
     catalog: CatalogId,
 ) -> LatestSnapshotRead {
     let started = RuntimeMetricStage::start();
-    let row = latest_snapshot_uncached_row(kv, catalog);
+    let row = crate::catalog_request_read_set::fetch_latest_snapshot(kv, catalog);
     LatestSnapshotRead { row, started }
-}
-
-fn latest_snapshot_uncached_row(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-) -> CatalogResult<Option<SnapshotRow>> {
-    if let Some(value) = kv.get(&latest_snapshot_row_key(catalog))? {
-        return Ok(Some(decode_latest_snapshot_value(&value)?));
-    }
-    let rows = kv.scan_prefix(&snapshot_prefix(catalog), RangeDirection::Reverse, 1)?;
-    rows.first()
-        .map(|item| decode_snapshot_item(catalog, &item.key, &item.value))
-        .transpose()
 }
 
 #[cfg(feature = "runtime-metrics")]
@@ -385,27 +389,15 @@ pub fn list_snapshots(
         return Ok(snapshots);
     }
     let started = RuntimeMetricStage::start();
-    let mut orders = Vec::new();
-    for item in kv.scan_prefix(
-        &snapshot_timestamp_prefix(catalog),
-        RangeDirection::Forward,
-        usize::MAX,
-    )? {
-        let (_, order) = decode_snapshot_timestamp_key(catalog, &item.key)?;
-        orders.push(order);
-    }
-    let keys = orders
-        .iter()
-        .map(|order| snapshot_key(catalog, *order))
-        .collect::<Vec<_>>();
-    let values = kv.batch_get(&keys)?;
-    let mut rows = Vec::new();
-    for (key, value) in keys.into_iter().zip(values) {
-        let Some(value) = value else {
-            continue;
-        };
-        rows.push(decode_snapshot_item(catalog, &key, &value)?);
-    }
+    let mut rows = kv
+        .scan_prefix(
+            &snapshot_timestamp_prefix(catalog),
+            RangeDirection::Forward,
+            usize::MAX,
+        )?
+        .into_iter()
+        .map(|item| decode_timestamp_snapshot(catalog, &item))
+        .collect::<CatalogResult<Vec<_>>>()?;
     rows.sort_by_key(|snapshot| snapshot.order);
     record_snapshot_list_callsite!("list_snapshots", started);
     #[cfg(not(test))]
@@ -420,14 +412,6 @@ pub fn list_all_snapshots(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
 ) -> CatalogResult<Vec<SnapshotRow>> {
-    #[cfg(not(test))]
-    let cache_key = (kv.catalog_cache_namespace(), catalog);
-    #[cfg(not(test))]
-    if runtime_read_context_enabled()
-        && let Some(snapshots) = snapshot_list_cache().get(cache_key)
-    {
-        return Ok(snapshots);
-    }
     let started = RuntimeMetricStage::start();
     let rows = kv
         .scan_prefix(
@@ -439,12 +423,7 @@ pub fn list_all_snapshots(
         .map(|item| decode_snapshot_item(catalog, &item.key, &item.value))
         .collect::<CatalogResult<Vec<_>>>();
     record_snapshot_list_callsite!("list_all_snapshots", started);
-    let rows = rows?;
-    #[cfg(not(test))]
-    if runtime_read_context_enabled() {
-        snapshot_list_cache().insert(cache_key, rows.clone());
-    }
-    Ok(rows)
+    rows
 }
 
 #[cfg(not(test))]
@@ -494,18 +473,11 @@ pub fn list_snapshots_older_than(
         RangeDirection::Forward,
         usize::MAX,
     )? {
-        let (created_at_micros, order) = decode_snapshot_timestamp_key(catalog, &item.key)?;
+        let (created_at_micros, _) = decode_snapshot_timestamp_key(catalog, &item.key)?;
         if created_at_micros >= older_than_micros {
             break;
         }
-        let Some(value) = kv.get(&snapshot_key(catalog, order))? else {
-            continue;
-        };
-        rows.push(decode_snapshot_item(
-            catalog,
-            &snapshot_key(catalog, order),
-            &value,
-        )?);
+        rows.push(decode_timestamp_snapshot(catalog, &item)?);
     }
     Ok(rows)
 }
@@ -535,30 +507,19 @@ pub fn snapshot_by_timestamp(
         RangeDirection::Forward,
         usize::MAX,
     )? {
-        let (created_at_micros, order) = decode_snapshot_timestamp_key(catalog, &item.key)?;
+        let (created_at_micros, _) = decode_snapshot_timestamp_key(catalog, &item.key)?;
         match bound {
             SnapshotTimestampBound::Lower => {
                 if created_at_micros < timestamp_micros {
                     continue;
                 }
-                let Some(value) = kv.get(&snapshot_key(catalog, order))? else {
-                    continue;
-                };
-                return decode_snapshot_item(catalog, &snapshot_key(catalog, order), &value)
-                    .map(Some);
+                return decode_timestamp_snapshot(catalog, &item).map(Some);
             }
             SnapshotTimestampBound::Upper => {
                 if created_at_micros > timestamp_micros {
                     break;
                 }
-                let Some(value) = kv.get(&snapshot_key(catalog, order))? else {
-                    continue;
-                };
-                selected = Some(decode_snapshot_item(
-                    catalog,
-                    &snapshot_key(catalog, order),
-                    &value,
-                )?);
+                selected = Some(decode_timestamp_snapshot(catalog, &item)?);
             }
         }
     }
@@ -610,6 +571,7 @@ pub fn expire_snapshots(
         }
     }
     kv.commit(batch)?;
+    invalidate_runtime_read_context(catalog);
     Ok(expired)
 }
 
@@ -629,7 +591,7 @@ pub(crate) fn stage_snapshot(batch: &mut KvBatch, catalog: CatalogId, snapshot: 
     batch.put(snapshot_key(catalog, snapshot.order), snapshot.encode());
     batch.put(
         snapshot_timestamp_key(catalog, snapshot.created_at_micros, snapshot.order),
-        snapshot.sequence.to_be_bytes().to_vec(),
+        snapshot.encode(),
     );
     batch.put(
         latest_snapshot_row_key(catalog),
@@ -681,7 +643,7 @@ pub(crate) fn stage_fdb_snapshot_indexes(
     Ok(())
 }
 
-fn decode_latest_snapshot_value(value: &[u8]) -> CatalogResult<SnapshotRow> {
+pub(crate) fn decode_latest_snapshot_value(value: &[u8]) -> CatalogResult<SnapshotRow> {
     if value.len() < 2 || value[0] != 1 {
         return Err(crate::CatalogError::Decode(
             "latest snapshot row has invalid version".to_owned(),
@@ -707,6 +669,20 @@ fn stage_delete_snapshot(batch: &mut KvBatch, catalog: CatalogId, snapshot: &Sna
         snapshot.created_at_micros,
         snapshot.order,
     ));
+}
+
+fn decode_timestamp_snapshot(
+    catalog: CatalogId,
+    item: &crate::RangeItem,
+) -> CatalogResult<SnapshotRow> {
+    let (created_at_micros, order) = decode_snapshot_timestamp_key(catalog, &item.key)?;
+    let row = decode_snapshot_item(catalog, &snapshot_key(catalog, order), &item.value)?;
+    if row.created_at_micros != created_at_micros {
+        return Err(CatalogError::Decode(
+            "snapshot timestamp index does not match its row".to_owned(),
+        ));
+    }
+    Ok(row)
 }
 
 pub(crate) fn decode_snapshot_item(

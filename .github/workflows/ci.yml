@@ -1,3 +1,4 @@
+# Versions: software-versions.snapshot.json; details in software-version-consumers.md.
 name: ci
 
 on:
@@ -38,7 +39,7 @@ jobs:
           echo "workflow_dispatch inputs:"
           printf '%s\n' "$WORKFLOW_DISPATCH_INPUTS"
       - name: Checkout
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
@@ -97,7 +98,7 @@ jobs:
           echo "workflow_dispatch inputs:"
           printf '%s\n' "$WORKFLOW_DISPATCH_INPUTS"
       - name: Checkout
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Validate workflow metadata
         run: |

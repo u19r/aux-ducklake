@@ -1,7 +1,5 @@
 use std::{collections::BTreeMap, ops::Deref};
 
-use futures::executor::block_on;
-
 use crate::{
     CatalogError, CatalogId, CatalogResult, DataFileId, DeleteFileId, FdbDataMutation,
     FdbOrderedCatalogKv, FoundationDbErrorClass,
@@ -51,7 +49,7 @@ impl FdbOrderedCatalogKv {
         let key = self.namespaced_key(&conflict_max_file_id_key(catalog));
         for attempt in 0..=MAX_FILE_ID_RESERVATION_RETRIES {
             let trx = self.create_transaction()?;
-            let current = block_on(trx.get(&key, false))
+            let current = crate::fdb_runtime::wait_for_fdb("wait.fdb.get", trx.get(&key, false))
                 .map_err(map_fdb_error)?
                 .map(|value| decode_file_id_watermark(value.deref()))
                 .transpose()?;
@@ -60,7 +58,8 @@ impl FdbOrderedCatalogKv {
                 CatalogError::InvalidMutation("file ID range overflow".to_owned())
             })?;
             trx.set(&key, &last.to_be_bytes());
-            match block_on(trx.commit()) {
+            crate::fdb_runtime::record_transaction_usage(&trx);
+            match crate::fdb_runtime::wait_for_fdb("wait.fdb.commit", trx.commit()) {
                 Ok(_) => return Ok(first),
                 Err(error)
                     if attempt < MAX_FILE_ID_RESERVATION_RETRIES

@@ -270,10 +270,12 @@ pub(crate) fn commit_column_version(
     catalog: CatalogId,
     table_id: TableId,
     previous_sequence: crate::RawSnapshotSequence,
-    previous: crate::TableRow,
+    mut previous: crate::TableRow,
     next_columns: Vec<TableColumnRow>,
 ) -> CatalogResult<()> {
+    let previous_columns = std::mem::take(&mut previous.columns);
     let mut next = previous.clone();
+    previous.columns = previous_columns;
     next.columns = next_columns;
     kv.commit_table_replacements(
         catalog,

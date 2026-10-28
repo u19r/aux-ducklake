@@ -17,13 +17,26 @@ const FOUNDATIONDB_MAX_KEY_BYTES: usize = 10_000;
 /// `/`. Validation is completed before a transaction is created, so rejected
 /// prefixes cannot mutate the database.
 pub fn clear_foundationdb_prefix(db: &Database, prefix: &[u8]) -> CatalogResult<()> {
-    let end = validate_prefix_end(prefix)?;
+    let (start, end) = foundationdb_prefix_bounds(prefix)?;
     let trx = db.create_trx().map_err(map_fdb_error)?;
     trx.set_option(TransactionOption::Timeout(5_000))
         .map_err(map_fdb_error)?;
-    trx.clear_range(prefix, &end);
+    trx.clear_range(&start, &end);
     block_on(trx.commit()).map_err(map_fdb_commit_error)?;
     Ok(())
+}
+
+/// Physical bounds for one validated namespace and its child namespaces.
+pub fn foundationdb_prefix_bounds(prefix: &[u8]) -> CatalogResult<(Vec<u8>, Vec<u8>)> {
+    validate_prefix_end(prefix)?;
+    let start = crate::fdb_key_codec::namespace_range_start(prefix);
+    let end = prefix_end(&start);
+    if end.len() > FOUNDATIONDB_MAX_KEY_BYTES {
+        return Err(invalid_prefix(
+            "encoded prefix exceeds FoundationDB key size",
+        ));
+    }
+    Ok((start, end))
 }
 
 fn validate_prefix_end(prefix: &[u8]) -> CatalogResult<Vec<u8>> {

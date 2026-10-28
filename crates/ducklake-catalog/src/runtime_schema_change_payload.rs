@@ -4,7 +4,8 @@ use crate::{
     TablePartitionFieldRow, TablePartitionRow, TableRename, TableSortChange, TableSortFieldRow,
     TableSortRow,
     runtime_tabular_payload::{
-        TabularPayload, default_value_to_option, empty_to_none, parse_bool_field, parse_u64_field,
+        TabularFields, TabularPayload, default_value_to_option, empty_to_none, parse_bool_field,
+        parse_u64_field,
     },
 };
 
@@ -21,10 +22,18 @@ pub(crate) const CHANGE_COMMENTS: &str = "ChangeComments";
 pub(crate) struct DdlPayload<'a> {
     pub(crate) commit_snapshot_id: DuckLakeSnapshotId,
     pub(crate) read_snapshot_id: Option<DuckLakeSnapshotId>,
-    pub(crate) rows: Vec<Vec<&'a str>>,
+    pub(crate) text: &'a str,
 }
 
 impl<'a> DdlPayload<'a> {
+    pub(crate) fn rows(&self) -> impl Iterator<Item = TabularFields<'a>> + '_ {
+        self.text
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(TabularFields::new)
+            .filter(|fields| !matches!(fields.as_slice(), ["commit_snapshot" | "read_snapshot", _]))
+    }
+
     pub(crate) fn commit_raw_sequence(&self) -> RawSnapshotSequence {
         RawSnapshotSequence(self.commit_snapshot_id.0)
     }
@@ -32,7 +41,7 @@ impl<'a> DdlPayload<'a> {
     pub(crate) fn parse(operation: &'static str, payload: &'a [u8]) -> CatalogResult<Self> {
         let mut commit_snapshot_id = None;
         let mut read_snapshot_id = None;
-        let mut rows = Vec::new();
+
         for row in TabularPayload::new(operation, payload)? {
             let row = row?;
             let fields = row.fields();
@@ -51,7 +60,7 @@ impl<'a> DdlPayload<'a> {
                         "read snapshot id",
                     )?));
                 }
-                _ => rows.push(fields.to_vec()),
+                _ => {}
             }
         }
         let commit_snapshot_id = commit_snapshot_id.ok_or_else(|| {
@@ -60,15 +69,16 @@ impl<'a> DdlPayload<'a> {
         Ok(Self {
             commit_snapshot_id,
             read_snapshot_id,
-            rows,
+            text: std::str::from_utf8(payload).expect("validated tabular utf-8"),
         })
     }
 }
 
-pub(crate) fn parse_column_rows(
+pub(crate) fn parse_column_rows<'a, T>(
     operation: &'static str,
-    rows: &[Vec<&str>],
-) -> CatalogResult<Vec<(TableId, TableColumnRow)>> {
+    rows: impl Iterator<Item = TabularFields<'a>>,
+    project: impl Fn(TableId, TableColumnRow) -> T,
+) -> CatalogResult<Vec<T>> {
     let mut columns = Vec::new();
     for fields in rows {
         match fields.as_slice() {
@@ -83,7 +93,7 @@ pub(crate) fn parse_column_rows(
                 initial_default,
                 default_value,
                 default_value_type,
-            ] => columns.push((
+            ] => columns.push(project(
                 TableId(parse_u64_field(operation, table_id, "table id")?),
                 TableColumnRow::new(
                     ColumnId(parse_u64_field(operation, column_id, "column id")?),
@@ -99,7 +109,7 @@ pub(crate) fn parse_column_rows(
                 )
                 .with_created_with_table(false),
             )),
-            _ => return Err(invalid_row(operation, fields)),
+            _ => return Err(invalid_row(operation, fields.as_slice())),
         }
     }
     Ok(columns)
@@ -120,7 +130,9 @@ pub(crate) fn one_column_table(
     Ok(Some(*table_id))
 }
 
-pub(crate) fn parse_column_drops(rows: &[Vec<&str>]) -> CatalogResult<Vec<ColumnDrop>> {
+pub(crate) fn parse_column_drops<'a>(
+    rows: impl Iterator<Item = TabularFields<'a>>,
+) -> CatalogResult<Vec<ColumnDrop>> {
     let mut drops = Vec::new();
     for fields in rows {
         match fields.as_slice() {
@@ -130,13 +142,15 @@ pub(crate) fn parse_column_drops(rows: &[Vec<&str>]) -> CatalogResult<Vec<Column
                     ColumnId(parse_u64_field(DROP_COLUMNS, column_id, "column id")?),
                 ));
             }
-            _ => return Err(invalid_row(DROP_COLUMNS, fields)),
+            _ => return Err(invalid_row(DROP_COLUMNS, fields.as_slice())),
         }
     }
     Ok(drops)
 }
 
-pub(crate) fn parse_table_renames(rows: &[Vec<&str>]) -> CatalogResult<Vec<TableRename>> {
+pub(crate) fn parse_table_renames<'a>(
+    rows: impl Iterator<Item = TabularFields<'a>>,
+) -> CatalogResult<Vec<TableRename>> {
     let mut renames = Vec::new();
     for fields in rows {
         match fields.as_slice() {
@@ -144,14 +158,14 @@ pub(crate) fn parse_table_renames(rows: &[Vec<&str>]) -> CatalogResult<Vec<Table
                 TableId(parse_u64_field(RENAME_TABLES, table_id, "table id")?),
                 *new_name,
             )),
-            _ => return Err(invalid_row(RENAME_TABLES, fields)),
+            _ => return Err(invalid_row(RENAME_TABLES, fields.as_slice())),
         }
     }
     Ok(renames)
 }
 
-pub(crate) fn parse_partition_changes(
-    rows: &[Vec<&str>],
+pub(crate) fn parse_partition_changes<'a>(
+    rows: impl Iterator<Item = TabularFields<'a>>,
 ) -> CatalogResult<Vec<TablePartitionChange>> {
     let mut changes = Vec::new();
     let mut table_id = None;
@@ -209,7 +223,7 @@ pub(crate) fn parse_partition_changes(
                     *transform,
                 ));
             }
-            _ => return Err(invalid_row(CHANGE_PARTITION_KEYS, fields)),
+            _ => return Err(invalid_row(CHANGE_PARTITION_KEYS, fields.as_slice())),
         }
     }
     push_partition_change(
@@ -246,7 +260,9 @@ fn push_partition_change(
     Ok(())
 }
 
-pub(crate) fn parse_sort_change(rows: &[Vec<&str>]) -> CatalogResult<TableSortChange> {
+pub(crate) fn parse_sort_change<'a>(
+    rows: impl Iterator<Item = TabularFields<'a>>,
+) -> CatalogResult<TableSortChange> {
     let mut table_id = None;
     let mut sort_id = None;
     let mut fields_out = Vec::new();
@@ -293,7 +309,7 @@ pub(crate) fn parse_sort_change(rows: &[Vec<&str>]) -> CatalogResult<TableSortCh
                     *null_order,
                 ));
             }
-            _ => return Err(invalid_row(CHANGE_SORT_KEYS, fields)),
+            _ => return Err(invalid_row(CHANGE_SORT_KEYS, fields.as_slice())),
         }
     }
     let table_id = table_id
@@ -304,8 +320,8 @@ pub(crate) fn parse_sort_change(rows: &[Vec<&str>]) -> CatalogResult<TableSortCh
     ))
 }
 
-pub(crate) fn parse_comment_changes(
-    rows: &[Vec<&str>],
+pub(crate) fn parse_comment_changes<'a>(
+    rows: impl Iterator<Item = TabularFields<'a>>,
 ) -> CatalogResult<(Vec<TableCommentChange>, Vec<ColumnCommentChange>)> {
     let mut table_comments = Vec::new();
     let mut column_comments = Vec::new();
@@ -336,7 +352,7 @@ pub(crate) fn parse_comment_changes(
                     parse_comment_value(value_kind, value)?,
                 ));
             }
-            _ => return Err(invalid_row(CHANGE_COMMENTS, fields)),
+            _ => return Err(invalid_row(CHANGE_COMMENTS, fields.as_slice())),
         }
     }
     Ok((table_comments, column_comments))

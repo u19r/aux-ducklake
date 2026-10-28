@@ -1,3 +1,4 @@
+use super::inline_group_orders::assemble_inline_payload;
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(not(test))]
 use std::sync::OnceLock;
@@ -17,7 +18,7 @@ use crate::{
     inline_change_feed::{InlineRowChangeKind, stage_inline_row_changes_for_payload},
     inline_data::{
         INLINE_CHUNK_BYTES, chunk_bounds, chunk_count, decode_inline_end_order,
-        encode_inline_end_order, validate_contiguous_chunks, validate_inline_table_rows_fit_fdb,
+        encode_inline_end_order, validate_inline_table_rows_fit_fdb,
     },
     keys::{KeyFamily, family_prefix, inline_table_end_key, table_object_key},
     rows::{STORED_ORDER_LEN, decode_stored_order, encode_stored_order},
@@ -569,30 +570,6 @@ pub(crate) fn list_unflushed_inline_table_payloads_at(
     rows
 }
 
-pub(crate) fn list_unflushed_inline_table_payloads_at_with_end_orders(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    table_id: TableId,
-    schema_id: SchemaId,
-    snapshot_order: CatalogOrderId,
-    end_orders: &BTreeMap<CatalogOrderId, CatalogOrderId>,
-) -> CatalogResult<Vec<InlineTablePayloadRow>> {
-    let started = RuntimeMetricStage::start();
-    let rows = list_inline_table_payloads_for_visibility_from_end_orders(
-        kv,
-        catalog,
-        table_id,
-        schema_id,
-        snapshot_order,
-        end_orders,
-    );
-    record_inline_tables_stage(
-        "method.inline_tables.list_unflushed_inline_table_payloads_at_with_end_orders",
-        started,
-    );
-    rows
-}
-
 fn list_inline_table_payloads_for_visibility(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
@@ -947,31 +924,6 @@ pub(crate) fn inline_table_chunks(
         ));
     }
     Ok(rows)
-}
-
-pub(crate) fn assemble_inline_payload(
-    mut rows: Vec<InlineTableChunkRow>,
-) -> CatalogResult<Vec<u8>> {
-    if rows.is_empty() {
-        return Err(CatalogError::Decode(
-            "inline payload has no chunks".to_owned(),
-        ));
-    }
-    rows.sort_by_key(|row| row.chunk_index);
-    let chunk_count = rows[0].chunk_count;
-    validate_contiguous_chunks(rows.len(), chunk_count)?;
-    let payload_len = rows.iter().map(|row| row.payload.len()).sum();
-    let mut payload = Vec::with_capacity(payload_len);
-    for (expected_index, row) in rows.into_iter().enumerate() {
-        if row.chunk_count != chunk_count || row.chunk_index != expected_index as u32 {
-            return Err(CatalogError::Decode(
-                "inline payload chunks are not contiguous".to_owned(),
-            ));
-        }
-        payload.extend_from_slice(&row.payload);
-    }
-    validate_inline_table_rows_fit_fdb(&payload)?;
-    Ok(payload)
 }
 
 pub(crate) fn inline_table_prefix(

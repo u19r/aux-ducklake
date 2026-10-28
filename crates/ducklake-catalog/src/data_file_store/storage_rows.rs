@@ -191,8 +191,7 @@ pub(super) fn load_delete_file_at(
         RangeDirection::Reverse,
         1,
     )? {
-        let row =
-            delete_file_from_timeline_item(kv, catalog, data_file_id, &item.key, &item.value)?;
+        let row = delete_file_from_timeline_item(kv, catalog, data_file_id, &item)?;
         let timeline_order = delete_file_timeline_order_from_key(
             catalog,
             data_file_id,
@@ -230,19 +229,18 @@ pub(crate) fn current_delete_file_from_index_value(
     }
 }
 
-pub(super) fn delete_file_from_timeline_item(
+pub(crate) fn delete_file_from_timeline_item(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
     data_file_id: DataFileId,
-    key: &[u8],
-    value: &[u8],
+    item: &crate::RangeItem,
 ) -> CatalogResult<DeleteFileRow> {
-    match DeleteFileRow::decode(value) {
+    match DeleteFileRow::decode(&item.value) {
         Ok(mut row) => {
             let timeline_order = delete_file_timeline_order_from_key(
                 catalog,
                 data_file_id,
-                key,
+                &item.key,
                 row.validity.begin_order.kind(),
             )?;
             if row.validity.begin_order == incomplete_fdb_order() {
@@ -253,7 +251,7 @@ pub(super) fn delete_file_from_timeline_item(
             }
             Ok(row)
         }
-        Err(_) => load_delete_file(kv, catalog, decode_delete_file_id(value)?),
+        Err(_) => load_delete_file(kv, catalog, decode_delete_file_id(&item.value)?),
     }
 }
 

@@ -1,6 +1,6 @@
 use crate::{
-    CatalogId, CatalogOrderId, CatalogResult, OrderedCatalogKv, TableId, TableRow,
-    runtime_snapshots::snapshot_schema_versions_by_order, store::list_snapshots,
+    CatalogId, CatalogResult, OrderedCatalogKv, TableId, TableRow,
+    runtime_snapshots::{SchemaVersionSnapshotScope, snapshot_schema_versions_by_order},
     table_store::list_table_rows_for_table,
 };
 
@@ -14,9 +14,7 @@ pub fn table_row_for_inline_schema(
     if let Some(table) = earliest_table_with_inline_schema(&table_rows, table_id, schema_version) {
         return Ok(table);
     }
-    let order = begin_order_for_table_schema(kv, catalog, table_id, schema_version, &table_rows)?;
-    table_visible_at(&table_rows, table_id, order)
-        .ok_or(crate::CatalogError::NotFound("inline table schema version"))
+    find_table_for_schema(kv, catalog, schema_version, &table_rows)
 }
 
 fn earliest_table_with_inline_schema(
@@ -36,37 +34,26 @@ fn earliest_table_with_inline_schema(
         .cloned()
 }
 
-fn begin_order_for_table_schema(
+fn find_table_for_schema(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
-    table_id: TableId,
     schema_version: u64,
     table_rows: &[TableRow],
-) -> CatalogResult<CatalogOrderId> {
-    let schema_versions = snapshot_schema_versions_by_order(kv, catalog)?;
-    for snapshot in list_snapshots(kv, catalog)? {
-        if schema_versions.get(&snapshot.order).copied() != Some(schema_version) {
+) -> CatalogResult<TableRow> {
+    let schema_versions =
+        snapshot_schema_versions_by_order(kv, catalog, SchemaVersionSnapshotScope::Active)?;
+    for (order, version) in schema_versions.as_ref() {
+        if *version != schema_version {
             continue;
         }
-        let Some(table) = table_visible_at(table_rows, table_id, snapshot.order) else {
-            continue;
-        };
-        if table.validity.begin_order <= snapshot.order {
-            return Ok(snapshot.order);
+        if let Some(table) = table_rows
+            .iter()
+            .find(|row| row.validity.is_visible_at(*order))
+        {
+            return Ok(table.clone());
         }
     }
     Err(crate::CatalogError::NotFound("inline table schema version"))
-}
-
-fn table_visible_at(
-    table_rows: &[TableRow],
-    table_id: TableId,
-    order: CatalogOrderId,
-) -> Option<TableRow> {
-    table_rows
-        .iter()
-        .find(|row| row.table_id == table_id && row.validity.is_visible_at(order))
-        .cloned()
 }
 
 #[cfg(test)]

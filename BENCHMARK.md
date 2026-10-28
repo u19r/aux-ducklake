@@ -1,106 +1,102 @@
-# DuckLake FDB Benchmark
+# DuckLake catalog benchmarks
 
 ## Method
 
-| Property            | Value                                      |
-| ------------------- | ------------------------------------------ |
-| Date                | 2026-07-27                                 |
-| FDB proxy           | `127.0.0.1:14691` -> `127.0.0.1:4691`      |
-| Postgres proxy      | `127.0.0.1:15432` -> `127.0.0.1:5432`      |
-| Proxy latency       | 1 ms downstream, 0 ms jitter               |
-| State               | empty before and after each recipe         |
-| Paired SQL          | identical                                  |
-| Multi-trial order   | alternating                                |
-| Build profile       | release                                    |
-| Runtime metrics     | disabled                                   |
-| DuckDB memory limit | 1 GiB                                      |
-| DuckLake commit     | `2856687c875bbee90d523fe15627f8d8fd494622` |
-| DuckDB commit       | `117e1a46be1c903c5a36ee3c881c125597f93c60` |
+| Property         | Value                                                                                         |
+| ---------------- | --------------------------------------------------------------------------------------------- |
+| Host             | `r8gd.4xlarge`, 16 ARM64 vCPUs, 128 GiB RAM                                                   |
+| DuckDB           | 2.0.0, `d54cbbe3df17e8e5ce68312f483b4155836112aa` on both sides                               |
+| DuckLake         | 1.1, `417a9117f590e8141742ac0579d02f6a90162e37` on both sides                                 |
+| FoundationDB     | 7.4.8 client/server, **`ssd-redwood-1`**, one process, single redundancy                      |
+| Postgres         | 18.6; fsync, synchronous commit and full-page writes enabled                                  |
+| Metadata delay   | Toxiproxy 2.13.0, **1 ms downstream, zero jitter, both databases**, toxicity 1                |
+| Database storage | Instance NVMe: data, WAL, logs, descriptors, local metadata, Parquet and spills               |
+| Memory           | DuckDB **48 GiB per process** on both sides; no fixed RSS rejection guard                     |
+| FDB scans        | At most 1,024 concurrent prefix/range requests; ordered results and per-range row limits      |
+| TPC-H            | 16 threads, one warmup and three measured trials per query/backend; alternating backend order |
 
-## Full Suite
+## Catalog workloads
 
-| Profile               |      FDB ms |   Postgres ms | FDB/Postgres |
-| --------------------- | ----------: | ------------: | -----------: |
-| smoke                 |   4,560.057 |     7,671.313 |       0.594x |
-| scan10                |   3,821.652 |     7,430.280 |       0.514x |
-| profile, 10,000 files |   4,175.981 |     7,492.897 |       0.557x |
-| inline                |   5,952.556 |    11,773.628 |       0.506x |
-| operational           |  30,618.158 |   118,152.447 |       0.259x |
-| operational growth    |  91,988.772 |   403,600.153 |       0.228x |
-| realistic             | 156,534.897 |   279,921.680 |       0.559x |
-| varied, 5 GiB         | 723,738.947 | 1,539,848.010 |       0.470x |
+| Profile            | FDB seconds | Postgres seconds | FDB/Postgres |
+| ------------------ | ----------- | ---------------- | ------------ |
+| smoke              | 1.732       | 1.561            | 1.109×       |
+| scan10             | 1.502       | 1.497            | 1.004×       |
+| profile            | 1.796       | 1.565            | 1.148×       |
+| inline             | 3.679       | 2.681            | 1.372×       |
+| operational        | 9.214       | 8.608            | 1.070×       |
+| operational-growth | 25.176      | 22.183           | 1.135×       |
+| realistic          | 48.870      | 37.857           | 1.291×       |
+| varied             | 187.414     | 178.627          | 1.049×       |
 
-## Operational Transactions
+## 2 GiB mixed workload
 
-| Backend      | Samples | Create p50 ms | Commit p50 ms |    p90 ms |    p99 ms |    Max ms |
-| ------------ | ------: | ------------: | ------------: | --------: | --------: | --------: |
-| FoundationDB |      40 |       210.659 |       366.482 |   383.313 |   397.275 |   397.275 |
-| Postgres     |      40 |       426.097 |     1,829.309 | 1,859.964 | 1,878.088 | 1,878.088 |
+| Phase                   | FDB seconds | Postgres seconds | FDB/Postgres |
+| ----------------------- | ----------- | ---------------- | ------------ |
+| preload                 | 9.285       | 9.896            | 0.938×       |
+| mixed                   | 8.625       | 5.085            | 1.696×       |
+| dedicated_deletes       | 7.853       | 4.491            | 1.749×       |
+| dedicated_inlining      | 15.375      | 11.557           | 1.330×       |
+| dedicated_compaction    | 2.070       | 3.403            | 0.608×       |
+| latest_queries          | 1.444       | 0.648            | 2.229×       |
+| time_travel_queries     | 1.444       | 0.648            | 2.227×       |
+| parallel_latest_queries | 1.763       | 0.930            | 1.896×       |
 
-## Operational Growth
+## 5 GiB mixed workload
 
-| Backend      | Samples | Create p50 ms | Commit p50 ms |    p90 ms |    p99 ms |    Max ms |
-| ------------ | ------: | ------------: | ------------: | --------: | --------: | --------: |
-| FoundationDB |     200 |       212.662 |       448.931 |   481.804 |   494.683 |   499.617 |
-| Postgres     |     200 |       412.961 |     1,988.695 | 2,027.455 | 2,057.290 | 2,510.511 |
+| Phase                   | FDB seconds | Postgres seconds | FDB/Postgres |
+| ----------------------- | ----------- | ---------------- | ------------ |
+| preload                 | 33.549      | 54.572           | 0.615×       |
+| mixed                   | 22.677      | 23.284           | 0.974×       |
+| dedicated_deletes       | 17.133      | 10.592           | 1.617×       |
+| dedicated_inlining      | 32.774      | 24.783           | 1.322×       |
+| dedicated_compaction    | 17.970      | 10.336           | 1.739×       |
+| join_queries            | 3.162       | 2.149            | 1.472×       |
+| mutation_churn          | 45.117      | 43.498           | 1.037×       |
+| latest_queries          | 2.994       | 1.401            | 2.137×       |
+| time_travel_queries     | 3.054       | 1.344            | 2.273×       |
+| parallel_latest_queries | 5.402       | 2.537            | 2.130×       |
 
-| Backend      | Trial 1 last/first decile | Trial 2 last/first decile |
-| ------------ | ------------------------: | ------------------------: |
-| FoundationDB |                    1.181x |                    1.170x |
-| Postgres     |                    1.091x |                    1.075x |
+## TPC-H SF5 and SF50
 
-## Full 5 GiB Varied Workload
+| Scale | FDB query seconds | Postgres query seconds | Query ratio | FDB process seconds | Postgres process seconds |
+| ----- | ----------------- | ---------------------- | ----------- | ------------------- | ------------------------ |
+| SF5   | 3.439             | 3.010                  | 1.143×      | 8.261               | 6.277                    |
+| SF50  | 15.828            | 16.117                 | 0.982×      | 23.372              | 19.937                   |
 
-| Property                          |  Value |
-| --------------------------------- | -----: |
-| Tables                            |    100 |
-| Columns per table                 |     24 |
-| Rows per table                    | 13,108 |
-| Target logical data               |  5 GiB |
-| Preload rows per batch            |  4,096 |
-| Preload workers                   |      4 |
-| Parallel latest-read workers      |     12 |
-| Compaction tables per transaction |     10 |
+| Query | SF5 FDB ms | SF5 Postgres ms | SF50 FDB ms | SF50 Postgres ms |
+| ----- | ---------- | --------------- | ----------- | ---------------- |
+| Q1    | 104        | 115             | 729         | 756              |
+| Q2    | 131        | 91              | 222         | 182              |
+| Q3    | 157        | 134             | 777         | 815              |
+| Q4    | 108        | 104             | 524         | 562              |
+| Q5    | 218        | 171             | 904         | 945              |
+| Q6    | 64         | 69              | 300         | 313              |
+| Q7    | 202        | 171             | 796         | 793              |
+| Q8    | 243        | 196             | 995         | 1042             |
+| Q9    | 281        | 235             | 1583        | 1571             |
+| Q10   | 211        | 188             | 894         | 914              |
+| Q11   | 88         | 60              | 176         | 147              |
+| Q12   | 113        | 100             | 488         | 488              |
+| Q13   | 196        | 188             | 1271        | 1257             |
+| Q14   | 122        | 112             | 511         | 533              |
+| Q15   | 104        | 97              | 490         | 513              |
+| Q16   | 140        | 115             | 311         | 284              |
+| Q17   | 126        | 125             | 657         | 762              |
+| Q18   | 178        | 164             | 1120        | 1125             |
+| Q19   | 124        | 114             | 562         | 574              |
+| Q20   | 172        | 134             | 677         | 672              |
+| Q21   | 257        | 236             | 1568        | 1606             |
+| Q22   | 100        | 91              | 273         | 263              |
 
-| Batch                   |      FDB ms |   Postgres ms | FDB/Postgres |
-| ----------------------- | ----------: | ------------: | -----------: |
-| preload                 | 117,800.152 |   201,430.927 |       0.585x |
-| mixed                   |  79,926.372 |   129,894.705 |       0.615x |
-| dedicated deletes       |  84,682.941 |   136,216.038 |       0.622x |
-| dedicated inlining      | 112,449.389 |   164,059.126 |       0.685x |
-| dedicated compaction    |  81,239.513 |    66,885.877 |       1.215x |
-| join queries            |  21,574.901 |    40,060.361 |       0.539x |
-| mutation churn          | 175,482.500 |   726,119.720 |       0.242x |
-| latest queries          |  14,412.049 |    23,469.705 |       0.614x |
-| time-travel queries     |  14,405.110 |    23,541.991 |       0.612x |
-| parallel latest queries |  16,538.659 |    22,825.380 |       0.725x |
-| total                   | 723,738.947 | 1,539,848.010 |       0.470x |
+## Robustness and validation limits
 
-| Peak RSS       |   FDB KiB | Postgres KiB |
-| -------------- | --------: | -----------: |
-| maximum        | 1,183,712 |      952,528 |
-| compaction     |   510,496 |      566,848 |
-| mutation churn | 1,031,040 |      952,528 |
-
-## Robustness
-
-| Scenario                |      FDB ms | Postgres ms | FDB/Postgres |
-| ----------------------- | ----------: | ----------: | -----------: |
-| narrow tiny batches     |  43,556.657 |  50,565.931 |       0.861x |
-| mixed balanced          |  43,253.020 |  81,502.119 |       0.531x |
-| wide large rows         |  25,261.848 |  45,170.291 |       0.559x |
-| many small tables       | 119,116.447 | 226,416.722 |       0.526x |
-| concurrent read/write   |  45,044.383 |  83,695.995 |       0.538x |
-| inline flush each batch |  11,820.991 |  19,321.176 |       0.612x |
-| inline flush at end     |  19,385.606 |  30,870.038 |       0.628x |
-| inline never flush      |   7,058.505 |  17,608.544 |       0.401x |
-| total                   | 314,497.457 | 555,150.816 |       0.567x |
-
-## Scale Status
-
-| Area                  | FDB/Postgres | Status     |
-| --------------------- | -----------: | ---------- |
-| latest reads          |       0.614x | FDB faster |
-| time-travel reads     |       0.612x | FDB faster |
-| parallel latest reads |       0.725x | FDB faster |
-| compaction            |       1.215x | unresolved |
+| Scenario                | FDB seconds | Postgres seconds | FDB/Postgres |
+| ----------------------- | ----------- | ---------------- | ------------ |
+| narrow-tiny-batches     | 16.179      | 9.756            | 1.658×       |
+| mixed-balanced          | 15.362      | 11.544           | 1.331×       |
+| wide-large-rows         | 10.912      | 8.122            | 1.344×       |
+| many-small-tables       | 33.166      | 27.159           | 1.221×       |
+| concurrent-read-write   | 16.139      | 12.034           | 1.341×       |
+| inline-flush-each-batch | 6.156       | 4.350            | 1.415×       |
+| inline-flush-at-end     | 8.275       | 7.261            | 1.140×       |
+| inline-never-flush      | 4.406       | 3.687            | 1.195×       |

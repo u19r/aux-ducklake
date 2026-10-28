@@ -61,7 +61,7 @@ fn given_fenced_request_when_nonatomic_mutation_then_rejects_before_catalog_acce
         request.snapshot_fence =
             Some(SnapshotFence::try_from("00000000000000000001000000000000").unwrap());
         assert!(
-            payload_for_request(&request)
+            payload_for_request(&(&request).into())
                 .unwrap_err()
                 .to_string()
                 .contains("only atomic data"),

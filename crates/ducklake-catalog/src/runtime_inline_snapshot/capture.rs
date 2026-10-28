@@ -11,9 +11,12 @@ use std::{
 use crate::{
     CatalogCacheNamespace, CatalogError, CatalogId, CatalogOrderId, CatalogResult,
     FdbOrderedCatalogKv, SchemaId, TableId, TableRow,
-    inline_data::{InlineCurrentRow, list_inline_current_row_metadata_bounded},
-    runtime_snapshots::public_snapshot_sequences_by_order,
-    store::{active_runtime_read_context_id, latest_snapshot},
+    inline_data::{
+        InlineCurrentRow, decode_inline_next_row_id, list_inline_current_row_metadata_bounded,
+        list_inline_current_rows_bounded,
+    },
+    runtime_snapshots::public_snapshot_sequences_by_order_containing,
+    store::{active_runtime_read_context_id, latest_snapshot, latest_snapshot_uncached},
 };
 
 // Captures stay pinned until EndRuntimeReadContext. The byte limit bounds total
@@ -37,16 +40,19 @@ pub(super) fn capture_bounds_for_bytes(max_bytes: usize) -> (usize, usize) {
 
 #[derive(Clone)]
 pub(super) struct CapturedInlineRowsBySchema {
-    pub(super) rows: BTreeMap<SchemaId, CapturedInlineRows>,
+    pub(super) rows: BTreeMap<SchemaId, Arc<CapturedInlineRows>>,
 }
 
-#[derive(Clone)]
-pub(super) struct CapturedInlineRows {
-    pub(super) rows: Vec<(u64, InlineCurrentRow)>,
-    pub(super) next_row_id: u64,
+#[derive(Clone, Default)]
+pub(crate) struct CapturedInlineRows {
+    pub(crate) rows: Vec<(u64, InlineCurrentRow)>,
+    pub(crate) next_row_id: u64,
+    // Derived payloads are prepared and charged before cache publication.
+    pub(crate) global_stats: String,
+    pub(crate) aggregate_stats: String,
 }
 
-pub(super) type CapturedInlineRowsPayload = (Vec<(u64, InlineCurrentRow)>, u64);
+pub(crate) type CapturedInlineRowsPayload = Arc<CapturedInlineRows>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct CaptureKey {
@@ -145,8 +151,41 @@ impl InlineCaptureRequest<'_> {
     }
 
     fn build_capture(&self) -> CatalogResult<CapturedInlineRowsBySchema> {
+        // Pin only while building the capture. Check uncached state because the
+        // logical read context can still name a snapshot from before a writer advanced.
+        let read_kv = self.kv.with_read_version()?;
+        let request = InlineCaptureRequest {
+            kv: &read_kv,
+            ..*self
+        };
+        if latest_snapshot_uncached(&read_kv, self.catalog)
+            .row?
+            .is_some_and(|latest| latest.order == self.snapshot_order)
+        {
+            let next_row_ids = request.fetch_watermarks()?;
+            return request.capture_schemas(|schema, remaining| {
+                request.capture_current_schema(schema, remaining, next_row_ids[&schema])
+            });
+        }
+        let sequences = public_snapshot_sequences_by_order_containing(
+            request.kv,
+            request.catalog,
+            request.snapshot_order,
+        )?;
+        #[cfg(test)]
+        super::runtime_inline_snapshot_tests::pause_history_capture(
+            request.kv.catalog_cache_namespace(),
+        );
+        request.capture_schemas(|schema, remaining| {
+            request.capture_schema(schema, sequences.as_ref(), remaining)
+        })
+    }
+
+    fn capture_schemas(
+        &self,
+        capture_schema: impl Fn(SchemaId, usize) -> CatalogResult<CapturedInlineRows>,
+    ) -> CatalogResult<CapturedInlineRowsBySchema> {
         let mut rows = BTreeMap::new();
-        let sequences = public_snapshot_sequences_by_order(self.kv, self.catalog)?;
         for table in &self.table.inlined_data_tables {
             let remaining = MAX_CAPTURE_CACHE_BYTES
                 .checked_sub(capture_weight_for_rows(&rows)?)
@@ -156,7 +195,15 @@ impl InlineCaptureRequest<'_> {
                     )
                 })?;
             let schema = SchemaId(table.schema_version);
-            rows.insert(schema, self.capture_schema(schema, &sequences, remaining)?);
+            let mut capture = capture_schema(schema, remaining)?;
+            let schema_table = crate::inline_read_schema::table_row_for_inline_schema(
+                self.kv,
+                self.catalog,
+                self.table.table_id,
+                schema.0,
+            )?;
+            capture.prepare_stats(&schema_table)?;
+            rows.insert(schema, Arc::new(capture));
         }
         let capture = CapturedInlineRowsBySchema { rows };
         let weight = capture_weight(&capture)?;
@@ -166,6 +213,51 @@ impl InlineCaptureRequest<'_> {
             )));
         }
         Ok(capture)
+    }
+
+    fn fetch_watermarks(&self) -> CatalogResult<BTreeMap<SchemaId, u64>> {
+        use crate::OrderedCatalogKv;
+        let schemas = self
+            .table
+            .inlined_data_tables
+            .iter()
+            .map(|table| SchemaId(table.schema_version))
+            .collect::<Vec<_>>();
+        let keys = schemas
+            .iter()
+            .map(|schema| {
+                crate::keys::inline_next_row_id_key(self.catalog, self.table.table_id, *schema)
+            })
+            .collect::<Vec<_>>();
+        schemas
+            .into_iter()
+            .zip(self.kv.batch_get(&keys)?)
+            .map(|(schema, value)| {
+                decode_inline_next_row_id(value.as_deref()).map(|next| (schema, next))
+            })
+            .collect()
+    }
+
+    fn capture_current_schema(
+        &self,
+        schema: SchemaId,
+        remaining: usize,
+        next_row_id: u64,
+    ) -> CatalogResult<CapturedInlineRows> {
+        let (max_rows, max_payload_bytes) = capture_bounds_for_bytes(remaining);
+        let rows = list_inline_current_rows_bounded(
+            self.kv,
+            self.catalog,
+            self.table.table_id,
+            schema,
+            max_rows,
+            max_payload_bytes,
+        )?;
+        Ok(CapturedInlineRows {
+            rows,
+            next_row_id,
+            ..CapturedInlineRows::default()
+        })
     }
 
     fn capture_schema(
@@ -244,30 +336,19 @@ pub(crate) fn captured_inline_current_rows(
         snapshot_order,
     };
     let capture = inline_current_rows_capture_cache().get(&key)?;
-    let capture = capture.rows.get(&schema_id)?.clone();
-    let rows = capture
-        .rows
-        .into_iter()
-        .filter(|(_, row)| row.begin_order <= snapshot_order)
-        .collect::<Vec<_>>();
-    let next_row_id = rows
-        .iter()
-        .map(|(row_id, _)| row_id.saturating_add(1))
-        .max()
-        .unwrap_or(capture.next_row_id);
-    Some((rows, next_row_id))
+    capture.rows.get(&schema_id).cloned()
 }
 
 /// Select the immutable capture for a context-bound read, or the legacy
 /// latest-only path when there is no active context. Any required-capture miss
 /// fails closed because reading current FDB rows could combine two snapshots.
-pub(crate) fn captured_inline_current_rows_or_latest<F>(
-    captured: Option<CapturedInlineRowsPayload>,
+pub(crate) fn captured_inline_current_rows_or_latest<T, F>(
+    captured: Option<T>,
     current_snapshot_capture_required: bool,
     fallback: F,
-) -> CatalogResult<Option<CapturedInlineRowsPayload>>
+) -> CatalogResult<Option<T>>
 where
-    F: FnOnce() -> CatalogResult<Option<CapturedInlineRowsPayload>>,
+    F: FnOnce() -> CatalogResult<Option<T>>,
 {
     match captured {
         Some(captured) => Ok(Some(captured)),
@@ -292,6 +373,7 @@ pub(crate) fn end_runtime_read_context(
         read_context_id,
     );
     crate::store::end_runtime_read_context(namespace, catalog, read_context_id);
+    crate::runtime_snapshots::end_snapshot_schema_read_context(namespace, catalog, read_context_id);
     if let Some(cache) = INLINE_CURRENT_ROWS_CAPTURE_CACHE.get() {
         cache.retain(|key| !key.belongs_to(namespace, catalog, read_context_id));
     }
@@ -312,7 +394,7 @@ pub(super) fn capture_weight(capture: &CapturedInlineRowsBySchema) -> CatalogRes
 }
 
 fn capture_weight_for_rows(
-    rows_by_schema: &BTreeMap<SchemaId, CapturedInlineRows>,
+    rows_by_schema: &BTreeMap<SchemaId, Arc<CapturedInlineRows>>,
 ) -> CatalogResult<usize> {
     let mut weight = CAPTURE_ALLOCATION_OVERHEAD_BYTES
         .checked_add(std::mem::size_of::<CapturedInlineRowsBySchema>())
@@ -331,6 +413,12 @@ fn capture_weight_for_rows(
             .checked_add(CAPTURE_ALLOCATION_OVERHEAD_BYTES)
             .and_then(|weight| weight.checked_add(std::mem::size_of::<CapturedInlineRows>()))
             .and_then(|weight| weight.checked_add(rows_storage))
+            .ok_or_else(|| {
+                CatalogError::Backend("inline read snapshot capture weight overflowed".to_owned())
+            })?;
+        weight = weight
+            .checked_add(rows.global_stats.capacity())
+            .and_then(|weight| weight.checked_add(rows.aggregate_stats.capacity()))
             .ok_or_else(|| {
                 CatalogError::Backend("inline read snapshot capture weight overflowed".to_owned())
             })?;

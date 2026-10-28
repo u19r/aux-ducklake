@@ -254,6 +254,7 @@ impl InlineCurrentAccumulator {
         Ok(CapturedInlineRows {
             rows,
             next_row_id: self.next_row_id,
+            ..CapturedInlineRows::default()
         })
     }
 }

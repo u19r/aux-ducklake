@@ -28,6 +28,7 @@ path = "src/bin/ducklake-fdb-prefix-clear.rs"
 chrono = { workspace = true }
 foundationdb = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
+libc = { workspace = true, optional = true }
 sha2 = { workspace = true }
 
 [dev-dependencies]
@@ -37,7 +38,7 @@ tempfile = { workspace = true }
 [features]
 default = []
 foundationdb = ["dep:foundationdb", "dep:futures"]
-runtime-metrics = []
+runtime-metrics = ["dep:libc"]
 
 [lints]
 workspace = true

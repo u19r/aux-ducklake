@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    use super::decode_test_text;
     use std::{collections::BTreeMap, time::Instant};
 
     use alloc_counter::{AllocationGuard, emit_report};
@@ -8,9 +9,9 @@ mod tests {
     #[cfg(feature = "foundationdb")]
     use crate::runtime_inline_rows::{ReadInlineRowsPayload, read_inline_rows_payload};
     #[cfg(feature = "foundationdb")]
-    use crate::runtime_protocol::RuntimeCatalogBackend;
+    use crate::runtime_mutable_catalog::RuntimeMutableCatalog;
     #[cfg(feature = "foundationdb")]
-    use crate::runtime_schema_change_ops::RuntimeMutableCatalog;
+    use crate::runtime_protocol::RuntimeCatalogBackend;
     #[cfg(feature = "foundationdb")]
     use crate::runtime_snapshot_range::ReadSnapshot;
     #[cfg(feature = "foundationdb")]
@@ -24,6 +25,112 @@ mod tests {
         list_tables_at, load_table_at, load_view_at,
         runtime_snapshot_range::ProposedCommitSnapshot,
     };
+
+    #[cfg(feature = "foundationdb")]
+    #[test]
+    fn given_prepared_recovery_when_commit_is_attempted_then_later_recovery_reads_fresh_state() {
+        let catalog = CatalogId(7_044);
+        let attempt = CommitAttemptId(99);
+        let mut kv = FakeOrderedCatalogKv::default();
+        let before = initialize_catalog_if_absent(&mut kv, catalog).unwrap();
+        let _request = crate::store::begin_runtime_read_request(None);
+        current_catalog_state(&kv, catalog, Some(attempt)).unwrap();
+        assert_eq!(
+            crate::fdb_data_mutations::recover_committed_mutation(&kv, catalog, Some(attempt))
+                .unwrap(),
+            None
+        );
+        let mut batch = crate::KvBatch::new();
+        batch.put(
+            crate::conflict::commit_attempt_key(catalog, attempt),
+            crate::CommitAttemptRow::new(attempt, before.order).encode(),
+        );
+        kv.commit(batch).unwrap();
+        assert_eq!(
+            crate::fdb_data_mutations::recover_committed_mutation(&kv, catalog, Some(attempt))
+                .unwrap(),
+            None
+        );
+        crate::catalog_request_read_set::invalidate_after_mutation(catalog);
+        assert_eq!(
+            crate::fdb_data_mutations::recover_committed_mutation(&kv, catalog, Some(attempt))
+                .unwrap(),
+            Some(crate::DataMutationCommit::default())
+        );
+    }
+
+    #[test]
+    fn given_request_read_set_when_metadata_commits_then_latest_snapshot_is_refreshed() {
+        let mut kv = FakeOrderedCatalogKv::default();
+        let catalog = CatalogId(7_043);
+        initialize_catalog_if_absent(&mut kv, catalog).unwrap();
+        let _request = crate::store::begin_runtime_read_request(None);
+        let before = latest_snapshot(&kv, catalog).unwrap().unwrap();
+        assert_eq!(
+            current_catalog_state(&kv, catalog, None)
+                .unwrap()
+                .final_schema_version(false),
+            0
+        );
+        let intent = commit_attempt_intent(
+            b"commit_snapshot\t2\nmetadata\tCreateSchemas\nschema\t5\tnew-schema-uuid\ts1\tmain/s1/\t\n",
+        ).unwrap();
+
+        commit_metadata_intents_with_kv(&mut kv, catalog, &intent).unwrap();
+
+        let after = latest_snapshot(&kv, catalog).unwrap().unwrap();
+        assert_ne!(after.order, before.order);
+        assert_eq!(
+            current_catalog_state(&kv, catalog, None)
+                .unwrap()
+                .final_schema_version(false),
+            1
+        );
+        let conflict = decode_test_text(
+            crate::runtime_catalog_snapshot::conflict_snapshot_payload_for_row(
+                &kv,
+                catalog,
+                after.clone(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            conflict.contains("ducklake_next_catalog_id=1\n"),
+            "{conflict}"
+        );
+        commit_create_schema_rows(
+            &mut kv,
+            catalog,
+            vec![SchemaRow::new(
+                SchemaId(5),
+                "s2-uuid",
+                "s2",
+                "main/s2/",
+                crate::CatalogOrderId::uuid_v7(0),
+            )],
+        )
+        .unwrap();
+        // Direct KV writes use the runtime owner's invalidation boundary.
+        crate::store::invalidate_runtime_read_context(catalog);
+        let latest = latest_snapshot(&kv, catalog).unwrap().unwrap();
+        let conflict = decode_test_text(
+            crate::runtime_catalog_snapshot::conflict_snapshot_payload_for_row(
+                &kv, catalog, latest,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            conflict.contains("ducklake_next_catalog_id=6\n"),
+            "{conflict}"
+        );
+        assert!(
+            conflict.contains("ducklake_schema_version=2\n"),
+            "{conflict}"
+        );
+        assert_eq!(list_schemas_at(&kv, catalog, after.order).unwrap().len(), 1);
+    }
 
     #[test]
     fn given_latest_snapshot_when_catalog_state_is_loaded_then_its_schema_version_is_resolved_by_order()
@@ -44,7 +151,7 @@ mod tests {
         )
         .unwrap();
 
-        let state = current_catalog_state(&kv, catalog).unwrap();
+        let state = current_catalog_state(&kv, catalog, None).unwrap();
 
         assert_eq!(state.final_schema_version(false), 1);
     }
@@ -115,11 +222,7 @@ mod tests {
         let delete = crate::runtime_inline_ops::inline_delete_payload(&payload).unwrap();
 
         assert_eq!(delete.targets[0].row_ids, vec![42]);
-        assert!(
-            !String::from_utf8(payload)
-                .unwrap()
-                .contains("read_snapshot")
-        );
+        assert!(!decode_test_text(payload).unwrap().contains("read_snapshot"));
     }
 
     #[test]
@@ -138,7 +241,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(String::from_utf8(payload).unwrap().starts_with(
+        assert!(decode_test_text(payload).unwrap().starts_with(
             "commit_snapshot\t8\nrecovery_attempt\t00112233445566778899aabbccddeeff\n"
         ));
     }
@@ -291,7 +394,7 @@ mod tests {
         assert_eq!(recreated.schema_id, new_schema_id);
         assert_eq!(recreated.columns[0].column_type, "date");
         assert_eq!(result.created_tables.len(), 1);
-        assert_eq!(result.created_tables[0].persisted.table_id, new_table_id);
+        assert_eq!(result.created_tables[0].table_id, new_table_id);
     }
 
     #[test]
@@ -1136,8 +1239,8 @@ mod tests {
 
         assert_eq!(changed.changed_table_count, 1);
         assert_eq!(changed.created_tables.len(), 1);
-        assert_eq!(changed.created_tables[0].persisted.table_id, table_id);
-        assert_eq!(changed.created_tables[0].persisted.name, "created");
+        assert_eq!(changed.created_tables[0].table_id, table_id);
+        assert_eq!(changed.created_tables[0].name, "created");
         let latest = latest_snapshot(&kv, catalog).unwrap().unwrap();
         assert_eq!(latest.sequence, RawSnapshotSequence(1));
         let table = load_table_at(&kv, catalog, table_id, latest.order)
@@ -1188,10 +1291,7 @@ mod tests {
 
         assert_eq!(changed.changed_table_count, 2);
         assert_eq!(changed.created_tables.len(), 1);
-        assert_eq!(
-            changed.created_tables[0].persisted.table_id,
-            replacement_table_id
-        );
+        assert_eq!(changed.created_tables[0].table_id, replacement_table_id);
         let latest = latest_snapshot(&kv, catalog).unwrap().unwrap();
         let current_tables = list_tables_at(&kv, catalog, latest.order).unwrap();
         assert_eq!(current_tables.len(), 2);
@@ -1239,10 +1339,7 @@ mod tests {
             changed.created_tables[0].requested_table_id,
             requested_table_id
         );
-        assert_eq!(
-            changed.created_tables[0].persisted.table_id,
-            persisted_table_id
-        );
+        assert_eq!(changed.created_tables[0].table_id, persisted_table_id);
         assert_eq!(
             changed.table_id_remaps(),
             BTreeMap::from([(requested_table_id, persisted_table_id)])
@@ -1285,9 +1382,9 @@ mod tests {
         )
         .unwrap();
 
-        let inline = String::from_utf8(inline).unwrap();
-        let compaction = String::from_utf8(compaction).unwrap();
-        let data = String::from_utf8(data).unwrap();
+        let inline = decode_test_text(inline.into_owned()).unwrap();
+        let compaction = decode_test_text(compaction.into_owned()).unwrap();
+        let data = decode_test_text(data.into_owned()).unwrap();
         assert!(inline.contains("table\t2\t1\tducklake_inlined_data_2_1"));
         assert!(compaction.contains("source_file\t2\t10"));
         assert!(compaction.contains("file\t0\t2\tmain/test2/rewrite.parquet"));
@@ -1431,12 +1528,12 @@ mod tests {
             commit_attempt(
                 RuntimeCatalogBackend::FoundationDb,
                 catalog,
-                b"commit_snapshot\t3\nread_snapshot\t2\ncompaction\tMergeAdjacentFiles\nsource_file\t1\t10\nsource_file\t2\t20\nfile\t11\t1\tmain/users/merged.parquet\t1\t128\t0\nfile\t21\t2\tmain/groups/merged.parquet\t1\t128\t0\n", None,)?;
+                b"commit_snapshot\t3\nread_snapshot\t2\ncompaction\tMergeAdjacentFiles\nsource_file\t1\t0\nsource_file\t2\t1\nfile\t11\t1\tmain/users/merged.parquet\t1\t128\t0\nfile\t21\t2\tmain/groups/merged.parquet\t1\t128\t0\n", None,)?;
 
             let latest =
                 latest_snapshot(&kv, catalog)?.ok_or(CatalogError::NotFound("snapshot"))?;
             assert_eq!(latest.sequence, RawSnapshotSequence(3));
-            for (table_id, expected_file_id) in [(TableId(1), 11), (TableId(2), 21)] {
+            for (table_id, expected_file_id) in [(TableId(1), 2), (TableId(2), 3)] {
                 let files = crate::list_data_files_at(&kv, catalog, table_id, latest.order)?;
                 assert_eq!(files.len(), 1);
                 assert_eq!(files[0].data_file_id.0, expected_file_id);
@@ -1694,7 +1791,7 @@ mod tests {
                 second_commit,
                 None,
             )?;
-            let output = String::from_utf8(output)
+            let output = decode_test_text(output)
                 .map_err(|error| CatalogError::Decode(error.to_string()))?;
             assert!(output.contains("created_table\t1\t2\t0\ttest2"));
 
@@ -1722,7 +1819,7 @@ mod tests {
                     include_deleted: false,
                 },
             )?;
-            let inline_rows = String::from_utf8(inline_rows)
+            let inline_rows = decode_test_text(inline_rows)
                 .map_err(|error| CatalogError::Decode(error.to_string()))?;
             assert!(
                 inline_rows.contains("row_change\t1\t\t0\ts:68656c6c6f"),
@@ -1958,7 +2055,7 @@ mod tests {
             result.created_tables[0].requested_table_id,
             requested_table_id
         );
-        assert_eq!(result.created_tables[0].persisted.table_id, TableId(2));
+        assert_eq!(result.created_tables[0].table_id, TableId(2));
         assert_eq!(
             created.partition,
             Some(TablePartitionRow::new(
@@ -2196,4 +2293,8 @@ mod tests {
             std::env::remove_var(key);
         }
     }
+}
+
+fn decode_test_text(payload: impl AsRef<[u8]>) -> Result<String, std::str::Utf8Error> {
+    std::str::from_utf8(payload.as_ref()).map(str::to_owned)
 }

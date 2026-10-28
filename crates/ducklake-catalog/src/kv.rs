@@ -124,6 +124,45 @@ impl KvBatch {
     }
 }
 
+/// Independent reads that share one immutable backend read version.
+#[derive(Clone)]
+pub struct CatalogReadRange {
+    pub start: Vec<u8>,
+    pub end: Vec<u8>,
+    pub direction: RangeDirection,
+    pub limit: usize,
+}
+
+pub struct CatalogReadResult {
+    pub values: Vec<Option<Vec<u8>>>,
+    pub ranges: Vec<Vec<RangeItem>>,
+}
+
+/// An index ending in an eight-byte identifier that references one primary row.
+pub struct CatalogIndexJoin {
+    pub index_prefix: Vec<u8>,
+    pub primary_prefix: Vec<u8>,
+}
+
+pub struct CatalogIndexRow {
+    pub index: RangeItem,
+    pub primary: Option<RangeItem>,
+}
+
+impl CatalogIndexJoin {
+    pub(crate) fn primary_key(&self, index_key: &[u8]) -> CatalogResult<Vec<u8>> {
+        let suffix = index_key
+            .strip_prefix(self.index_prefix.as_slice())
+            .filter(|suffix| suffix.len() == 8)
+            .ok_or_else(|| {
+                CatalogError::InvalidKey("index row has an invalid primary identifier".to_owned())
+            })?;
+        let mut key = self.primary_prefix.clone();
+        key.extend_from_slice(suffix);
+        Ok(key)
+    }
+}
+
 pub trait OrderedCatalogKv {
     fn catalog_cache_namespace(&self) -> CatalogCacheNamespace
     where
@@ -136,12 +175,61 @@ pub trait OrderedCatalogKv {
     fn batch_get(&self, keys: &[Vec<u8>]) -> CatalogResult<Vec<Option<Vec<u8>>>> {
         keys.iter().map(|key| self.get(key)).collect()
     }
+    fn scan_index_rows(&self, join: &CatalogIndexJoin) -> CatalogResult<Vec<CatalogIndexRow>> {
+        let indices = self.scan_prefix(&join.index_prefix, RangeDirection::Forward, usize::MAX)?;
+        let keys = indices
+            .iter()
+            .map(|index| join.primary_key(&index.key))
+            .collect::<CatalogResult<Vec<_>>>()?;
+        let values = self.batch_get(&keys)?;
+        if values.len() != keys.len() {
+            return Err(CatalogError::Backend(
+                "index join returned wrong primary row count".to_owned(),
+            ));
+        }
+        Ok(indices
+            .into_iter()
+            .zip(keys.into_iter().zip(values))
+            .map(|(index, (key, value))| CatalogIndexRow {
+                index,
+                primary: value.map(|value| RangeItem { key, value }),
+            })
+            .collect())
+    }
+    fn read_set(
+        &self,
+        keys: &[Vec<u8>],
+        ranges: &[CatalogReadRange],
+    ) -> CatalogResult<CatalogReadResult> {
+        Ok(CatalogReadResult {
+            values: self.batch_get(keys)?,
+            ranges: ranges
+                .iter()
+                .map(|range| {
+                    self.scan_range(&range.start, &range.end, range.direction, range.limit)
+                })
+                .collect::<CatalogResult<_>>()?,
+        })
+    }
     fn scan_prefix(
         &self,
         prefix: &[u8],
         direction: RangeDirection,
         limit: usize,
     ) -> CatalogResult<Vec<RangeItem>>;
+    /// Return each prefix result in input order. The backend owns read
+    /// concurrency.
+    fn scan_prefixes(
+        &self,
+        prefixes: &[Vec<u8>],
+        direction: RangeDirection,
+        limit: usize,
+    ) -> CatalogResult<Vec<Vec<RangeItem>>> {
+        prefixes
+            .iter()
+            .map(|prefix| self.scan_prefix(prefix, direction, limit))
+            .collect()
+    }
     fn scan_range(
         &self,
         start: &[u8],
@@ -157,7 +245,8 @@ pub trait OrderedCatalogKv {
 /// FoundationDB's range API may return fewer items than requested for byte or
 /// transaction limits, so a non-empty page is always followed by a continuation
 /// request. The visitor owns each item only for the duration of the callback;
-/// callers that need a bounded result must enforce that bound before retaining it.
+/// callers that need a bounded result must enforce that bound before retaining
+/// it.
 pub(crate) fn scan_range_pages(
     kv: &impl OrderedCatalogKv,
     start: &[u8],

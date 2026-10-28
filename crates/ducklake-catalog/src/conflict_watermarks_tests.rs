@@ -3,8 +3,8 @@ mod tests {
     use crate::{
         CatalogId, DataFileId, DataFileRow, FakeOrderedCatalogKv, KvBatch, TableId,
         conflict_watermarks::{
-            load_conflict_watermarks, load_max_catalog_id_watermark, load_max_file_id_watermark,
-            load_table_next_row_ids, stage_conflict_watermarks_initialized,
+            decode_table_next_row_ids, load_conflict_watermarks, load_max_catalog_id_watermark,
+            load_max_file_id_watermark, stage_conflict_watermarks_initialized,
             stage_max_catalog_id_watermark, stage_max_file_id_watermark, stage_table_next_row_id,
         },
         data_file_store::append_data_file,
@@ -13,7 +13,7 @@ mod tests {
             conflict_max_catalog_id_key, conflict_max_file_id_key,
             conflict_watermarks_initialized_key, decode_key,
         },
-        runtime_catalog_snapshot::conflict_snapshot_watermarks,
+        runtime_catalog_snapshot::snapshot_watermarks,
     };
 
     #[test]
@@ -46,7 +46,7 @@ mod tests {
         let catalog = CatalogId(1);
         let kv = FakeOrderedCatalogKv::new();
 
-        let result = conflict_snapshot_watermarks(&kv, catalog, crate::CatalogOrderId::uuid_v7(10));
+        let result = snapshot_watermarks(&kv, catalog, crate::CatalogOrderId::uuid_v7(10));
 
         assert!(result.is_err());
     }
@@ -62,7 +62,7 @@ mod tests {
         kv.commit(batch).unwrap();
 
         let watermarks =
-            conflict_snapshot_watermarks(&kv, catalog, crate::CatalogOrderId::uuid_v7(10)).unwrap();
+            snapshot_watermarks(&kv, catalog, crate::CatalogOrderId::uuid_v7(10)).unwrap();
 
         assert_eq!(watermarks.next_catalog_id, 1);
         assert_eq!(watermarks.next_file_id, 124);
@@ -77,8 +77,7 @@ mod tests {
             batch.put(conflict_watermarks_initialized_key(catalog), value.to_vec());
             kv.commit(batch).unwrap();
 
-            let result =
-                conflict_snapshot_watermarks(&kv, catalog, crate::CatalogOrderId::uuid_v7(10));
+            let result = snapshot_watermarks(&kv, catalog, crate::CatalogOrderId::uuid_v7(10));
 
             assert!(result.is_err(), "marker value {value:?} should be rejected");
         }
@@ -93,7 +92,7 @@ mod tests {
         kv.commit(batch).unwrap();
 
         let watermarks =
-            conflict_snapshot_watermarks(&kv, catalog, crate::CatalogOrderId::uuid_v7(10)).unwrap();
+            snapshot_watermarks(&kv, catalog, crate::CatalogOrderId::uuid_v7(10)).unwrap();
 
         assert_eq!(watermarks.next_catalog_id, 0);
         assert_eq!(watermarks.next_file_id, 0);
@@ -121,7 +120,7 @@ mod tests {
 
         assert_eq!(load_max_file_id_watermark(&kv, catalog).unwrap(), Some(7));
         let watermarks =
-            conflict_snapshot_watermarks(&kv, catalog, crate::CatalogOrderId::uuid_v7(10)).unwrap();
+            snapshot_watermarks(&kv, catalog, crate::CatalogOrderId::uuid_v7(10)).unwrap();
         assert_eq!(watermarks.next_file_id, 8);
     }
 
@@ -169,7 +168,7 @@ mod tests {
         kv.commit(batch).unwrap();
 
         let watermarks =
-            conflict_snapshot_watermarks(&kv, catalog, crate::CatalogOrderId::uuid_v7(10)).unwrap();
+            snapshot_watermarks(&kv, catalog, crate::CatalogOrderId::uuid_v7(10)).unwrap();
 
         assert_eq!(watermarks.next_catalog_id, 42);
         assert_eq!(watermarks.next_file_id, 124);
@@ -200,8 +199,17 @@ mod tests {
         stage_table_next_row_id(&kv, &mut batch, catalog, TableId(3), 34).unwrap();
         kv.commit(batch).unwrap();
 
-        let watermarks =
-            load_table_next_row_ids(&kv, catalog, &[TableId(1), TableId(2), TableId(3)]).unwrap();
+        let watermarks = decode_table_next_row_ids(
+            catalog,
+            &[TableId(1), TableId(2), TableId(3)],
+            crate::OrderedCatalogKv::batch_get(
+                &kv,
+                &[TableId(1), TableId(2), TableId(3)]
+                    .map(|table| crate::keys::table_next_row_id_key(catalog, table)),
+            )
+            .unwrap(),
+        )
+        .unwrap();
 
         assert_eq!(watermarks.get(&TableId(1)), Some(&0));
         assert_eq!(watermarks.get(&TableId(2)), Some(&21));

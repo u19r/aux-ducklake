@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::{cell::Cell, collections::BTreeSet};
 
     use crate::{
         CatalogId, CatalogOrderId, DataFileId, DataFileRow, FakeOrderedCatalogKv, KvBatch,
@@ -163,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn given_sparse_partition_file_set_when_loaded_then_uses_exact_prefix_scans() {
+    fn given_sparse_partition_file_set_when_loaded_then_batches_exact_prefix_scans() {
         let catalog = CatalogId(125);
         let table = TableId(7);
         let data_file_ids = [DataFileId(11), DataFileId(10_000)];
@@ -183,7 +183,28 @@ mod tests {
 
         assert_eq!(rows.len(), 2);
         assert_eq!(kv.file_partition_value_prefix_scans(), 2);
+        assert_eq!(kv.file_partition_value_prefix_batches.get(), 1);
         assert_eq!(kv.file_partition_value_range_scans(), 0);
+    }
+
+    #[test]
+    fn given_mismatched_partition_file_id_when_loading_sparse_prefixes_then_rejects_corruption() {
+        let catalog = CatalogId(126);
+        let mut kv = FakeOrderedCatalogKv::new();
+        let row =
+            FilePartitionValueRow::new(DataFileId(12), TableId(7), PartitionKeyIndex(0), "eu");
+        let mut batch = KvBatch::new();
+        batch.put(
+            crate::keys::file_partition_value_key(catalog, DataFileId(11), PartitionKeyIndex(0)),
+            row.encode(),
+        );
+        kv.commit(batch).unwrap();
+        let result = list_file_partition_values_for_data_files(
+            &kv,
+            catalog,
+            &BTreeSet::from([DataFileId(11), DataFileId(10_000)]),
+        );
+        assert!(matches!(result, Err(crate::CatalogError::Decode(_))));
     }
 
     #[test]
@@ -252,6 +273,7 @@ mod tests {
         file_partition_value_prefix_scans: Cell<usize>,
         file_partition_value_range_scans: Cell<usize>,
         file_partition_value_batch_gets: Cell<usize>,
+        file_partition_value_prefix_batches: Cell<usize>,
     }
 
     impl PartitionValueScanCountingKv {
@@ -262,6 +284,7 @@ mod tests {
                 file_partition_value_prefix_scans: Cell::new(0),
                 file_partition_value_range_scans: Cell::new(0),
                 file_partition_value_batch_gets: Cell::new(0),
+                file_partition_value_prefix_batches: Cell::new(0),
             }
         }
 
@@ -313,6 +336,20 @@ mod tests {
                 );
             }
             OrderedCatalogKv::scan_prefix(&self.inner, prefix, direction, limit)
+        }
+
+        fn scan_prefixes(
+            &self,
+            prefixes: &[Vec<u8>],
+            direction: RangeDirection,
+            limit: usize,
+        ) -> crate::CatalogResult<Vec<Vec<RangeItem>>> {
+            self.file_partition_value_prefix_batches
+                .set(self.file_partition_value_prefix_batches.get() + 1);
+            prefixes
+                .iter()
+                .map(|prefix| self.scan_prefix(prefix, direction, limit))
+                .collect()
         }
 
         fn scan_range(

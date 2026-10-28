@@ -84,13 +84,16 @@ fn merge_inline_file_deletion_scans(
     end_order: CatalogOrderId,
     scans: &mut Vec<DeleteScanFile>,
 ) -> CatalogResult<()> {
-    let mut groups = BTreeMap::<(CatalogOrderId, DataFileId), BTreeMap<u64, CatalogOrderId>>::new();
-    for row in list_inline_file_deletions_between(kv, catalog, table_id, start_order, end_order)? {
-        groups
-            .entry((row.validity.begin_order, row.data_file_id))
-            .or_default()
-            .insert(row.row_id, row.validity.begin_order);
-    }
+    // A full-file scan must suppress earlier inline deletes. Other scans only
+    // retain tombstones in the requested range, using the same prefix read.
+    let inline_start = scans
+        .iter()
+        .filter(|scan| scan.full_file_delete)
+        .fold(start_order, |start, scan| {
+            start.min(scan.data_file.validity.begin_order)
+        });
+    let rows = list_inline_file_deletions_between(kv, catalog, table_id, inline_start, end_order)?;
+    let groups = group_inline_deletion_scans(rows, scans, start_order);
     for ((snapshot_order, data_file_id), inline_file_deletions) in groups {
         if let Some(scan) = scans.iter_mut().find(|scan| {
             scan.snapshot_order == snapshot_order && scan.data_file.data_file_id == data_file_id
@@ -112,6 +115,35 @@ fn merge_inline_file_deletion_scans(
         ));
     }
     Ok(())
+}
+
+type InlineDeletionGroups = BTreeMap<(CatalogOrderId, DataFileId), BTreeMap<u64, CatalogOrderId>>;
+
+fn group_inline_deletion_scans(
+    rows: Vec<crate::InlineFileDeletionRow>,
+    scans: &mut [DeleteScanFile],
+    start_order: CatalogOrderId,
+) -> InlineDeletionGroups {
+    let full_files = scans
+        .iter()
+        .enumerate()
+        .filter(|(_, scan)| scan.full_file_delete)
+        .map(|(index, scan)| (scan.data_file.data_file_id, index))
+        .collect::<BTreeMap<_, _>>();
+    let mut groups = InlineDeletionGroups::new();
+    for row in rows {
+        if let Some(index) = full_files.get(&row.data_file_id) {
+            scans[*index]
+                .inline_file_deletions
+                .insert(row.row_id, row.validity.begin_order);
+        } else if row.validity.begin_order >= start_order {
+            groups
+                .entry((row.validity.begin_order, row.data_file_id))
+                .or_default()
+                .insert(row.row_id, row.validity.begin_order);
+        }
+    }
+    groups
 }
 
 fn list_partial_delete_scan_files(

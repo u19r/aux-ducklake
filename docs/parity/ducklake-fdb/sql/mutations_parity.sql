@@ -41,3 +41,17 @@ FROM ducklake_table_changes(
 WHERE change_type = 'delete';
 SELECT 'mutations_parity_time_travel_update=' || count(*) || ',' || sum(qty)
 FROM dl.mut.items AT (VERSION => getvariable('mutations_parity_after_update')::BIGINT);
+
+-- Successive delete files must report each row once in its own snapshot.
+CREATE TABLE dl.mut.delete_history AS SELECT i AS id FROM range(10) t(i);
+DELETE FROM dl.mut.delete_history WHERE id = 0;
+SET VARIABLE mutations_delete_first = (SELECT id FROM ducklake_current_snapshot('dl'));
+DELETE FROM dl.mut.delete_history WHERE id = 1;
+SET VARIABLE mutations_delete_last = (SELECT id FROM ducklake_current_snapshot('dl'));
+SELECT 'mutations_parity_delete_history=' || count(*) || ',' || count(DISTINCT id) || ',' ||
+    count(*) FILTER (WHERE snapshot_id = getvariable('mutations_delete_first')::BIGINT + id)
+FROM ducklake_table_deletions('dl', 'mut', 'delete_history',
+    getvariable('mutations_delete_first')::BIGINT, getvariable('mutations_delete_last')::BIGINT);
+SELECT 'mutations_parity_delete_history_tail=' || count(*) || ',' || sum(id)
+FROM ducklake_table_deletions('dl', 'mut', 'delete_history',
+    getvariable('mutations_delete_last')::BIGINT, getvariable('mutations_delete_last')::BIGINT);

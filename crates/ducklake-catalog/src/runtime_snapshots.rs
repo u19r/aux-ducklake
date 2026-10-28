@@ -1,9 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-#[cfg(not(test))]
 use std::sync::OnceLock;
 
-#[cfg(not(test))]
 use crate::bounded_cache::{BoundedCache, static_bounded_cache};
 #[cfg(not(test))]
 use crate::runtime_metrics::RuntimeMetricStage;
@@ -47,54 +45,75 @@ pub fn snapshot_schema_version(
     load_schema_version_at(kv, catalog, order)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum SchemaVersionSnapshotScope {
+    All,
+    Active,
+}
+
 pub(crate) fn snapshot_schema_versions_by_order(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
-) -> CatalogResult<BTreeMap<CatalogOrderId, u64>> {
-    snapshot_schema_versions_by_order_shared(kv, catalog).map(|versions| versions.as_ref().clone())
-}
-
-pub(crate) fn snapshot_schema_versions_by_order_shared(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
+    scope: SchemaVersionSnapshotScope,
 ) -> CatalogResult<SharedOrderMap> {
-    #[cfg(test)]
-    {
-        snapshot_schema_versions_by_order_uncached(kv, catalog).map(SharedOrderMap::new)
-    }
-    #[cfg(not(test))]
-    {
-        let Some(latest) = latest_snapshot(kv, catalog)? else {
-            return Ok(SharedOrderMap::new(BTreeMap::new()));
-        };
-        let key = CatalogVersionCacheKey {
+    let Some(latest) = latest_snapshot(kv, catalog)? else {
+        return Ok(SharedOrderMap::new(BTreeMap::new()));
+    };
+    let key = SnapshotSchemaVersionsCacheKey {
+        catalog_version: CatalogVersionCacheKey {
             namespace: kv.catalog_cache_namespace(),
             catalog,
             latest_order: latest.order,
-        };
-        let cache = snapshot_schema_versions_cache();
-        if let Some(versions) = cache.get(key) {
-            return Ok(versions);
+        },
+        scope,
+    };
+    let should_cache =
+        scope == SchemaVersionSnapshotScope::All || crate::store::runtime_read_context_enabled();
+    if should_cache && let Some(versions) = snapshot_schema_versions_cache().get(key) {
+        return Ok(versions);
+    }
+    let orders = scope.fetch_orders(kv, catalog, latest.order.kind())?;
+    let versions = SharedOrderMap::new(load_schema_versions_at(kv, catalog, &orders)?);
+    if should_cache {
+        snapshot_schema_versions_cache().insert(key, versions.clone());
+    }
+    Ok(versions)
+}
+
+impl SchemaVersionSnapshotScope {
+    fn fetch_orders(
+        self,
+        kv: &impl OrderedCatalogKv,
+        catalog: CatalogId,
+        kind: CatalogOrderKind,
+    ) -> CatalogResult<BTreeSet<CatalogOrderId>> {
+        match self {
+            Self::All => Ok(list_all_snapshots(kv, catalog)?
+                .into_iter()
+                .map(|snapshot| snapshot.order)
+                .collect()),
+            Self::Active => kv
+                .scan_prefix(
+                    &crate::keys::snapshot_timestamp_prefix(catalog),
+                    RangeDirection::Forward,
+                    usize::MAX,
+                )?
+                .into_iter()
+                .map(|item| {
+                    crate::keys::decode_snapshot_timestamp_key(catalog, &item.key)
+                        .map(|(_, order)| CatalogOrderId::from_bytes(kind, order.as_bytes()))
+                })
+                .collect(),
         }
-        let versions =
-            SharedOrderMap::new(snapshot_schema_versions_by_order_uncached(kv, catalog)?);
-        cache.insert(key, versions.clone());
-        Ok(versions)
     }
 }
 
-fn snapshot_schema_versions_by_order_uncached(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-) -> CatalogResult<BTreeMap<CatalogOrderId, u64>> {
-    let orders = list_all_snapshots(kv, catalog)?
-        .into_iter()
-        .map(|snapshot| snapshot.order)
-        .collect::<BTreeSet<_>>();
-    load_schema_versions_at(kv, catalog, &orders)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct SnapshotSchemaVersionsCacheKey {
+    catalog_version: CatalogVersionCacheKey,
+    scope: SchemaVersionSnapshotScope,
 }
 
-#[cfg(not(test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct CatalogVersionCacheKey {
     namespace: crate::CatalogCacheNamespace,
@@ -102,9 +121,8 @@ struct CatalogVersionCacheKey {
     latest_order: CatalogOrderId,
 }
 
-#[cfg(not(test))]
 static SNAPSHOT_SCHEMA_VERSIONS_CACHE: OnceLock<
-    BoundedCache<CatalogVersionCacheKey, SharedOrderMap>,
+    BoundedCache<SnapshotSchemaVersionsCacheKey, SharedOrderMap>,
 > = OnceLock::new();
 
 #[cfg(not(test))]
@@ -112,9 +130,8 @@ static INLINE_ROW_CHANGE_INDEX_CACHE: OnceLock<
     BoundedCache<CatalogVersionCacheKey, InlineRowChangeIndex>,
 > = OnceLock::new();
 
-#[cfg(not(test))]
-fn snapshot_schema_versions_cache() -> &'static BoundedCache<CatalogVersionCacheKey, SharedOrderMap>
-{
+fn snapshot_schema_versions_cache()
+-> &'static BoundedCache<SnapshotSchemaVersionsCacheKey, SharedOrderMap> {
     static_bounded_cache(&SNAPSHOT_SCHEMA_VERSIONS_CACHE, 1024)
 }
 
@@ -126,19 +143,13 @@ fn inline_row_change_index_cache()
 
 #[derive(Clone)]
 pub(crate) struct SharedOrderMap {
-    #[cfg(not(test))]
     inner: Arc<BTreeMap<CatalogOrderId, u64>>,
-    #[cfg(test)]
-    inner: BTreeMap<CatalogOrderId, u64>,
 }
 
 impl SharedOrderMap {
     fn new(inner: BTreeMap<CatalogOrderId, u64>) -> Self {
         Self {
-            #[cfg(not(test))]
             inner: Arc::new(inner),
-            #[cfg(test)]
-            inner,
         }
     }
 
@@ -576,10 +587,25 @@ pub(crate) fn invalidate_runtime_snapshot_context(catalog: CatalogId) {
         cache.retain(|(_, cached_catalog), _| *cached_catalog != catalog);
     }
     if let Some(cache) = SNAPSHOT_SCHEMA_VERSIONS_CACHE.get() {
-        cache.retain(|key, _| key.catalog != catalog);
+        cache.retain(|key, _| key.catalog_version.catalog != catalog);
     }
     if let Some(cache) = INLINE_ROW_CHANGE_INDEX_CACHE.get() {
         cache.retain(|key, _| key.catalog != catalog);
+    }
+}
+
+pub(crate) fn end_snapshot_schema_read_context(
+    namespace: crate::CatalogCacheNamespace,
+    catalog: CatalogId,
+    read_context_id: u64,
+) {
+    if let Some(cache) = SNAPSHOT_SCHEMA_VERSIONS_CACHE.get() {
+        let namespace = namespace.with_read_context(Some(read_context_id));
+        cache.retain(|key, _| {
+            key.scope != SchemaVersionSnapshotScope::Active
+                || key.catalog_version.catalog != catalog
+                || key.catalog_version.namespace != namespace
+        });
     }
 }
 
@@ -615,11 +641,16 @@ pub fn snapshot_by_ducklake_sequence(
     {
         return Ok(Some(latest));
     }
+    if let Some(snapshot) =
+        crate::snapshot_by_raw_sequence(kv, catalog, RawSnapshotSequence(snapshot_id.0))?
+    {
+        return Ok(Some(snapshot));
+    }
     let context = SnapshotReadContext::for_ducklake_snapshot(kv, catalog, snapshot_id)?;
     if let Some(snapshot) = context.ducklake_snapshot(snapshot_id) {
         return Ok(Some(snapshot));
     }
-    crate::snapshot_by_raw_sequence(kv, catalog, RawSnapshotSequence(snapshot_id.0))
+    Ok(None)
 }
 
 pub fn next_public_snapshot_sequence(
@@ -644,14 +675,6 @@ pub fn public_snapshot_sequence_for_order(
             .copied()
             .map(DuckLakeSnapshotId),
     )
-}
-
-pub(crate) fn public_snapshot_sequences_by_order(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-) -> CatalogResult<std::collections::BTreeMap<CatalogOrderId, u64>> {
-    public_snapshot_sequences_by_order_shared(kv, catalog)
-        .map(|sequences| sequences.as_ref().clone())
 }
 
 pub(crate) fn public_snapshot_sequences_by_order_shared(

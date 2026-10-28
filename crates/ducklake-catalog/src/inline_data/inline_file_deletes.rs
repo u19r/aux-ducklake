@@ -242,7 +242,9 @@ pub(crate) fn list_inline_file_deletion_rows_for_data_files_at(
     if data_file_ids.is_empty() {
         return Ok(Vec::new());
     }
-    if crate::store::runtime_read_context_enabled() {
+    if crate::store::runtime_read_context_enabled()
+        && data_file_ids.len() > MAX_FILE_SCOPED_INLINE_DELETION_PREFIX_SCANS
+    {
         return Ok(
             crate::runtime_read_context::InlineDeletionReadContext::for_table(
                 kv, catalog, table_id,
@@ -266,13 +268,25 @@ pub(crate) fn list_inline_file_deletion_rows_for_data_files_at(
     }
     let mut rows = Vec::new();
     for data_file_id in data_file_ids {
-        rows.extend(list_inline_file_deletion_rows_for_data_file_at_uncached(
-            kv,
-            catalog,
-            table_id,
-            *data_file_id,
-            snapshot_order,
-        )?);
+        if crate::store::runtime_read_context_enabled() {
+            rows.extend(
+                crate::runtime_read_context::InlineDeletionReadContext::for_file(
+                    kv,
+                    catalog,
+                    table_id,
+                    *data_file_id,
+                )?
+                .rows_at(snapshot_order),
+            );
+        } else {
+            rows.extend(list_inline_file_deletion_rows_for_data_file_at_uncached(
+                kv,
+                catalog,
+                table_id,
+                *data_file_id,
+                snapshot_order,
+            )?);
+        }
     }
     rows.sort_by_key(|row| (row.data_file_id, row.row_id, row.validity.begin_order));
     Ok(rows)
