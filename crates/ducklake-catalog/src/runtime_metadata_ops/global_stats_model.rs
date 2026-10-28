@@ -1,19 +1,20 @@
 #[cfg(feature = "foundationdb")]
-use std::collections::{BTreeMap, BTreeSet};
-
-#[cfg(feature = "foundationdb")]
-use crate::{CatalogResult, ColumnId, DataFileId, TableId};
-use crate::{
-    FileColumnStatsRow,
-    runtime_metadata_ops::*,
-    typed_scalar::{
-        CatalogScalarType, compare_typed_scalars, normalize_catalog_scalar_type,
-        typed_extrema_are_invalid,
-    },
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
 };
 
 #[cfg(feature = "foundationdb")]
-#[derive(Clone, Copy)]
+use crate::{
+    CatalogResult, ColumnId, DataFileId, TableId, typed_scalar::normalize_catalog_scalar_type,
+};
+use crate::{
+    runtime_metadata_ops::*,
+    typed_scalar::{CatalogScalarType, compare_typed_scalars, typed_extrema_are_invalid},
+};
+
+#[cfg(feature = "foundationdb")]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct GlobalStatsFileRow {
     pub(super) data_file_id: DataFileId,
     pub(super) record_count: u64,
@@ -45,13 +46,20 @@ pub(super) struct InlineStatsMerge<'a> {
 }
 
 #[cfg(feature = "foundationdb")]
-pub(super) struct GlobalTableStats {
-    table_id: TableId,
+struct GlobalStatsSchema {
     leaf_column_ids: BTreeSet<ColumnId>,
     column_types: BTreeMap<ColumnId, CatalogScalarType>,
     column_defaults: BTreeMap<ColumnId, (Option<String>, bool)>,
+}
+
+#[cfg(feature = "foundationdb")]
+#[derive(Clone)]
+pub(super) struct GlobalTableStats {
+    table_id: TableId,
+    schema: Arc<GlobalStatsSchema>,
     file_columns: BTreeMap<DataFileId, BTreeSet<ColumnId>>,
     live_files: BTreeSet<DataFileId>,
+    missing_file_columns: Arc<BTreeSet<ColumnId>>,
     record_count: u64,
     next_row_id: u64,
     table_size_bytes: u64,
@@ -61,7 +69,7 @@ pub(super) struct GlobalTableStats {
 #[cfg(feature = "foundationdb")]
 impl GlobalTableStats {
     pub(super) fn new(table: &crate::TableRow, allocated_next_row_id: u64) -> Self {
-        let leaf_column_ids = leaf_column_ids(table).into_iter().collect::<BTreeSet<_>>();
+        let leaf_column_ids = leaf_column_ids(table);
         let column_types = table
             .columns
             .iter()
@@ -75,21 +83,24 @@ impl GlobalTableStats {
             .collect();
         Self {
             table_id: table.table_id,
-            leaf_column_ids,
-            column_types,
-            column_defaults: table
-                .columns
-                .iter()
-                .map(|column| {
-                    (
-                        column.column_id,
+            schema: Arc::new(GlobalStatsSchema {
+                leaf_column_ids,
+                column_types,
+                column_defaults: table
+                    .columns
+                    .iter()
+                    .map(|column| {
                         (
-                            column.initial_default.clone(),
-                            column.parent_id.is_some() || column.created_with_table,
-                        ),
-                    )
-                })
-                .collect(),
+                            column.column_id,
+                            (
+                                column.initial_default.clone(),
+                                column.parent_id.is_some() || column.created_with_table,
+                            ),
+                        )
+                    })
+                    .collect(),
+            }),
+            missing_file_columns: Arc::default(),
             file_columns: BTreeMap::new(),
             live_files: BTreeSet::new(),
             record_count: 0,
@@ -99,8 +110,17 @@ impl GlobalTableStats {
         }
     }
 
+    pub(super) fn include_allocated_rows(&mut self, allocated: u64, unknown_file_rows: u64) {
+        // File reductions compose additions and maxima. Applying their unknown
+        // row contribution to the fresh allocator preserves that composition.
+        self.next_row_id = self
+            .next_row_id
+            .max(allocated.saturating_add(unknown_file_rows));
+    }
+
     fn stats_for_column(&mut self, column_id: ColumnId) -> &mut GlobalColumnStats {
         let scalar_type = self
+            .schema
             .column_types
             .get(&column_id)
             .copied()
@@ -123,7 +143,15 @@ impl GlobalTableStats {
         self.table_size_bytes = self.table_size_bytes.saturating_add(row.file_size_bytes);
     }
 
-    pub(super) fn accumulate_file_column_stats(&mut self, row: FileColumnStatsRow) {
+    #[cfg(test)]
+    pub(super) fn accumulate_file_column_stats(&mut self, row: crate::FileColumnStatsRow) {
+        self.accumulate_file_column_stats_ref((&row).into());
+    }
+
+    pub(super) fn accumulate_file_column_stats_ref(
+        &mut self,
+        row: crate::file_stats::FileColumnStatsRef<'_>,
+    ) {
         if !self.live_files.contains(&row.data_file_id) {
             return;
         }
@@ -143,7 +171,7 @@ impl GlobalTableStats {
         let mut current_inline_record_count = 0;
         let mut observed_columns = BTreeSet::new();
         for line in payload.lines() {
-            let fields = line.split('\t').collect::<Vec<_>>();
+            let fields = crate::runtime_tabular_payload::TabularFields::new(line);
             match fields.as_slice() {
                 ["inline_table_stats", record_count, next_row_id] => {
                     current_inline_record_count =
@@ -262,52 +290,56 @@ impl GlobalTableStats {
     }
 
     fn merge_missing_inline_defaults(&mut self, observed: &BTreeSet<ColumnId>) {
-        let missing = self
-            .leaf_column_ids
-            .difference(observed)
-            .copied()
-            .collect::<Vec<_>>();
-        for column in missing {
+        for column in self.schema.leaf_column_ids.difference(observed) {
             let (default, is_unknown) = self
+                .schema
                 .column_defaults
-                .get(&column)
-                .cloned()
+                .get(column)
+                .map_or((None, false), |(value, unknown)| {
+                    (value.as_deref(), *unknown)
+                });
+            let scalar_type = self
+                .schema
+                .column_types
+                .get(column)
+                .copied()
                 .unwrap_or_default();
-            let bound = if is_unknown { None } else { default.as_deref() };
-            self.stats_for_column(column)
+            self.columns
+                .entry(*column)
+                .or_insert_with(|| GlobalColumnStats::with_type(scalar_type))
                 .merge_inline(InlineStatsMerge {
                     has_contains_null: true,
                     contains_null: is_unknown || default.is_none(),
                     has_non_null_values: is_unknown || default.is_some(),
-                    min_value: bound,
-                    max_value: bound,
+                    min_value: if is_unknown { None } else { default },
+                    max_value: if is_unknown { None } else { default },
                 });
         }
     }
 
-    fn fill_missing_file_columns(&self, columns: &mut BTreeMap<ColumnId, GlobalColumnStats>) {
-        let observed_column_ids = columns.keys().copied().collect::<Vec<_>>();
-        for file_id in &self.live_files {
-            let present_columns = self.file_columns.get(file_id);
-            for column_id in &observed_column_ids {
-                if self.leaf_column_ids.contains(column_id)
-                    && present_columns.is_none_or(|columns| !columns.contains(column_id))
-                {
-                    let scalar_type = self
-                        .column_types
-                        .get(column_id)
-                        .copied()
-                        .unwrap_or_default();
-                    columns
-                        .entry(*column_id)
-                        .or_insert_with(|| GlobalColumnStats::with_type(scalar_type))
-                        .mark_unknown();
-                }
-            }
+    pub(super) fn finish_file_coverage(&mut self) {
+        if self.live_files.is_empty() {
+            return;
         }
+        let missing = self
+            .schema
+            .leaf_column_ids
+            .iter()
+            .copied()
+            .filter(|column| {
+                self.live_files.iter().any(|file| {
+                    self.file_columns
+                        .get(file)
+                        .is_none_or(|columns| !columns.contains(column))
+                })
+            })
+            .collect();
+        self.missing_file_columns = Arc::new(missing);
+        self.live_files.clear();
+        self.file_columns.clear();
     }
 
-    pub(super) fn append_to(&self, out: &mut String) -> CatalogResult<()> {
+    pub(super) fn append_to(mut self, out: &mut String) -> CatalogResult<()> {
         use std::fmt::Write as _;
 
         writeln!(
@@ -319,10 +351,12 @@ impl GlobalTableStats {
             crate::CatalogError::Decode(format!("failed to render global table stats: {error}"))
         })?;
 
-        let mut columns = self.columns.clone();
-        self.fill_missing_file_columns(&mut columns);
-        for (column_id, stats) in columns {
-            if !self.leaf_column_ids.contains(&column_id) {
+        self.finish_file_coverage();
+        for (column_id, mut stats) in self.columns {
+            if self.missing_file_columns.contains(&column_id) {
+                stats.mark_unknown();
+            }
+            if !self.schema.leaf_column_ids.contains(&column_id) {
                 continue;
             }
             writeln!(
@@ -350,7 +384,7 @@ impl GlobalTableStats {
 }
 
 #[cfg(feature = "foundationdb")]
-pub(super) fn leaf_column_ids(table: &crate::TableRow) -> Vec<ColumnId> {
+pub(super) fn leaf_column_ids(table: &crate::TableRow) -> BTreeSet<ColumnId> {
     let parent_column_ids = table
         .columns
         .iter()
@@ -372,7 +406,7 @@ impl GlobalColumnStats {
         }
     }
 
-    fn merge_file(&mut self, row: FileColumnStatsRow) {
+    fn merge_file(&mut self, row: crate::file_stats::FileColumnStatsRef<'_>) {
         self.has_contains_null = true;
         if row.null_count > 0 {
             self.contains_null = true;
@@ -381,8 +415,8 @@ impl GlobalColumnStats {
             self.scalar_type,
             row.value_count,
             row.null_count,
-            row.min_value.as_deref(),
-            row.max_value.as_deref(),
+            row.min_value,
+            row.max_value,
         ) {
             self.clear_extrema();
             self.invalid_extrema = true;
@@ -393,7 +427,7 @@ impl GlobalColumnStats {
                         .is_some_and(|ordering| ordering.is_lt()))
             {
                 self.has_min = true;
-                self.min_value = min_value;
+                min_value.clone_into(&mut self.min_value);
             }
             if let Some(max_value) = row.max_value
                 && (!self.has_max
@@ -401,7 +435,7 @@ impl GlobalColumnStats {
                         .is_some_and(|ordering| ordering.is_gt()))
             {
                 self.has_max = true;
-                self.max_value = max_value;
+                max_value.clone_into(&mut self.max_value);
             }
         }
         if let Some(extra_stats) = row.extra_stats
@@ -433,11 +467,9 @@ impl GlobalColumnStats {
                 return;
             }
         };
-        let bounds_are_invalid = bounds.is_some_and(|(min_value, max_value)| {
-            compare_typed_scalars(self.scalar_type, min_value, min_value).is_none()
-                || compare_typed_scalars(self.scalar_type, max_value, max_value).is_none()
-                || compare_typed_scalars(self.scalar_type, min_value, max_value)
-                    .is_none_or(|ordering| ordering.is_gt())
+        let bounds_are_invalid = bounds.is_some_and(|(minimum, maximum)| {
+            compare_typed_scalars(self.scalar_type, minimum, maximum)
+                .is_none_or(|ordering| ordering.is_gt())
         });
         if !self.invalid_extrema && bounds_are_invalid {
             self.clear_extrema();
@@ -450,14 +482,14 @@ impl GlobalColumnStats {
                     .is_some_and(|ordering| ordering.is_lt())
             {
                 self.has_min = true;
-                self.min_value = min_value.to_owned();
+                min_value.clone_into(&mut self.min_value);
             }
             if !self.has_max
                 || compare_typed_scalars(self.scalar_type, max_value, &self.max_value)
                     .is_some_and(|ordering| ordering.is_gt())
             {
                 self.has_max = true;
-                self.max_value = max_value.to_owned();
+                max_value.clone_into(&mut self.max_value);
             }
         } else if bounds.is_none() {
             self.clear_extrema();

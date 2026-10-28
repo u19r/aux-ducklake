@@ -1,3 +1,4 @@
+# Versions: software-versions.snapshot.json; details in software-version-consumers.md.
 # Linux builds require the checksum-pinned installer: scripts/install-mold.sh.
 # The compiler wrapper also selects mold when RUSTFLAGS overrides these flags.
 [target.'cfg(target_os = "linux")']

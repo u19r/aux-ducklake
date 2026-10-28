@@ -254,6 +254,14 @@ fn replace_snapshot(
     let mut batch = KvBatch::new();
     let latest_value = latest_snapshot_value(snapshot);
     batch.put(snapshot_key(catalog, snapshot.order), snapshot.encode());
+    batch.put(
+        ducklake_catalog::keys::snapshot_timestamp_key(
+            catalog,
+            snapshot.created_at_micros,
+            snapshot.order,
+        ),
+        snapshot.encode(),
+    );
     batch.put(latest_snapshot_row_key(catalog), latest_value.clone());
     batch.put(
         raw_snapshot_row_key(catalog, snapshot.sequence),

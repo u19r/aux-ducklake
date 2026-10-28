@@ -16,6 +16,33 @@ use ducklake_catalog::{
 };
 
 #[test]
+fn given_inline_file_deletes_when_file_is_expired_then_full_scan_retains_earlier_tombstones() {
+    let mut kv = FakeOrderedCatalogKv::new();
+    let catalog = CatalogId(46);
+    let table = TableId(1);
+    initialize_catalog_if_absent(&mut kv, catalog).unwrap();
+    create_table(&mut kv, catalog, table, SchemaId(1));
+    commit_append_data_files(&mut kv, catalog, vec![data_file(1, table, 0, 20)]).unwrap();
+    let first = commit_file_deletes(&mut kv, catalog, table, 1, 0..1);
+    let full_order = CatalogOrderId::uuid_v7(1000);
+    ducklake_catalog::expire_data_file(&mut kv, catalog, DataFileId(1), full_order).unwrap();
+
+    let tail = list_table_deletion_scan_files(&kv, catalog, table, full_order, full_order).unwrap();
+    let range =
+        list_table_deletion_scan_files(&kv, catalog, table, first.order, full_order).unwrap();
+
+    assert_eq!(tail.len(), 1);
+    assert!(tail[0].full_file_delete);
+    assert_eq!(tail[0].inline_file_deletions.get(&0), Some(&first.order));
+    assert_eq!(
+        range.len(),
+        1,
+        "the full scan owns in-range inline deletions too"
+    );
+    assert_eq!(range[0].inline_file_deletions.get(&0), Some(&first.order));
+}
+
+#[test]
 fn mirrors_deletion_from_file_and_inserted_inlining_test_file_and_inline_row_delete_share_snapshot()
 {
     // Mirrors: third_party/ducklake/test/sql/deletion_inlining/test_deletion_from_file_and_inserted_inlining.test

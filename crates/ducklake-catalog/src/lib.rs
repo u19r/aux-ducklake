@@ -5,11 +5,13 @@ pub(crate) static FDB_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(())
 
 pub mod append_commits;
 mod bounded_cache;
+mod catalog_request_read_set;
 mod change_keys;
 pub mod column_mappings;
 pub mod compaction_store;
 pub mod conflict;
 mod conflict_watermarks;
+mod constants;
 mod data_file_changes;
 pub mod data_file_store;
 mod data_mutation_intents;
@@ -42,13 +44,23 @@ mod fdb_inline_flushes;
 #[cfg(feature = "foundationdb")]
 mod fdb_inline_tables;
 #[cfg(feature = "foundationdb")]
+mod fdb_key_codec;
+#[cfg(all(test, feature = "foundationdb"))]
+mod fdb_key_codec_tests;
+#[cfg(feature = "foundationdb")]
 mod fdb_kv;
 #[cfg(feature = "foundationdb")]
 mod fdb_macros;
 #[cfg(feature = "foundationdb")]
+mod fdb_mapped_index;
+#[cfg(all(test, feature = "foundationdb"))]
+mod fdb_mapped_range_tests;
+#[cfg(feature = "foundationdb")]
 mod fdb_metadata_commit;
 #[cfg(feature = "foundationdb")]
 mod fdb_prefix_cleanup;
+#[cfg(feature = "foundationdb")]
+mod fdb_read_set;
 #[cfg(feature = "foundationdb")]
 mod fdb_runtime;
 #[cfg(feature = "foundationdb")]
@@ -70,11 +82,14 @@ mod immutable_file_metadata;
 pub mod inline_change_feed;
 pub mod inline_column_types;
 pub mod inline_data;
+mod inline_data_snapshot_sequences;
 pub mod inline_read_schema;
 mod key_debug;
 pub mod keys;
 pub mod kv;
 mod lru_cache;
+#[cfg(test)]
+mod lru_cache_tests;
 mod macro_rows;
 mod macro_store;
 pub mod maintenance;
@@ -106,11 +121,14 @@ mod runtime_inline_snapshot;
 mod runtime_maintenance_ops;
 mod runtime_metadata_ops;
 mod runtime_metrics;
+mod runtime_mutable_catalog;
 mod runtime_object_ops;
 mod runtime_operations;
 mod runtime_payload;
 pub mod runtime_protocol;
 mod runtime_read_context;
+#[cfg(feature = "foundationdb")]
+mod runtime_read_versions;
 mod runtime_schema_change_ops;
 mod runtime_schema_change_payload;
 mod runtime_schema_ops;
@@ -123,6 +141,9 @@ mod runtime_table_schema_versions;
 #[cfg(test)]
 mod runtime_table_schema_versions_tests;
 mod runtime_tabular_payload;
+mod runtime_trace;
+#[cfg(all(test, feature = "runtime-metrics"))]
+mod runtime_trace_tests;
 mod schema_rows;
 #[cfg(test)]
 mod schema_rows_tests;
@@ -185,7 +206,7 @@ pub use fdb_data_mutations::FdbDataMutation;
 #[cfg(feature = "foundationdb")]
 pub use fdb_inline_tables::InlineTableCommitContext;
 #[cfg(feature = "foundationdb")]
-pub use fdb_prefix_cleanup::clear_foundationdb_prefix;
+pub use fdb_prefix_cleanup::{clear_foundationdb_prefix, foundationdb_prefix_bounds};
 #[cfg(feature = "foundationdb")]
 pub use fdb_runtime::shutdown_foundationdb_if_booted;
 pub use file_listing::{

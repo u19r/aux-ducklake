@@ -1,6 +1,6 @@
 use crate::{
     CatalogError, CatalogId, CatalogResult, DuckLakeSnapshotId, OrderedCatalogKv, TableId,
-    runtime_snapshots::SnapshotReadContext, schema_version_state::load_schema_version_at,
+    runtime_snapshots::snapshot_by_ducklake_sequence, schema_version_state::load_schema_version_at,
     table_store::list_table_rows_for_table,
 };
 
@@ -17,9 +17,7 @@ impl TableSchemaVersions {
         table_id: TableId,
         snapshot_id: DuckLakeSnapshotId,
     ) -> CatalogResult<Self> {
-        let context = SnapshotReadContext::for_ducklake_snapshot(kv, catalog, snapshot_id)?;
-        let snapshot = context
-            .ducklake_snapshot(snapshot_id)
+        let snapshot = snapshot_by_ducklake_sequence(kv, catalog, snapshot_id)?
             .ok_or(CatalogError::NotFound("table schema snapshot"))?;
         let mut rows = list_table_rows_for_table(kv, catalog, table_id)?;
         if !rows

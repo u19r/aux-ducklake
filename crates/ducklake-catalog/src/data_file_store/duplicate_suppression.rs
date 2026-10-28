@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::data_file_store::*;
-use crate::runtime_read_context::CatalogCurrentFilePartitionValuesContext;
 use crate::{
     CatalogId, CatalogResult, DataFileId, DataFileRow, FilePartitionValueRow, OrderedCatalogKv,
     TableId, file_partitions::list_file_partition_values_for_data_files, ids::CatalogOrderId,
@@ -34,10 +33,18 @@ pub(crate) fn without_backfilled_source_duplicates(
         .collect::<BTreeSet<_>>();
     let partition_keys = if replacements_need_partition_values(&replacements, &rows) {
         let comparison_count = replacements.len().saturating_mul(rows.len());
-        PartitionKeyLookup::new(
-            partition_values_for_duplicate_suppression(kv, catalog, &rows, &data_file_ids)?,
-            comparison_count,
-        )
+        let partitions = list_file_partition_values_for_data_files(kv, catalog, &data_file_ids)?;
+        crate::runtime_metrics::record_runtime_measurement(
+            "partition.duplicate_suppression.requested_files",
+            data_file_ids.len() as u64,
+            0,
+        );
+        crate::runtime_metrics::record_runtime_measurement(
+            "partition.duplicate_suppression.kept_values",
+            partitions.len() as u64,
+            0,
+        );
+        PartitionKeyLookup::new(partitions, comparison_count)
     } else {
         PartitionKeyLookup::default()
     };
@@ -56,27 +63,6 @@ pub(crate) fn without_backfilled_source_duplicates(
         started,
     );
     Ok(rows)
-}
-
-pub(super) fn partition_values_for_duplicate_suppression(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    rows: &[DataFileRow],
-    data_file_ids: &BTreeSet<DataFileId>,
-) -> CatalogResult<Vec<FilePartitionValueRow>> {
-    if rows.iter().all(|row| row.validity.end_order.is_none()) {
-        return Ok(
-            CatalogCurrentFilePartitionValuesContext::for_current_file_partition_values(
-                kv, catalog,
-            )?
-            .current_file_partition_values()
-            .iter()
-            .filter(|row| data_file_ids.contains(&row.data_file_id))
-            .cloned()
-            .collect(),
-        );
-    }
-    list_file_partition_values_for_data_files(kv, catalog, data_file_ids)
 }
 
 pub(super) fn replacements_need_partition_values(

@@ -348,7 +348,7 @@ fn stage_snapshot(
             &snapshot_timestamp_key(catalog, snapshot.created_at_micros, snapshot.order),
             snapshot_timestamp_key_order_offset(catalog, snapshot.created_at_micros),
         )?,
-        &snapshot.sequence.to_be_bytes(),
+        &snapshot.encode(),
         MutationType::SetVersionstampedKey,
     );
     stage_fdb_snapshot_indexes(kv, trx, catalog, snapshot)?;
@@ -393,7 +393,7 @@ pub(crate) fn estimate_drop_bytes(
         .saturating_add(
             snapshot_timestamp_key(catalog, snapshot.created_at_micros, snapshot.order).len(),
         )
-        .saturating_add(8);
+        .saturating_add(snapshot.encode().len());
     drops.iter().fold(snapshot_bytes, |bytes, drop| {
         bytes
             .saturating_add(table_drop_bytes(catalog, &drop.table))

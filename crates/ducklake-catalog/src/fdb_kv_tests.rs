@@ -217,6 +217,124 @@ fn given_pinned_read_version_when_sync_retry_resets_then_reset_transaction_keeps
         .map(|value| value.to_vec());
     assert_eq!(value, Some(b"before".to_vec()));
 
+    let runtime = crate::runtime_mutable_catalog::RuntimeMutableCatalog::FoundationDb(pinned);
+    let missing = b"absent".to_vec();
+    let keys = [key.clone(), missing.clone(), key.clone()];
+    assert_eq!(
+        crate::OrderedCatalogKv::batch_get(&runtime, &keys).unwrap(),
+        vec![Some(b"before".to_vec()), None, Some(b"before".to_vec())]
+    );
+    let reads = crate::OrderedCatalogKv::read_set(
+        &runtime,
+        &keys,
+        &[
+            crate::kv::CatalogReadRange {
+                start: key.clone(),
+                end: crate::keys::prefix_end(&key),
+                direction: RangeDirection::Reverse,
+                limit: 1,
+            },
+            crate::kv::CatalogReadRange {
+                start: missing.clone(),
+                end: crate::keys::prefix_end(&missing),
+                direction: RangeDirection::Forward,
+                limit: usize::MAX,
+            },
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        reads.values,
+        vec![Some(b"before".to_vec()), None, Some(b"before".to_vec())]
+    );
+    assert_eq!(
+        reads.ranges,
+        vec![
+            vec![RangeItem {
+                key: key.clone(),
+                value: b"before".to_vec()
+            }],
+            Vec::new()
+        ]
+    );
+    assert_eq!(
+        crate::OrderedCatalogKv::scan_prefixes(&runtime, &keys, RangeDirection::Reverse, 1)
+            .unwrap(),
+        vec![
+            vec![RangeItem {
+                key: key.clone(),
+                value: b"before".to_vec()
+            }],
+            Vec::new(),
+            vec![RangeItem {
+                key,
+                value: b"before".to_vec()
+            }],
+        ]
+    );
+
+    // Exercise the real checked-batch path, including fence reads after staged
+    // writes.
+    let checked_keys = (0..32)
+        .map(|id| format!("checked/{id:02}").into_bytes())
+        .collect::<Vec<_>>();
+    let fence_keys = (0..8)
+        .map(|id| format!("fence/{id:02}").into_bytes())
+        .collect::<Vec<_>>();
+    let mut initial = KvBatch::new();
+    for key in &checked_keys {
+        initial.put(key.clone(), 0_u64.to_be_bytes().to_vec());
+    }
+    writer.commit(initial).unwrap();
+    let started = Instant::now();
+    for iteration in 0..20_u64 {
+        let mut batch = KvBatch::new();
+        for key in &checked_keys {
+            batch.check_value(key.clone(), Some(iteration.to_be_bytes().to_vec()));
+            batch.put(key.clone(), (iteration + 1).to_be_bytes().to_vec());
+        }
+        for key in &fence_keys {
+            batch.put(key.clone(), (iteration * 10).to_be_bytes().to_vec());
+            batch.write_conflict_fence(key.clone());
+        }
+        batch.write_conflict_fence(fence_keys[0].clone());
+        writer.commit(batch).unwrap();
+    }
+    eprintln!(
+        "checked_batch_probe iterations=20 checks_per_commit=32 unique_fences=8 elapsed_us={}",
+        started.elapsed().as_micros()
+    );
+    let values = crate::OrderedCatalogKv::batch_get(&writer, &checked_keys).unwrap();
+    assert_eq!(
+        values,
+        vec![Some(20_u64.to_be_bytes().to_vec()); checked_keys.len()]
+    );
+    let values = crate::OrderedCatalogKv::batch_get(&writer, &fence_keys).unwrap();
+    assert_eq!(values[0], Some(192_u64.to_be_bytes().to_vec()));
+    assert!(
+        values[1..]
+            .iter()
+            .all(|value| value == &Some(191_u64.to_be_bytes().to_vec()))
+    );
+    let mut rejected = KvBatch::new();
+    rejected.check_value(checked_keys[0].clone(), None);
+    rejected.put(checked_keys[0].clone(), b"forbidden".to_vec());
+    rejected.write_conflict_fence(fence_keys[0].clone());
+    assert!(matches!(
+        writer.commit(rejected),
+        Err(CatalogError::ConflictFenceChanged { .. })
+    ));
+    assert_eq!(
+        crate::OrderedCatalogKv::get(&writer, &checked_keys[0]).unwrap(),
+        Some(20_u64.to_be_bytes().to_vec())
+    );
+    assert_eq!(
+        crate::OrderedCatalogKv::get(&writer, &fence_keys[0]).unwrap(),
+        Some(192_u64.to_be_bytes().to_vec())
+    );
+
+    crate::fdb_mapped_range_tests::check_mapped_cleanup_rows(&mut writer);
+
     let database = crate::fdb_runtime::shared_foundationdb_database(
         std::env::var("AUX_DUCKLAKE_FDB_CLUSTER_FILE")
             .ok()
@@ -455,4 +573,183 @@ fn assert_unique_and_ordered(items: &[RangeItem], direction: RangeDirection) {
         RangeDirection::Forward => pair[0].key < pair[1].key,
         RangeDirection::Reverse => pair[0].key > pair[1].key,
     }));
+}
+
+#[test]
+fn given_query_read_version_when_callbacks_repeat_then_one_version_is_acquired() {
+    use crate::runtime_read_versions::{begin_request, end_context, fetch_version};
+    let namespace =
+        crate::CatalogCacheNamespace::foundationdb(987_065, 1).with_read_context(Some(70_105));
+    let acquisitions = Cell::new(0);
+    for _ in 0..3 {
+        let _request = begin_request();
+        for _ in 0..10 {
+            assert_eq!(
+                fetch_version(namespace, || {
+                    acquisitions.set(acquisitions.get() + 1);
+                    Ok(42)
+                })
+                .unwrap(),
+                42
+            );
+        }
+    }
+    assert_eq!(acquisitions.get(), 1);
+    end_context(namespace, 70_105);
+    let _request = begin_request();
+    assert_eq!(fetch_version(namespace, || Ok(43)).unwrap(), 43);
+    end_context(namespace, 70_105);
+}
+
+#[test]
+fn given_query_read_version_when_renewed_then_callback_is_pinned_until_whole_read_retries() {
+    use crate::runtime_read_versions::{
+        begin_request, end_context, fetch_version, invalidate_context, renew_request,
+    };
+    let namespace =
+        crate::CatalogCacheNamespace::foundationdb(987_066, 1).with_read_context(Some(70_106));
+    let other =
+        crate::CatalogCacheNamespace::foundationdb(987_066, 2).with_read_context(Some(70_107));
+    {
+        let _request = begin_request();
+        assert_eq!(fetch_version(namespace, || Ok(42)).unwrap(), 42);
+        assert_eq!(fetch_version(other, || Ok(50)).unwrap(), 50);
+        invalidate_context(70_106);
+        assert_eq!(
+            fetch_version(namespace, || panic!("a callback must not change versions")).unwrap(),
+            42
+        );
+    }
+    {
+        let _request = begin_request();
+        assert_eq!(fetch_version(namespace, || Ok(43)).unwrap(), 43);
+        renew_request();
+        assert_eq!(fetch_version(namespace, || Ok(44)).unwrap(), 44);
+        assert_eq!(
+            fetch_version(other, || panic!("unrelated context must remain cached")).unwrap(),
+            50
+        );
+    }
+    end_context(namespace, 70_106);
+    end_context(other, 70_107);
+}
+
+#[test]
+fn given_concurrent_query_callbacks_when_acquiring_version_then_one_builder_runs() {
+    use crate::runtime_read_versions::{begin_request, end_context, fetch_version};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let namespace =
+        crate::CatalogCacheNamespace::foundationdb(987_067, 1).with_read_context(Some(70_108));
+    let count = Arc::new(AtomicUsize::new(0));
+    std::thread::scope(|scope| {
+        let handles = (0..16)
+            .map(|_| {
+                let count = Arc::clone(&count);
+                scope.spawn(move || {
+                    let _request = begin_request();
+                    fetch_version(namespace, || {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        Ok(42)
+                    })
+                    .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            handles
+                .into_iter()
+                .all(|handle| handle.join().unwrap() == 42)
+        );
+    });
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    end_context(namespace, 70_108);
+}
+
+#[test]
+fn given_expired_query_read_when_callback_retries_then_new_version_is_used_and_retries_are_bounded()
+{
+    use crate::runtime_read_versions::{end_context, fetch_version, read_with_retry};
+    let namespace =
+        crate::CatalogCacheNamespace::foundationdb(987_068, 1).with_read_context(Some(70_109));
+    let expired = CatalogError::FoundationDb {
+        code: 1007,
+        message: "read version expired".into(),
+        class: FoundationDbErrorClass::Retryable,
+    };
+    {
+        let _request = crate::store::begin_runtime_read_request(Some(70_109));
+        let attempts = Cell::new(0);
+        let result = read_with_retry(|| {
+            attempts.set(attempts.get() + 1);
+            let version = fetch_version(namespace, || Ok(i64::from(attempts.get())))?;
+            if attempts.get() == 1 {
+                return Err(expired.clone());
+            }
+            Ok(version)
+        });
+        assert_eq!(result.unwrap(), 2);
+        assert_eq!(attempts.get(), 2);
+        let attempts = Cell::new(0);
+        let result: CatalogResult<()> = read_with_retry(|| {
+            attempts.set(attempts.get() + 1);
+            Err(expired.clone())
+        });
+        assert_eq!(result, Err(expired.clone()));
+        assert_eq!(attempts.get(), 2);
+    }
+    {
+        let _mutation = crate::store::begin_runtime_read_request(None);
+        let attempts = Cell::new(0);
+        let result: CatalogResult<()> = read_with_retry(|| {
+            attempts.set(attempts.get() + 1);
+            Err(expired.clone())
+        });
+        assert_eq!(result, Err(expired));
+        assert_eq!(attempts.get(), 1);
+    }
+    end_context(namespace, 70_109);
+}
+
+#[test]
+fn given_live_expired_query_version_when_read_callback_retries_then_fresh_physical_read_succeeds() {
+    if std::env::var("AUX_DUCKLAKE_FDB_LIVE").as_deref() != Ok("1") {
+        return;
+    }
+    use crate::{CatalogId, OrderedCatalogKv};
+    let prefix = format!(
+        "aux-ducklake-test/query-version-expiry/{}/{}/",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    );
+    let catalog = CatalogId(987_069);
+    let context = 70_110;
+    let kv = FdbOrderedCatalogKv::open_default_with_prefix(prefix.as_bytes()).unwrap();
+    kv.initialize_catalog_if_absent_versionstamped(catalog)
+        .unwrap();
+    let key = crate::keys::latest_snapshot_row_key(catalog);
+    let expected = kv.get(&key).unwrap();
+    assert!(expected.is_some());
+    {
+        let _request = crate::store::begin_runtime_read_request(Some(context));
+        // Force an obsolete version. Idle storage can retain versions beyond six seconds.
+        crate::runtime_read_versions::fetch_version(kv.catalog_cache_namespace(), || Ok(1))
+            .unwrap();
+        let attempts = Cell::new(0);
+        let actual = crate::runtime_read_versions::read_with_retry(|| {
+            attempts.set(attempts.get() + 1);
+            kv.get(&key)
+        })
+        .unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(attempts.get(), 2);
+        crate::runtime_read_versions::end_context(kv.catalog_cache_namespace(), context);
+    }
+    let database = crate::fdb_runtime::shared_foundationdb_database(None).unwrap();
+    crate::clear_foundationdb_prefix(&database, kv.key_prefix()).unwrap();
 }

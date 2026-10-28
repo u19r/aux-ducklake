@@ -1,7 +1,6 @@
 use std::ops::Deref;
 
 use foundationdb::options::MutationType;
-use futures::executor::block_on;
 
 use crate::{
     CatalogError, CatalogOrderId, CatalogResult, DataFileChangeKind, DataFileId, DataFileRow,
@@ -64,7 +63,7 @@ pub(crate) fn stage_snapshot(
             &snapshot_timestamp_key(catalog, snapshot.created_at_micros, snapshot.order),
             snapshot_timestamp_key_order_offset(catalog, snapshot.created_at_micros),
         )?,
-        &snapshot.sequence.to_be_bytes(),
+        &snapshot.encode(),
         MutationType::SetVersionstampedKey,
     );
     stage_fdb_snapshot_indexes(kv, trx, catalog, snapshot)?;
@@ -633,13 +632,16 @@ fn stage_close_current_delete_file(
     table_id: TableId,
     next_delete_file: &DeleteFileRow,
 ) -> CatalogResult<Option<crate::CatalogOrderId>> {
-    let Some(pointer) = block_on(trx.get(
-        &kv.namespaced_key(&current_delete_file_key(
-            catalog,
-            next_delete_file.data_file_id,
-        )),
-        false,
-    ))
+    let Some(pointer) = crate::fdb_runtime::wait_for_fdb(
+        "wait.fdb.get",
+        trx.get(
+            &kv.namespaced_key(&current_delete_file_key(
+                catalog,
+                next_delete_file.data_file_id,
+            )),
+            false,
+        ),
+    )
     .map_err(map_fdb_error)?
     else {
         return Ok(None);
@@ -676,13 +678,11 @@ fn stage_close_current_delete_file(
         &row.delete_file_id.0.to_be_bytes(),
         MutationType::SetVersionstampedKey,
     );
-    trx.set(
-        &kv.namespaced_key(&scheduled_delete_file_cleanup_key(
-            catalog,
-            row.delete_file_id,
-        )),
+    kv.stage_transaction_value(
+        trx,
+        &scheduled_delete_file_cleanup_key(catalog, row.delete_file_id),
         &encode_scheduled_delete_cleanup_value(table_id, current_timestamp_micros()),
-    );
+    )?;
     Ok(Some(inherited_begin_order))
 }
 

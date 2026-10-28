@@ -1,4 +1,5 @@
 use super::*;
+use crate::runtime_protocol::RuntimeRequest;
 
 #[test]
 fn operation_policy_owns_mutability_and_cost_family() {
@@ -19,7 +20,7 @@ fn operation_policy_owns_mutability_and_cost_family() {
         ("ListCurrentDataFilesForPartitionScans", "read"),
         ("EndRuntimeReadContext", "read_context"),
         ("ReadInlineRowsForFlush", "inline"),
-        ("RenderBoundedAppendMirrorSql", "metadata"),
+        ("RenderBoundedMutationMirrorSql", "metadata"),
         ("ListKnownFilesForCleanup", "cleanup"),
     ] {
         let policy = runtime_operation_policy(operation);
@@ -46,7 +47,7 @@ fn ending_runtime_read_context_requires_context_identity() {
     )
     .unwrap();
 
-    let error = payload_for_request(&request).unwrap_err();
+    let error = payload_for_request(&(&request).into()).unwrap_err();
 
     assert!(error.to_string().contains("requires a read_context_id"));
 }

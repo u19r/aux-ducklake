@@ -2952,6 +2952,20 @@ fn given_old_snapshot_when_expired_then_time_travel_fails_closed_and_current_rea
             .iter()
             .all(|snapshot| snapshot.sequence != RawSnapshotSequence(1))
     );
+    let retained = ducklake_catalog::list_all_snapshots(&kv, catalog).unwrap();
+    assert!(
+        retained
+            .iter()
+            .any(|snapshot| snapshot.sequence == RawSnapshotSequence(1)),
+        "expired primary history must remain available after an active-list lookup"
+    );
+    assert!(
+        list_snapshots(&kv, catalog)
+            .unwrap()
+            .iter()
+            .all(|snapshot| snapshot.sequence != RawSnapshotSequence(1)),
+        "retained history must not republish an expired snapshot"
+    );
     assert_eq!(
         latest_snapshot(&kv, catalog).unwrap().unwrap().sequence,
         ducklake_catalog::RawSnapshotSequence(2)
@@ -3011,7 +3025,7 @@ fn given_snapshot_timestamp_index_when_listing_older_then_scan_returns_only_old_
         batch.put(snapshot_key(catalog, snapshot.order), snapshot.encode());
         batch.put(
             snapshot_timestamp_key(catalog, snapshot.created_at_micros, snapshot.order),
-            snapshot.sequence.to_be_bytes().to_vec(),
+            snapshot.encode(),
         );
     }
     kv.commit(batch).unwrap();

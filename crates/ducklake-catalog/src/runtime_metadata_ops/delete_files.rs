@@ -1,16 +1,13 @@
+use crate::runtime_protocol::RuntimePayload;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 
 #[cfg(not(test))]
 use crate::latest_snapshot;
 use crate::{
-    CatalogId, CatalogResult, DataFileId, DataFileRow, DeleteFileId, DeleteFileRow,
-    FileColumnStatsRow, FilePartitionValueRow, OrderedCatalogKv, RangeDirection,
-    keys::{delete_file_key, delete_file_timeline_prefix},
+    CatalogId, CatalogResult, DataFileId, DeleteFileId, DeleteFileRow, OrderedCatalogKv,
     list_snapshots,
-    maintenance::{
-        ScheduledDataFileCleanupRow, ScheduledDeleteFileCleanupRow,
-        load_scheduled_data_file_cleanup_rows, load_scheduled_delete_file_cleanup_rows,
-    },
+    maintenance::{ScheduledDataFileCleanupRow, ScheduledDeleteFileCleanupRow},
     runtime_metadata_ops::*,
     runtime_protocol::RuntimeCatalogBackend,
 };
@@ -18,7 +15,7 @@ use crate::{
 pub(crate) fn list_delete_file_rows(
     backend: RuntimeCatalogBackend,
     catalog: CatalogId,
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     #[cfg(test)]
     let _ = backend;
     #[cfg(not(test))]
@@ -32,82 +29,9 @@ pub(crate) fn list_delete_file_rows(
             list_snapshots(&kv, catalog)?,
         )
     };
-    Ok(delete_file_rows_payload(&rows, &snapshots).into_bytes())
-}
-
-pub(crate) fn render_bounded_scheduled_cleanup_mirror_sql(
-    _backend: RuntimeCatalogBackend,
-    catalog: CatalogId,
-    payload: &[u8],
-) -> CatalogResult<Vec<u8>> {
-    let data_file_ids = unique_data_file_ids(&data_file_ids_payload_values(payload)?);
-    let kv = open_foundationdb_catalog()?;
-    Ok(
-        bounded_scheduled_cleanup_mirror_sql_for_catalog(&kv, catalog, &data_file_ids)?
-            .into_bytes(),
-    )
-}
-
-pub(super) fn bounded_scheduled_cleanup_mirror_sql_for_catalog(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    data_file_ids: &[DataFileId],
-) -> CatalogResult<String> {
-    let mut delete_file_ids = BTreeSet::new();
-    for data_file_id in data_file_ids {
-        for item in kv.scan_prefix(
-            &delete_file_timeline_prefix(catalog, *data_file_id),
-            RangeDirection::Forward,
-            usize::MAX,
-        )? {
-            delete_file_ids
-                .insert(delete_file_from_timeline_value(kv, catalog, &item.value)?.delete_file_id);
-        }
-    }
-    let delete_file_ids = delete_file_ids.into_iter().collect::<Vec<_>>();
-    let data_files = load_scheduled_data_file_cleanup_rows(kv, catalog, data_file_ids)?;
-    let delete_files = load_scheduled_delete_file_cleanup_rows(kv, catalog, &delete_file_ids)?;
-    Ok(scheduled_cleanup_delta_sql(
-        data_file_ids,
-        &delete_file_ids,
-        &data_files,
-        &delete_files,
-    ))
-}
-
-pub(crate) fn render_bounded_delete_file_mirror_sql(
-    _backend: RuntimeCatalogBackend,
-    catalog: CatalogId,
-    payload: &[u8],
-) -> CatalogResult<Vec<u8>> {
-    let (explicit_delete_file_ids, mut data_file_ids) =
-        bounded_delete_file_mirror_payload_values(payload)?;
-    let kv = open_foundationdb_catalog()?;
-    let explicit_rows =
-        list_delete_files_for_delete_file_ids(&kv, catalog, &explicit_delete_file_ids)?;
-    data_file_ids.extend(explicit_rows.iter().map(|row| row.data_file_id));
-    let data_file_ids = unique_data_file_ids(&data_file_ids);
-    let rows = list_delete_files_for_data_file_ids(&kv, catalog, &data_file_ids)?;
-    let delete_file_ids = unique_delete_file_ids(
-        &explicit_delete_file_ids
-            .into_iter()
-            .chain(rows.iter().map(|row| row.delete_file_id))
-            .collect::<Vec<_>>(),
-    );
-    let semantic_begin_orders = semantic_delete_begin_orders_from_rows(&rows);
-    let snapshots = list_snapshots_for_orders(
-        &kv,
-        catalog,
-        snapshot_orders_for_delete_files(&rows, &semantic_begin_orders),
-    )?;
-    Ok(bounded_delete_file_mirror_sql(
-        &delete_file_ids,
-        &data_file_ids,
-        &rows,
-        &semantic_begin_orders,
-        &snapshots,
-    )
-    .into_bytes())
+    Ok(delete_file_rows_payload(&rows, &snapshots)
+        .into_bytes()
+        .into())
 }
 
 pub(crate) fn list_delete_file_rows_for_delete_file_ids(
@@ -133,7 +57,7 @@ pub(crate) fn list_delete_file_rows_for_delete_file_ids(
     )
 }
 
-fn snapshot_orders_for_delete_files(
+pub(super) fn snapshot_orders_for_delete_files(
     rows: &[DeleteFileRow],
     semantic_begin_orders: &BTreeMap<DataFileId, crate::CatalogOrderId>,
 ) -> BTreeSet<crate::CatalogOrderId> {
@@ -145,10 +69,12 @@ fn snapshot_orders_for_delete_files(
 }
 
 #[cfg(not(test))]
-pub(super) fn cached_foundationdb_delete_file_rows(catalog: CatalogId) -> CatalogResult<Vec<u8>> {
+pub(super) fn cached_foundationdb_delete_file_rows(
+    catalog: CatalogId,
+) -> CatalogResult<RuntimePayload> {
     let kv = open_foundationdb_catalog()?;
     let Some(latest) = latest_snapshot(&kv, catalog)? else {
-        return Ok(b"delete_file_count=0\n".to_vec());
+        return Ok(b"delete_file_count=0\n".to_vec().into());
     };
     let key = MetadataPayloadCacheKey {
         namespace: kv.catalog_cache_namespace(),
@@ -158,13 +84,14 @@ pub(super) fn cached_foundationdb_delete_file_rows(catalog: CatalogId) -> Catalo
     };
     let cache = metadata_payload_cache();
     if let Some(payload) = cache.get(key) {
-        return Ok(payload);
+        return Ok(payload.into());
     }
     let rows = list_delete_files(&kv, catalog)?;
     let snapshots = list_snapshots(&kv, catalog)?;
     let payload = delete_file_rows_payload(&rows, &snapshots).into_bytes();
+    let payload = std::sync::Arc::new(payload);
     cache.insert(key, payload.clone());
-    Ok(payload)
+    Ok(payload.into())
 }
 
 pub(super) fn delete_file_rows_payload(
@@ -191,7 +118,8 @@ pub(super) fn delete_file_rows_payload_with_semantic_begin(
             .unwrap_or_default();
         let end_snapshot =
             snapshot_sequence_for_optional_end_order(snapshots, row.validity.end_order);
-        out.push_str(&format!(
+        write!(
+            out,
             "delete_file\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             row.delete_file_id.0,
             row.data_file_id.0,
@@ -201,7 +129,8 @@ pub(super) fn delete_file_rows_payload_with_semantic_begin(
             begin_snapshot,
             end_snapshot,
             row.encryption_key
-        ));
+        )
+        .expect("writing to String cannot fail");
     }
     out
 }
@@ -212,7 +141,7 @@ pub(super) fn append_delete_file_mirror_inserts(
     semantic_begin_orders: &BTreeMap<DataFileId, crate::CatalogOrderId>,
     snapshots: &[crate::SnapshotRow],
 ) {
-    for row in rows {
+    let values = rows.iter().map(|row| {
         let begin_order = semantic_begin_orders
             .get(&row.data_file_id)
             .copied()
@@ -224,64 +153,36 @@ pub(super) fn append_delete_file_mirror_inserts(
             snapshots,
             row.validity.end_order,
         ));
-        out.push_str(&format!(
-            "INSERT INTO {{METADATA_CATALOG}}.ducklake_delete_file VALUES ({}, (SELECT table_id \
-             FROM {{METADATA_CATALOG}}.ducklake_data_file WHERE data_file_id = {}), {}, {}, {}, \
-             {}, false, 'parquet', {}, {}, 0, {}, NULL, NULL);\n",
-            row.delete_file_id.0,
-            row.data_file_id.0,
+        vec![
+            row.delete_file_id.0.to_string(),
+            "NULL".to_owned(),
             begin_snapshot,
             end_snapshot,
-            row.data_file_id.0,
+            row.data_file_id.0.to_string(),
             sql_string(&row.path),
-            row.record_count,
-            row.file_size_bytes,
-            optional_encryption_key_sql(&row.encryption_key)
-        ));
-    }
-}
-
-pub(super) fn bounded_append_mirror_sql(
-    data_file_ids: &[DataFileId],
-    affected_table_ids: &[crate::TableId],
-    partition_rows: Vec<FilePartitionValueRow>,
-    data_files: &[DataFileRow],
-    file_stats: &[FileColumnStatsRow],
-    table_column_stats: &[TableColumnStatsMirrorRow],
-    snapshots: &[crate::SnapshotRow],
-) -> String {
-    let ids = data_file_ids_sql(data_file_ids);
-    let table_ids = table_ids_sql(affected_table_ids);
-    let mut out = format!(
-        "DELETE FROM {{METADATA_CATALOG}}.ducklake_file_partition_value WHERE data_file_id IN \
-         ({ids});\nDELETE FROM {{METADATA_CATALOG}}.ducklake_data_file WHERE data_file_id IN \
-         ({ids});\nDELETE FROM {{METADATA_CATALOG}}.ducklake_file_column_stats WHERE data_file_id \
-         IN ({ids});\n"
-    );
-    append_file_partition_values_mirror_inserts(&mut out, partition_rows);
-    append_data_file_mirror_inserts(&mut out, data_files, snapshots);
-    append_file_column_stats_mirror_inserts(&mut out, file_stats.to_vec());
-    out.push_str(&format!(
-        "DELETE FROM {{METADATA_CATALOG}}.ducklake_table_column_stats WHERE table_id IN \
-         ({table_ids});\n"
-    ));
-    append_table_column_stats_mirror_inserts(&mut out, table_column_stats);
-    out
-}
-
-fn append_table_column_stats_mirror_inserts(out: &mut String, rows: &[TableColumnStatsMirrorRow]) {
-    for row in rows {
-        out.push_str(&format!(
-            "INSERT INTO {{METADATA_CATALOG}}.ducklake_table_column_stats (table_id, column_id, \
-             contains_null, contains_nan, min_value, max_value, extra_stats) VALUES ({}, {}, {}, \
-             NULL, {}, {}, NULL);\n",
-            row.table_id.0,
-            row.column_id.0,
-            row.contains_null,
-            optional_sql_string(row.min_value.as_deref()),
-            optional_sql_string(row.max_value.as_deref())
-        ));
-    }
+            "false".to_owned(),
+            "'parquet'".to_owned(),
+            row.record_count.to_string(),
+            row.file_size_bytes.to_string(),
+            "0".to_owned(),
+            optional_encryption_key_sql(&row.encryption_key),
+            "NULL".to_owned(),
+            "NULL".to_owned(),
+        ]
+    });
+    let Some(select) = render_mirror_select(values) else {
+        return;
+    };
+    write!(
+        out,
+        "INSERT INTO {{METADATA_CATALOG}}.ducklake_delete_file SELECT delta.* REPLACE \
+         (file.table_id AS table_id) FROM ({select}) AS delta(delete_file_id, table_id, \
+         begin_snapshot, end_snapshot, data_file_id, path, path_is_relative, format, \
+         delete_count, file_size_bytes, footer_size, encryption_key, partial_max, \
+         row_group_count) LEFT JOIN {{METADATA_CATALOG}}.ducklake_data_file file USING \
+         (data_file_id);\n"
+    )
+    .expect("writing to String cannot fail");
 }
 
 pub(super) fn bounded_delete_file_mirror_sql(
@@ -333,24 +234,27 @@ fn append_scheduled_cleanup_inserts(
     data_files: &[ScheduledDataFileCleanupRow],
     delete_files: &[ScheduledDeleteFileCleanupRow],
 ) {
-    for row in data_files {
-        out.push_str(&format!(
-            "INSERT INTO {{METADATA_CATALOG}}.ducklake_files_scheduled_for_deletion VALUES ({}, \
-             {}, false, make_timestamptz({}));\n",
-            row.data_file.data_file_id.0,
+    let data_values = data_files.iter().map(|row| {
+        vec![
+            row.data_file.data_file_id.0.to_string(),
             sql_string(&row.data_file.path),
-            row.schedule_start_micros
-        ));
-    }
-    for row in delete_files {
-        out.push_str(&format!(
-            "INSERT INTO {{METADATA_CATALOG}}.ducklake_files_scheduled_for_deletion VALUES ({}, \
-             {}, false, make_timestamptz({}));\n",
-            row.delete_file.delete_file_id.0,
+            "false".to_owned(),
+            format!("make_timestamptz({})", row.schedule_start_micros),
+        ]
+    });
+    let delete_values = delete_files.iter().map(|row| {
+        vec![
+            row.delete_file.delete_file_id.0.to_string(),
             sql_string(&row.delete_file.path),
-            row.schedule_start_micros
-        ));
-    }
+            "false".to_owned(),
+            format!("make_timestamptz({})", row.schedule_start_micros),
+        ]
+    });
+    append_mirror_values(
+        out,
+        "ducklake_files_scheduled_for_deletion",
+        data_values.chain(delete_values),
+    );
 }
 
 pub(super) fn semantic_delete_begin_orders_from_rows(
@@ -375,51 +279,7 @@ pub(super) fn semantic_delete_begin_orders_for_rows(
     catalog: CatalogId,
     rows: &[DeleteFileRow],
 ) -> CatalogResult<BTreeMap<DataFileId, crate::CatalogOrderId>> {
-    let data_file_ids = rows
-        .iter()
-        .map(|row| row.data_file_id)
-        .collect::<BTreeSet<_>>();
-    let mut begin_orders = BTreeMap::new();
-    for data_file_id in data_file_ids {
-        for item in kv.scan_prefix(
-            &delete_file_timeline_prefix(catalog, data_file_id),
-            RangeDirection::Forward,
-            usize::MAX,
-        )? {
-            let row = delete_file_from_timeline_value(kv, catalog, &item.value)?;
-            begin_orders
-                .entry(data_file_id)
-                .and_modify(|begin_order| {
-                    if row.validity.begin_order < *begin_order {
-                        *begin_order = row.validity.begin_order;
-                    }
-                })
-                .or_insert(row.validity.begin_order);
-        }
-    }
-    Ok(begin_orders)
-}
-
-pub(super) fn delete_file_from_timeline_value(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    value: &[u8],
-) -> CatalogResult<DeleteFileRow> {
-    if let Ok(row) = DeleteFileRow::decode(value) {
-        return Ok(row);
-    }
-    if value.len() != 8 {
-        return Err(crate::CatalogError::Decode(format!(
-            "delete file id pointer must be 8 bytes, got {}",
-            value.len()
-        )));
-    }
-    let id_bytes: [u8; 8] = value.try_into().map_err(|_| {
-        crate::CatalogError::Decode("delete file id pointer must be 8 bytes".to_owned())
-    })?;
-    let delete_file_id = DeleteFileId(u64::from_be_bytes(id_bytes));
-    let Some(row) = kv.get(&delete_file_key(catalog, delete_file_id))? else {
-        return Err(crate::CatalogError::NotFound("delete file"));
-    };
-    DeleteFileRow::decode(&row)
+    let data_file_ids = rows.iter().map(|row| row.data_file_id).collect::<Vec<_>>();
+    let history = list_delete_files_for_data_file_ids(kv, catalog, &data_file_ids)?;
+    Ok(semantic_delete_begin_orders_from_rows(&history))
 }

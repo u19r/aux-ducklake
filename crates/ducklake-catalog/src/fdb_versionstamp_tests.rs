@@ -7,11 +7,12 @@ use crate::{
 
 #[test]
 fn namespaced_keys_are_stripped_from_scan_results() {
+    let encoded = crate::fdb_key_codec::encode_key(b"test-prefix/", b"catalog-key");
     assert_eq!(
-        strip_namespace(b"test-prefix/", b"test-prefix/catalog-key").unwrap(),
+        crate::fdb_key_codec::decode_key(b"test-prefix/", &encoded).unwrap(),
         b"catalog-key"
     );
-    assert!(strip_namespace(b"test-prefix/", b"other/catalog-key").is_err());
+    assert!(crate::fdb_key_codec::decode_key(b"other/", &encoded).is_err());
 }
 
 #[test]

@@ -13,7 +13,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod prefix_copy {
     use std::env;
 
-    use ducklake_catalog::{clear_foundationdb_prefix, keys::prefix_end};
+    use ducklake_catalog::{clear_foundationdb_prefix, foundationdb_prefix_bounds};
     use foundationdb::{Database, RangeOption, options::TransactionOption};
     use futures::{TryStreamExt, executor::block_on};
 
@@ -99,21 +99,20 @@ mod prefix_copy {
         source_prefix: &str,
         limit: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let source = source_prefix.as_bytes();
-        for (index, (key, value)) in read_batch(db, source, &prefix_end(source), limit)?
+        let (source, end) = foundationdb_prefix_bounds(source_prefix.as_bytes())?;
+        for (index, (key, value)) in read_batch(db, &source, &end, limit)?
             .into_iter()
             .enumerate()
         {
-            let suffix = key.strip_prefix(source).unwrap_or(&key);
+            let suffix = key.strip_prefix(source.as_slice()).unwrap_or(&key);
             println!("sample_key\t{}\t{}\t{}", index, hex(suffix), value.len());
         }
         Ok(())
     }
 
     fn copy_prefix(db: &Database, args: &Args) -> Result<CopyStats, Box<dyn std::error::Error>> {
-        let source = args.source_prefix.as_bytes();
-        let destination = args.destination_prefix.as_bytes();
-        let source_end = prefix_end(source);
+        let (source, source_end) = foundationdb_prefix_bounds(args.source_prefix.as_bytes())?;
+        let (destination, _) = foundationdb_prefix_bounds(args.destination_prefix.as_bytes())?;
         let mut cursor = source.to_vec();
         let mut stats = CopyStats {
             keys: 0,
@@ -128,7 +127,7 @@ mod prefix_copy {
             }
             cursor = next_after(rows.last().expect("non-empty batch").0.as_slice());
             for chunk in copy_chunks(rows, args.batch_bytes) {
-                write_batch(db, source, destination, &chunk)?;
+                write_batch(db, &source, &destination, &chunk)?;
                 stats.keys = stats.keys.saturating_add(chunk.len());
                 stats.value_bytes = stats
                     .value_bytes

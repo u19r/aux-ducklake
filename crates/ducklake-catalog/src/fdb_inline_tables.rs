@@ -7,7 +7,6 @@ use foundationdb::{
     RangeOption,
     options::{ConflictRangeType, MutationType},
 };
-use futures::executor::block_on;
 
 use crate::{
     CatalogError, CatalogId, CatalogOrderId, CatalogResult, DuckLakeSnapshotId,
@@ -616,8 +615,14 @@ fn commit_prepared_inline_mutation(
     prepared: PreparedInlineMutation,
 ) -> CatalogResult<InlineTableMutationCommit> {
     let versionstamp = trx.get_versionstamp();
-    block_on(trx.commit()).map_err(map_fdb_commit_error)?;
-    let order = committed_order(block_on(versionstamp).map_err(map_fdb_error)?.deref())?;
+    crate::fdb_runtime::record_transaction_usage(&trx);
+    crate::fdb_runtime::wait_for_fdb("wait.fdb.commit", trx.commit())
+        .map_err(map_fdb_commit_error)?;
+    let order = committed_order(
+        crate::fdb_runtime::wait_for_fdb("wait.fdb.versionstamp", versionstamp)
+            .map_err(map_fdb_error)?
+            .deref(),
+    )?;
     let rows = prepared
         .payloads
         .into_iter()
@@ -734,7 +739,8 @@ fn add_snapshot_prefix_conflict(
     let prefix = kv.namespaced_key(&snapshot_prefix(catalog));
     let mut range = RangeOption::from(prefix.clone()..prefix_end(&prefix));
     range.limit = Some(1);
-    block_on(trx.get_range(&range, 1, false)).map_err(map_fdb_error)?;
+    crate::fdb_runtime::wait_for_fdb("wait.fdb.range", trx.get_range(&range, 1, false))
+        .map_err(map_fdb_error)?;
     trx.add_conflict_range(&prefix, &prefix_end(&prefix), ConflictRangeType::Read)
         .map_err(map_fdb_error)?;
     trx.add_conflict_range(&prefix, &prefix_end(&prefix), ConflictRangeType::Write)
@@ -760,7 +766,7 @@ fn stage_snapshot(
             &snapshot_timestamp_key(catalog, snapshot.created_at_micros, snapshot.order),
             snapshot_timestamp_key_order_offset(catalog, snapshot.created_at_micros),
         )?,
-        &snapshot.sequence.to_be_bytes(),
+        &snapshot.encode(),
         MutationType::SetVersionstampedKey,
     );
     stage_fdb_snapshot_indexes(kv, trx, catalog, snapshot)?;
@@ -822,7 +828,9 @@ fn commit_delete_inline_table_rows(
     }
     stage_inline_delete(kv, &trx, catalog, order, &prepared, target.stage_snapshot)?;
 
-    block_on(trx.commit()).map_err(map_fdb_commit_error)?;
+    crate::fdb_runtime::record_transaction_usage(&trx);
+    crate::fdb_runtime::wait_for_fdb("wait.fdb.commit", trx.commit())
+        .map_err(map_fdb_commit_error)?;
     Ok(InlineTableDeleteCommit {
         deleted_row_count: prepared.row_ids.len(),
         rewritten_payload_count,
@@ -961,7 +969,7 @@ fn estimate_inline_payload_bytes(
         .saturating_add(
             snapshot_timestamp_key(catalog, snapshot.created_at_micros, snapshot.order).len(),
         )
-        .saturating_add(8);
+        .saturating_add(snapshot.encode().len());
     let table_bytes = replacements
         .iter()
         .map(|(previous, next)| {
@@ -1064,7 +1072,7 @@ fn estimate_inline_delete_bytes(
         .saturating_add(
             snapshot_timestamp_key(catalog, snapshot.created_at_micros, snapshot.order).len(),
         )
-        .saturating_add(8);
+        .saturating_add(snapshot.encode().len());
     snapshot_bytes.saturating_add(estimate_inline_delete_change_bytes(
         catalog,
         snapshot.order,

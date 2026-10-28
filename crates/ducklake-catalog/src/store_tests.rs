@@ -18,6 +18,49 @@ mod tests {
     };
 
     #[test]
+    fn given_corrupt_timestamp_covering_row_when_listing_snapshots_then_the_read_fails_closed() {
+        let catalog = CatalogId(0);
+        let mut kv = FakeOrderedCatalogKv::new();
+        let snapshot = SnapshotRow::new(kv.generated_order_id(), RawSnapshotSequence(1));
+        let mut batch = KvBatch::new();
+        stage_snapshot(&mut batch, catalog, &snapshot);
+        batch.put(
+            crate::keys::snapshot_timestamp_key(
+                catalog,
+                snapshot.created_at_micros + 1,
+                snapshot.order,
+            ),
+            snapshot.encode(),
+        );
+        kv.commit(batch).unwrap();
+
+        assert!(matches!(
+            list_snapshots(&kv, catalog),
+            Err(CatalogError::Decode(_))
+        ));
+    }
+
+    #[test]
+    fn given_snapshot_history_when_listing_public_snapshots_then_timestamp_rows_cover_the_read() {
+        let catalog = CatalogId(0);
+        let mut inner = FakeOrderedCatalogKv::new();
+        let mut batch = KvBatch::new();
+        let expected = (1..=800)
+            .map(|sequence| {
+                let row =
+                    SnapshotRow::new(inner.generated_order_id(), RawSnapshotSequence(sequence));
+                stage_snapshot(&mut batch, catalog, &row);
+                row
+            })
+            .collect::<Vec<_>>();
+        inner.commit(batch).unwrap();
+        let kv = LatestSnapshotGetCountingKv::new(inner, catalog);
+
+        assert_eq!(list_snapshots(&kv, catalog).unwrap(), expected);
+        assert_eq!(kv.snapshot_get_count.get(), 0);
+    }
+
+    #[test]
     fn given_staged_snapshots_when_loading_latest_then_maintained_latest_row_is_used() {
         let catalog = CatalogId(0);
         let mut kv = FakeOrderedCatalogKv::new();
@@ -120,8 +163,16 @@ mod tests {
         let snapshot = SnapshotRow::new(inner.generated_order_id(), RawSnapshotSequence(1));
         let mut batch = KvBatch::new();
         stage_snapshot(&mut batch, catalog, &snapshot);
+        batch.put(
+            crate::keys::schema_version_history_key(catalog, snapshot.order),
+            2_u64.to_be_bytes().to_vec(),
+        );
+        batch.put(
+            crate::keys::current_schema_version_key(catalog),
+            2_u64.to_be_bytes().to_vec(),
+        );
         inner.commit(batch).unwrap();
-        let kv = LatestSnapshotGetCountingKv::new(inner, catalog);
+        let mut kv = LatestSnapshotGetCountingKv::new(inner, catalog);
 
         {
             let _first_request = super::super::begin_runtime_read_request(Some(9_001));
@@ -130,18 +181,65 @@ mod tests {
                 Some(snapshot.clone())
             );
         }
+        let newer = SnapshotRow::new(kv.inner.generated_order_id(), RawSnapshotSequence(2));
+        let mut batch = KvBatch::new();
+        stage_snapshot(&mut batch, catalog, &newer);
+        batch.put(
+            crate::keys::schema_version_history_key(catalog, newer.order),
+            7_u64.to_be_bytes().to_vec(),
+        );
+        batch.put(
+            crate::keys::current_schema_version_key(catalog),
+            7_u64.to_be_bytes().to_vec(),
+        );
+        kv.inner.commit(batch).unwrap();
         {
             let _second_request = super::super::begin_runtime_read_request(Some(9_001));
             assert_eq!(
                 latest_snapshot(&kv, catalog).unwrap(),
                 Some(snapshot.clone())
             );
+            assert_eq!(
+                super::super::latest_snapshot_uncached(&kv, catalog)
+                    .row
+                    .unwrap(),
+                Some(newer.clone())
+            );
+            assert_eq!(
+                latest_snapshot(&kv, catalog).unwrap(),
+                Some(snapshot.clone()),
+                "fresh validation must not replace the logical snapshot"
+            );
+            assert_eq!(
+                super::super::prepared_snapshot_read(
+                    &kv,
+                    catalog,
+                    crate::catalog_request_read_set::CatalogHeaderProjection::Conflict
+                )
+                .row
+                .unwrap(),
+                Some(newer.clone())
+            );
+            assert_eq!(
+                latest_snapshot(&kv, catalog).unwrap(),
+                Some(snapshot.clone())
+            );
+            assert_eq!(
+                crate::schema_version_state::load_schema_version_at(&kv, catalog, snapshot.order)
+                    .unwrap(),
+                2
+            );
+            assert_eq!(
+                crate::schema_version_state::load_schema_version_at(&kv, catalog, newer.order)
+                    .unwrap(),
+                7
+            );
         }
-        assert_eq!(kv.latest_get_count.get(), 1);
+        assert_eq!(kv.latest_get_count.get(), 3);
 
         let _different_context = super::super::begin_runtime_read_request(Some(9_002));
-        assert_eq!(latest_snapshot(&kv, catalog).unwrap(), Some(snapshot));
-        assert_eq!(kv.latest_get_count.get(), 2);
+        assert_eq!(latest_snapshot(&kv, catalog).unwrap(), Some(newer));
+        assert_eq!(kv.latest_get_count.get(), 4);
     }
 
     #[test]
@@ -241,6 +339,8 @@ mod tests {
         inner: FakeOrderedCatalogKv,
         latest_key: Vec<u8>,
         latest_get_count: Cell<usize>,
+        snapshot_get_count: Cell<usize>,
+        snapshot_key_prefix: Vec<u8>,
     }
 
     #[derive(Clone)]
@@ -407,12 +507,18 @@ mod tests {
                 inner,
                 latest_key: latest_snapshot_row_key(catalog),
                 latest_get_count: Cell::new(0),
+                snapshot_get_count: Cell::new(0),
+                snapshot_key_prefix: snapshot_prefix(catalog),
             }
         }
     }
 
     impl crate::OrderedCatalogKv for LatestSnapshotGetCountingKv {
         fn get(&self, key: &[u8]) -> crate::CatalogResult<Option<Vec<u8>>> {
+            if key.starts_with(&self.snapshot_key_prefix) {
+                self.snapshot_get_count
+                    .set(self.snapshot_get_count.get() + 1);
+            }
             if key == self.latest_key {
                 self.latest_get_count
                     .set(self.latest_get_count.get().saturating_add(1));

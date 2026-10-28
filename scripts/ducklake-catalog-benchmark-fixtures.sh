@@ -181,7 +181,7 @@ realistic_sum_subqueries() {
     local count="$1" table table_name sep=""
     for ((table = 0; table < count; table++)); do
         table_name="$(realistic_table_name "$table")"
-        printf '%sSELECT count(*) row_count, coalesce(sum(id), 0) id_sum FROM dl.main.%s' "$sep" "$table_name"
+        printf '%sSELECT count(*) row_count, coalesce(sum(id), 0) id_sum, coalesce(sum(amount), 0) amount_sum FROM dl.main.%s' "$sep" "$table_name"
         sep=$'\nUNION ALL\n'
     done
 }
@@ -189,7 +189,8 @@ realistic_sum_subqueries() {
 realistic_latest_query_sql() {
     local count="$1"
     cat <<SQL
-SELECT 'realistic_latest=' || sum(row_count) || ',' || sum(id_sum)
+SELECT unnest(['realistic_latest=' || sum(row_count) || ',' || sum(id_sum),
+    'realistic_integrity=' || sum(row_count) || ',' || sum(id_sum) || ',' || sum(amount_sum)])
 FROM (
 $(realistic_sum_subqueries "$count")
 );

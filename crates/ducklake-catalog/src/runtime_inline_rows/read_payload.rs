@@ -76,7 +76,7 @@ pub(super) fn read_inline_rows_payload_with_stats_request_and_mode(
         );
     }
     let started = RuntimeMetricStage::start();
-    let render_context = context.render_context(kv, catalog)?;
+    let render_context = InlineReadRenderContext::fetch(kv, catalog, &context, &payloads)?;
     record_inline_stage(metric_prefix, "Context", started);
     let started = RuntimeMetricStage::start();
     if !payload.include_flushed {

@@ -6,10 +6,10 @@ preflight="$root_dir/scripts/ducklake-fdb-benchmark-preflight.sh"
 test_dir="$(mktemp -d "${TMPDIR:-/tmp}/ducklake-fdb-preflight-test.XXXXXX")"
 
 cleanup() {
-    local status=$?
-    trap - EXIT
-    rm -rf -- "$test_dir"
-    exit "$status"
+	local status=$?
+	trap - EXIT
+	rm -rf -- "$test_dir"
+	exit "$status"
 }
 trap cleanup EXIT
 
@@ -17,9 +17,9 @@ case "$(uname -s)" in
 Darwin) runtime_suffix=.dylib ;;
 Linux) runtime_suffix=.so ;;
 *)
-    echo "unsupported host" >&2
-    exit 1
-    ;;
+	echo "unsupported host" >&2
+	exit 1
+	;;
 esac
 
 source_file="$test_dir/source/crates/ducklake-catalog/src/lib.rs"
@@ -30,7 +30,7 @@ extension_file="$test_dir/artifacts/ducklake.duckdb_extension"
 runtime_file="$test_dir/artifacts/libducklake_catalog$runtime_suffix"
 cluster_file="$test_dir/fdb.cluster"
 mkdir -p "$(dirname "$source_file")" "$(dirname "$ducklake_source_file")" \
-    "$(dirname "$patch_file")" "$(dirname "$duckdb_file")"
+	"$(dirname "$patch_file")" "$(dirname "$duckdb_file")"
 printf '// preflight fixture\n' >"$source_file"
 printf '// ducklake fixture\n' >"$ducklake_source_file"
 printf '# preflight patch fixture\n' >"$patch_file"
@@ -45,64 +45,108 @@ export AUX_DUCKLAKE_FDB_CLUSTER_FILE="$cluster_file"
 
 missing_cluster_output="$test_dir/missing-cluster.out"
 if env -u AUX_DUCKLAKE_FDB_CLUSTER_FILE "$preflight" \
-    --validate-only \
-    --source-root "$test_dir/source" \
-    --duckdb "$duckdb_file" \
-    --extension "$extension_file" \
-    --runtime "$runtime_file" >"$missing_cluster_output" 2>&1; then
-    echo "missing private FoundationDB cluster unexpectedly passed" >&2
-    exit 1
+	--validate-only \
+	--source-root "$test_dir/source" \
+	--duckdb "$duckdb_file" \
+	--extension "$extension_file" \
+	--runtime "$runtime_file" >"$missing_cluster_output" 2>&1; then
+	echo "missing private FoundationDB cluster unexpectedly passed" >&2
+	exit 1
 fi
 grep -Fq 'AUX_DUCKLAKE_FDB_CLUSTER_FILE is required; refusing system FoundationDB fallback' \
-    "$missing_cluster_output"
+	"$missing_cluster_output"
 
 valid_output="$test_dir/valid.out"
 "$preflight" \
-    --validate-only \
-    --source-root "$test_dir/source" \
-    --duckdb "$duckdb_file" \
-    --extension "$extension_file" \
-    --runtime "$runtime_file" >"$valid_output"
+	--validate-only \
+	--source-root "$test_dir/source" \
+	--duckdb "$duckdb_file" \
+	--extension "$extension_file" \
+	--runtime "$runtime_file" >"$valid_output"
 grep -Fq 'preflight_validation=ok' "$valid_output"
 
 sha_output="$test_dir/sha.out"
 if "$preflight" \
-    --validate-only \
-    --source-root "$test_dir/source" \
-    --duckdb "$duckdb_file" \
-    --extension "$extension_file" \
-    --runtime "$runtime_file" \
-    --runtime-sha256 "0000000000000000000000000000000000000000000000000000000000000000" >"$sha_output" 2>&1; then
-    echo "runtime SHA validation unexpectedly passed" >&2
-    exit 1
+	--validate-only \
+	--source-root "$test_dir/source" \
+	--duckdb "$duckdb_file" \
+	--extension "$extension_file" \
+	--runtime "$runtime_file" \
+	--runtime-sha256 "0000000000000000000000000000000000000000000000000000000000000000" >"$sha_output" 2>&1; then
+	echo "runtime SHA validation unexpectedly passed" >&2
+	exit 1
 fi
 grep -Fq 'FoundationDB runtime SHA-256 mismatch' "$sha_output"
 
 touch -t 202001010200 "$source_file"
 stale_output="$test_dir/stale.out"
 if "$preflight" \
-    --validate-only \
-    --source-root "$test_dir/source" \
-    --duckdb "$duckdb_file" \
-    --extension "$extension_file" \
-    --runtime "$runtime_file" >"$stale_output" 2>&1; then
-    echo "stale runtime validation unexpectedly passed" >&2
-    exit 1
+	--validate-only \
+	--source-root "$test_dir/source" \
+	--duckdb "$duckdb_file" \
+	--extension "$extension_file" \
+	--runtime "$runtime_file" >"$stale_output" 2>&1; then
+	echo "stale runtime validation unexpectedly passed" >&2
+	exit 1
 fi
 grep -Fq 'stale FoundationDB runtime' "$stale_output"
 
 touch -t 202001010000 "$source_file"
 count_output="$test_dir/count.out"
 if "$preflight" \
-    --validate-only \
-    --source-root "$test_dir/source" \
-    --duckdb "$duckdb_file" \
-    --extension "$extension_file" \
-    --runtime "$runtime_file" \
-    --metadata-table-count 256 >"$count_output" 2>&1; then
-    echo "central scan count validation unexpectedly passed" >&2
-    exit 1
+	--validate-only \
+	--source-root "$test_dir/source" \
+	--duckdb "$duckdb_file" \
+	--extension "$extension_file" \
+	--runtime "$runtime_file" \
+	--metadata-table-count 256 >"$count_output" 2>&1; then
+	echo "central scan count validation unexpectedly passed" >&2
+	exit 1
 fi
 grep -Fq 'greater than 256' "$count_output"
+
+python3 - "$root_dir/scripts/ducklake_catalog_benchmark.sh" "$test_dir" <<'PY_ACCOUNTING'
+import json
+import pathlib
+import subprocess
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text()
+work = pathlib.Path(sys.argv[2])
+function = source.split("write_metric_accounting() {", 1)[1]
+program = function.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+base = 'backend="foundationdb",operation="fdb.scan_prefix.test",scope="mixed",status="ok"'
+series = [
+    ('aux_ducklake_runtime_requests_total', ',family="kv"', 2, 5),
+    ('aux_ducklake_runtime_request_elapsed_micros_total', ',family="kv"', 100, 700),
+    ('aux_ducklake_runtime_kv_items_total', '', 10, 19),
+    ('aux_ducklake_runtime_kv_bytes_total', '', 1000, 1900),
+]
+for index, name in [(2, "before"), (3, "after")]:
+    text = ''.join(f'{metric}{{{base}{labels}}} {row[index]}\n'
+                   for row in series for metric, labels in [row[:2]])
+    text += f'aux_ducklake_runtime_kv_items_total{{{base.replace("mixed", "other")}}} {999 + (index - 2) * 1000}\n'
+    failed = base.replace('status="ok"', 'status="error"')
+    for metric, extra, before, after in series:
+        value = (1 if "requests_total" in metric else 10 if "micros" in metric else
+                 2 if "items" in metric else 20) if index == 3 else 0
+        text += f'{metric}{{{failed}{extra}}} {value}\n'
+    (work / name).write_text(text)
+output = work / "accounting.json"
+subprocess.run([sys.executable, "-", str(output), "mixed", "2", str(work / "before"),
+                str(work / "after")], input=program, text=True, check=True)
+result = json.loads(output.read_text())
+rows = result["micro_operation_costs"]
+assert len(rows) == 2, rows
+ok = next(row for row in rows if row["status"] == "ok")
+error = next(row for row in rows if row["status"] == "error")
+assert ok["calls"] == 3 and ok["items"] == 9 and ok["bytes"] == 900, rows
+assert error["calls"] == 1 and error["items"] == 2 and error["bytes"] == 20, rows
+assert result["fdb_rows_read"] == 11 and result["fdb_bytes_read"] == 920, result
+assert not result["macro_operation_costs"], result
+subprocess.run([sys.executable, "-", str(output), "mixed", "2", str(work / "after"),
+                str(work / "after")], input=program, text=True, check=True)
+assert not json.loads(output.read_text())["micro_operation_costs"]
+PY_ACCOUNTING
 
 printf 'ducklake_fdb_benchmark_preflight_tests=ok\n'

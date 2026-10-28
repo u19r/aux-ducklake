@@ -292,18 +292,13 @@ where
                 ))
             })
             .collect::<CatalogResult<Vec<_>>>()?;
-        let created_tables = self
-            .created_tables
-            .into_iter()
-            .map(|(requested_table_id, table)| {
-                reject_duplicate_column_names(&table, table.table_id)?;
-                Ok(CreatedTable::new(requested_table_id, table))
-            })
-            .collect::<CatalogResult<Vec<_>>>()?;
-        let created = created_tables
-            .iter()
-            .map(|table| table.persisted.clone())
-            .collect();
+        let mut created_tables = Vec::with_capacity(self.created_tables.len());
+        let mut created = Vec::with_capacity(self.created_tables.len());
+        for (requested_table_id, table) in self.created_tables {
+            reject_duplicate_column_names(&table, table.table_id)?;
+            created_tables.push(CreatedTable::new(requested_table_id, &table));
+            created.push(table);
+        }
         Ok(TableCommitParts {
             created,
             replacements,

@@ -1,0 +1,402 @@
+{
+  "repository": "aux-ducklake",
+  "payload_digest": "b2a2c47afd5c919c835d51662d2e8b4a0b7fafa561e47f05c3f4b2a69ce2812e",
+  "catalog": {
+    "schema": 1,
+    "tools": {
+      "rust": {
+        "version": "1.99.1",
+        "purpose": "Selected release",
+        "downloads": {}
+      },
+      "mold": {
+        "version": "3.0.0",
+        "purpose": "Selected release",
+        "downloads": {
+          "x86_64": {
+            "repository": "rui314/mold",
+            "tag": "v{version}",
+            "asset": "mold-{version}-x86_64-linux.tar.gz"
+          },
+          "aarch64": {
+            "repository": "rui314/mold",
+            "tag": "v{version}",
+            "asset": "mold-{version}-aarch64-linux.tar.gz"
+          }
+        }
+      },
+      "foundationdb": {
+        "version": "7.4.8",
+        "purpose": "Selected release",
+        "downloads": {}
+      },
+      "ubi": {
+        "version": "9.8",
+        "purpose": "Shared UBI 9 builder and runtime release",
+        "downloads": {}
+      },
+      "croaring": {
+        "version": "5.3.2",
+        "purpose": "DuckLake native Roaring bitmap library",
+        "downloads": {}
+      },
+      "postgresql": {
+        "version": "18.6",
+        "purpose": "DuckLake libpq source and shared PostgreSQL image release",
+        "downloads": {}
+      },
+      "curl": {
+        "version": "8.23.0",
+        "purpose": "DuckLake native curl source and shared curl image release",
+        "downloads": {
+          "source": {
+            "repository": "curl/curl",
+            "tag": "curl-{version_underscored}",
+            "asset": "curl-{version}.tar.xz"
+          }
+        }
+      },
+      "duckdb_source": {
+        "version": "d54cbbe3df17e8e5ce68312f483b4155836112aa",
+        "purpose": "DuckDB integration commit selected with the DuckLake source pin",
+        "downloads": {}
+      },
+      "ducklake_source": {
+        "version": "417a9117f590e8141742ac0579d02f6a90162e37",
+        "purpose": "DuckLake integration commit selected by the DuckDB release",
+        "downloads": {}
+      },
+      "duckdb": {
+        "version": "v2.0.0",
+        "purpose": "DuckDB integration release paired with its selected source commit",
+        "downloads": {}
+      }
+    },
+    "images": {
+      "ubi": {
+        "repository": "registry.access.redhat.com/ubi9/ubi",
+        "tag": "{{tools.ubi.version}}"
+      },
+      "dockerfile": {
+        "repository": "docker.io/docker/dockerfile",
+        "tag": "1.28"
+      }
+    },
+    "actions": {
+      "actions_checkout": {
+        "repository": "actions/checkout",
+        "version": "v7.0.1"
+      },
+      "actions_upload_artifact": {
+        "repository": "actions/upload-artifact",
+        "version": "v7.0.2"
+      },
+      "actions_download_artifact": {
+        "repository": "actions/download-artifact",
+        "version": "v8.0.2"
+      }
+    },
+    "cache_images": [],
+    "repositories": [
+      "aux-ducklake"
+    ]
+  },
+  "lock": {
+    "schema": 1,
+    "tools": {
+      "mold": {
+        "selection": "3.0.0",
+        "revision": "",
+        "downloads": {
+          "x86_64": {
+            "url": "https://github.com/rui314/mold/releases/download/v3.0.0/mold-3.0.0-x86_64-linux.tar.gz",
+            "sha256": "6c90d4a474c7c0409dfb575be03a5345878ac14fdba18de8b40fa58c60121189"
+          },
+          "aarch64": {
+            "url": "https://github.com/rui314/mold/releases/download/v3.0.0/mold-3.0.0-aarch64-linux.tar.gz",
+            "sha256": "52c759d3689babaea4c42af2f31062a74ab83e17ffb5a8090232534c67b70577"
+          }
+        }
+      },
+      "curl": {
+        "selection": "8.23.0",
+        "revision": "",
+        "downloads": {
+          "source": {
+            "url": "https://github.com/curl/curl/releases/download/curl-8_23_0/curl-8.23.0.tar.xz",
+            "sha256": "8dadd7d2536a314f982ad05a651b713f426bf7d02cc2c76cffb9796f2218e6c5"
+          }
+        }
+      }
+    },
+    "images": {
+      "ubi": {
+        "selection": "registry.access.redhat.com/ubi9/ubi:9.8",
+        "digest": "sha256:217dd5692d369799d34d09ffb6f5f3404efebc7900834490fdf9ae92fd6721d4",
+        "revision": "4fed77deb378a5b25e394fe33b2b061be0d026b8"
+      },
+      "dockerfile": {
+        "selection": "docker.io/docker/dockerfile:1.28",
+        "digest": "sha256:bb22d9815c728170f72750f4e5b0d672e06176142e1d602c7e66c050100b7e5b",
+        "revision": "f5b59a1f2fb25a0cb7072c398cab9aed7835da4e"
+      }
+    },
+    "actions": {
+      "actions_checkout": {
+        "selection": "actions/checkout@v7.0.1",
+        "revision": "3d3c42e5aac5ba805825da76410c181273ba90b1"
+      },
+      "actions_upload_artifact": {
+        "selection": "actions/upload-artifact@v7.0.2",
+        "revision": "cf430e030ddbb5b0abf93d22962f4752f3646cd9"
+      },
+      "actions_download_artifact": {
+        "selection": "actions/download-artifact@v8.0.2",
+        "revision": "9000827ccba6bdab643e8b6fd33ac0654aef8333"
+      }
+    }
+  },
+  "bindings": {
+    "schema": 1,
+    "bindings": [
+      {
+        "kind": "text",
+        "key": "tools.rust.version",
+        "template": "{{tools.rust.version}}",
+        "files": [
+          "aux-ducklake/Cargo.toml",
+          "aux-ducklake/rust-toolchain.toml"
+        ],
+        "pattern": "(?:channel|rust-version)\\s*=\\s*\"(?<value>[^\"]+)\"",
+        "encoding": "plain"
+      },
+      {
+        "kind": "text",
+        "key": "tools.mold.version",
+        "template": "{{tools.mold.version}}",
+        "files": [
+          "aux-ducklake/.cargo/config.toml",
+          "aux-ducklake/docker/ducklake-release.Dockerfile",
+          "aux-ducklake/scripts/build_ducklake_release.sh",
+          "aux-ducklake/scripts/ducklake_build_common.sh",
+          "aux-ducklake/scripts/install-mold.sh"
+        ],
+        "pattern": "aux-mold-(?<value>\\d+\\.\\d+\\.\\d+)",
+        "encoding": "plain"
+      },
+      {
+        "kind": "text",
+        "key": "tools.mold.version",
+        "template": "{{tools.mold.version}}",
+        "files": [
+          "aux-ducklake/scripts/install-mold.sh"
+        ],
+        "pattern": "mold-(?<value>\\d+\\.\\d+\\.\\d+)-",
+        "encoding": "plain"
+      },
+      {
+        "kind": "text",
+        "key": "tools.mold.version",
+        "template": "{{tools.mold.version}}",
+        "files": [
+          "aux-ducklake/.github/workflows/ci.yml",
+          "aux-ducklake/scripts/install-mold.sh"
+        ],
+        "pattern": "mold (?<value>\\d+\\.\\d+\\.\\d+)",
+        "encoding": "plain"
+      },
+      {
+        "kind": "text",
+        "key": "tools.mold.version",
+        "template": "{{tools.mold.version}}",
+        "files": [
+          "aux-ducklake/scripts/install-mold.sh"
+        ],
+        "pattern": "mold/releases/download/v(?<value>\\d+\\.\\d+\\.\\d+)",
+        "encoding": "plain"
+      },
+      {
+        "kind": "text",
+        "key": "tools.mold.version",
+        "template": "{{tools.mold.version}}",
+        "files": [
+          "aux-ducklake/scripts/install-mold.sh"
+        ],
+        "pattern": "mold (?<value>\\d+\\\\\\.\\d+\\\\\\.\\d+)",
+        "encoding": "regex"
+      },
+      {
+        "kind": "text",
+        "key": "lock.tools.mold.x86_64.sha256",
+        "template": "{{lock.tools.mold.x86_64.sha256}}",
+        "files": [
+          "aux-ducklake/scripts/install-mold.sh"
+        ],
+        "pattern": "archive_arch=x86_64\\s+checksum=(?<value>[a-f0-9]{64})",
+        "encoding": "plain"
+      },
+      {
+        "kind": "text",
+        "key": "lock.tools.mold.aarch64.sha256",
+        "template": "{{lock.tools.mold.aarch64.sha256}}",
+        "files": [
+          "aux-ducklake/scripts/install-mold.sh"
+        ],
+        "pattern": "archive_arch=aarch64\\s+checksum=(?<value>[a-f0-9]{64})",
+        "encoding": "plain"
+      },
+      {
+        "kind": "text",
+        "key": "tools.foundationdb.version",
+        "template": "{{tools.foundationdb.version}}",
+        "files": [
+          "aux-ducklake/docker/ducklake-release.Dockerfile"
+        ],
+        "pattern": "FDB_VERSION[=:]\\s*[\"\\x27]?(?<value>\\d+\\.\\d+\\.\\d+)",
+        "encoding": "plain"
+      },
+      {
+        "kind": "text",
+        "key": "images.ubi.reference",
+        "template": "{{images.ubi.reference}}",
+        "files": [
+          "aux-ducklake/docker/ducklake-release.Dockerfile"
+        ],
+        "pattern": "(?<value>(?:registry\\.local/registry\\.access\\.redhat\\.com/ubi9/ubi|registry\\.access\\.redhat\\.com/ubi9/ubi)(?::[a-zA-Z0-9_.+-]+)?@sha256:(?:\\\\\\n[ \\t]*)?[a-f0-9]{64})",
+        "encoding": "rust-wrapped"
+      },
+      {
+        "kind": "text",
+        "key": "images.dockerfile.tag",
+        "template": "{{images.dockerfile.tag}}",
+        "files": [
+          "aux-ducklake/docker/ducklake-release.Dockerfile"
+        ],
+        "pattern": "(?:registry\\.local/docker/dockerfile|docker\\.io/docker/dockerfile|docker/dockerfile):(?<value>[a-zA-Z0-9_.+-]+)(?![a-zA-Z0-9_.+-]*@sha256)",
+        "encoding": "plain"
+      },
+      {
+        "kind": "text",
+        "key": "images.dockerfile.tag",
+        "template": "{{images.dockerfile.tag}}",
+        "files": [
+          "aux-ducklake/docker/ducklake-release.Dockerfile"
+        ],
+        "pattern": "docker/dockerfile:(?<value>\\d+\\.\\d+(?:\\.\\d+)?)(?![\\d.]*@sha256)",
+        "encoding": "plain"
+      },
+      {
+        "kind": "text",
+        "key": "actions.actions_checkout.revision",
+        "template": "{{actions.actions_checkout.revision}}",
+        "files": [
+          "aux-ducklake/.github/workflows/ci.yml",
+          "aux-ducklake/.github/workflows/release.yml"
+        ],
+        "pattern": "actions/checkout@(?<value>[a-zA-Z0-9_.-]+)",
+        "encoding": "plain"
+      },
+      {
+        "kind": "text",
+        "key": "actions.actions_upload_artifact.revision",
+        "template": "{{actions.actions_upload_artifact.revision}}",
+        "files": [
+          "aux-ducklake/.github/workflows/release.yml"
+        ],
+        "pattern": "actions/upload\\-artifact@(?<value>[a-zA-Z0-9_.-]+)",
+        "encoding": "plain"
+      },
+      {
+        "kind": "text",
+        "key": "actions.actions_download_artifact.revision",
+        "template": "{{actions.actions_download_artifact.revision}}",
+        "files": [
+          "aux-ducklake/.github/workflows/release.yml"
+        ],
+        "pattern": "actions/download\\-artifact@(?<value>[a-zA-Z0-9_.-]+)",
+        "encoding": "plain"
+      },
+      {
+        "kind": "text",
+        "key": "tools.duckdb_source.version",
+        "template": "{{tools.duckdb_source.version}}",
+        "files": [
+          "aux-ducklake/scripts/ducklake-upstream-pins.sh"
+        ],
+        "pattern": "DUCKDB_COMMIT=\"(?<value>[^\"\\n]+)\"",
+        "encoding": "plain"
+      },
+      {
+        "kind": "text",
+        "key": "tools.ducklake_source.version",
+        "template": "{{tools.ducklake_source.version}}",
+        "files": [
+          "aux-ducklake/scripts/ducklake-upstream-pins.sh"
+        ],
+        "pattern": "DUCKLAKE_COMMIT=\"(?<value>[^\"\\n]+)\"",
+        "encoding": "plain"
+      },
+      {
+        "kind": "text",
+        "key": "tools.duckdb.version",
+        "template": "{{tools.duckdb.version}}",
+        "files": [
+          "aux-ducklake/scripts/ducklake-upstream-pins.sh"
+        ],
+        "pattern": "DUCKDB_VERSION=\"(?<value>[^\"\\n]+)\"",
+        "encoding": "plain"
+      },
+      {
+        "kind": "text",
+        "key": "tools.croaring.version",
+        "template": "{{tools.croaring.version}}",
+        "files": [
+          "aux-ducklake/docker/ducklake-release.Dockerfile"
+        ],
+        "pattern": "CROARING_VERSION=(?<value>\\d+\\.\\d+(?:\\.\\d+)?)",
+        "encoding": "plain"
+      },
+      {
+        "kind": "text",
+        "key": "tools.postgresql.version",
+        "template": "{{tools.postgresql.version}}",
+        "files": [
+          "aux-ducklake/docker/ducklake-release.Dockerfile"
+        ],
+        "pattern": "POSTGRES_VERSION=(?<value>\\d+\\.\\d+(?:\\.\\d+)?)",
+        "encoding": "plain"
+      },
+      {
+        "kind": "text",
+        "key": "tools.curl.version",
+        "template": "{{tools.curl.version}}",
+        "files": [
+          "aux-ducklake/docker/ducklake-release.Dockerfile"
+        ],
+        "pattern": "CURL_VERSION=(?<value>\\d+\\.\\d+(?:\\.\\d+)?)",
+        "encoding": "plain"
+      },
+      {
+        "kind": "text",
+        "key": "lock.tools.curl.source.sha256",
+        "template": "{{lock.tools.curl.source.sha256}}",
+        "files": [
+          "aux-ducklake/docker/ducklake-release.Dockerfile"
+        ],
+        "pattern": "CURL_SHA256=(?<value>[a-f0-9]{64})",
+        "encoding": "plain"
+      },
+      {
+        "kind": "text",
+        "key": "lock.tools.curl.source.url",
+        "template": "{{lock.tools.curl.source.url}}",
+        "files": [
+          "aux-ducklake/docker/ducklake-release.Dockerfile"
+        ],
+        "pattern": "curl -fsSLo /tmp/curl.tar.xz \"(?<value>[^\"\\n]+)\"",
+        "encoding": "plain"
+      }
+    ],
+    "copies": []
+  }
+}

@@ -1,3 +1,8 @@
+mod payload;
+pub(crate) use payload::RuntimePayload;
+mod request;
+pub(crate) use request::RuntimeRequestRef;
+
 use std::fmt::Write;
 
 use sha2::{Digest, Sha256};
@@ -121,110 +126,25 @@ impl RuntimeRequest {
     }
 
     pub fn decode(bytes: &[u8]) -> CatalogResult<Self> {
-        validate_frame_size(bytes.len(), MAX_RUNTIME_REQUEST_BYTES, "runtime request")?;
-        let (header, payload) = split_frame(bytes)?;
-        let mut version = None;
-        let mut request_id = None;
-        let mut backend = None;
-        let mut catalog_id = None;
-        let mut operation = None;
-        let mut payload_len = None;
-        let mut page_offset = None;
-        let mut page_etag = None;
-        let mut read_context_id = None;
-        let mut snapshot_fence = None;
-        for (index, line) in header.lines().enumerate() {
-            if index == 0 {
-                version = Some(parse_magic(line)?);
-                continue;
-            }
-            let (key, value) = parse_header_line(line)?;
-            match key {
-                "request_id" => request_id = Some(value.to_owned()),
-                "backend" => backend = Some(RuntimeCatalogBackend::parse(value)?),
-                "catalog_id" => catalog_id = Some(CatalogId(parse_u64(value, "catalog_id")?)),
-                "operation" => operation = Some(value.to_owned()),
-                "payload_len" => payload_len = Some(parse_usize(value, "payload_len")?),
-                "page_offset" => page_offset = Some(parse_usize(value, "page_offset")?),
-                "page_etag" => page_etag = Some(value.to_owned()),
-                "read_context_id" => read_context_id = Some(parse_u64(value, "read_context_id")?),
-                "snapshot_fence" => {
-                    if snapshot_fence
-                        .replace(crate::SnapshotFence::try_from(value)?)
-                        .is_some()
-                    {
-                        return Err(CatalogError::Decode("duplicate snapshot fence".to_owned()));
-                    }
-                }
-                _ => {
-                    return Err(CatalogError::Decode(format!(
-                        "unknown runtime request header {key}"
-                    )));
-                }
-            }
-        }
-        require_version(version)?;
-        require_payload_len(payload_len, payload.len())?;
-        let mut request = Self::new(
-            required_header(request_id, "request_id")?,
-            required_header(backend, "backend")?,
-            required_header(operation, "operation")?,
-            payload.to_vec(),
-        )?
-        .with_catalog_id(catalog_id.unwrap_or(CatalogId(1)))?;
-        request.read_context_id = read_context_id;
-        request.snapshot_fence = snapshot_fence;
-        match (page_offset, page_etag) {
-            (None, None) => Ok(request),
-            (Some(offset), Some(etag)) => {
-                request.page_offset = offset;
-                request.page_etag = Some(etag);
-                request.validate()?;
-                Ok(request)
-            }
-            _ => Err(CatalogError::Decode(
-                "runtime page continuation requires page_offset and page_etag".to_owned(),
-            )),
-        }
+        RuntimeRequestRef::decode(bytes).map(Into::into)
     }
 
     fn validate(&self) -> CatalogResult<()> {
-        validate_token(
-            &self.request_id,
-            MAX_RUNTIME_REQUEST_ID_BYTES,
-            "runtime request_id",
-        )?;
-        validate_token(
-            &self.operation,
-            MAX_RUNTIME_OPERATION_BYTES,
-            "runtime operation",
-        )?;
-        validate_frame_size(
-            self.payload.len(),
-            MAX_RUNTIME_PAYLOAD_BYTES,
-            "runtime request payload",
-        )?;
-        match (&self.page_etag, self.page_offset) {
-            (None, 0) => Ok(()),
-            (Some(etag), offset) if offset > 0 => validate_hex_token(etag, "runtime page_etag"),
-            _ => Err(CatalogError::Decode(
-                "runtime page continuation requires a positive offset and page_etag".to_owned(),
-            )),
-        }
+        RuntimeRequestRef::from(self).validate()
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeResponse {
+pub struct RuntimeResponse<P = Vec<u8>> {
     pub request_id: String,
     pub status: RuntimeResponseStatus,
-    pub payload: Vec<u8>,
+    pub payload: P,
     pub next_page_offset: Option<usize>,
     pub page_etag: Option<String>,
 }
 
-impl RuntimeResponse {
-    pub fn ok(request_id: impl Into<String>, payload: Vec<u8>) -> CatalogResult<Self> {
+impl<P: AsRef<[u8]>> RuntimeResponse<P> {
+    pub fn ok(request_id: impl Into<String>, payload: P) -> CatalogResult<Self> {
         let response = Self {
             request_id: request_id.into(),
             status: RuntimeResponseStatus::Ok,
@@ -236,7 +156,7 @@ impl RuntimeResponse {
         Ok(response)
     }
 
-    pub fn error(request_id: impl Into<String>, payload: Vec<u8>) -> CatalogResult<Self> {
+    pub fn error(request_id: impl Into<String>, payload: P) -> CatalogResult<Self> {
         let response = Self {
             request_id: request_id.into(),
             status: RuntimeResponseStatus::Error,
@@ -254,19 +174,43 @@ impl RuntimeResponse {
             "{MAGIC}/{RUNTIME_PROTOCOL_VERSION}\nrequest_id={}\nstatus={}\npayload_len={}\n",
             self.request_id,
             self.status.as_str(),
-            self.payload.len()
+            self.payload.as_ref().len()
         );
         if let (Some(offset), Some(etag)) = (self.next_page_offset, &self.page_etag) {
             header.push_str(&format!("next_page_offset={offset}\npage_etag={etag}\n"));
         }
         header.push('\n');
-        let mut out = Vec::with_capacity(header.len().saturating_add(self.payload.len()));
+        let mut out = Vec::with_capacity(header.len().saturating_add(self.payload.as_ref().len()));
         out.extend_from_slice(header.as_bytes());
-        out.extend_from_slice(&self.payload);
+        out.extend_from_slice(self.payload.as_ref());
         validate_frame_size(out.len(), MAX_RUNTIME_RESPONSE_BYTES, "runtime response")?;
         Ok(out)
     }
 
+    fn validate(&self) -> CatalogResult<()> {
+        validate_token(
+            &self.request_id,
+            MAX_RUNTIME_REQUEST_ID_BYTES,
+            "runtime request_id",
+        )?;
+        validate_frame_size(
+            self.payload.as_ref().len(),
+            MAX_RUNTIME_RESPONSE_BYTES,
+            "runtime response payload",
+        )?;
+        match (self.next_page_offset, &self.page_etag) {
+            (None, None) => Ok(()),
+            (Some(offset), Some(etag)) if offset > 0 => {
+                validate_hex_token(etag, "runtime page_etag")
+            }
+            _ => Err(CatalogError::Decode(
+                "runtime paged response requires next_page_offset and page_etag".to_owned(),
+            )),
+        }
+    }
+}
+
+impl RuntimeResponse {
     pub fn decode(bytes: &[u8]) -> CatalogResult<Self> {
         validate_frame_size(bytes.len(), MAX_RUNTIME_RESPONSE_BYTES, "runtime response")?;
         let (header, payload) = split_frame(bytes)?;
@@ -309,53 +253,40 @@ impl RuntimeResponse {
         response.validate()?;
         Ok(response)
     }
-
-    fn validate(&self) -> CatalogResult<()> {
-        validate_token(
-            &self.request_id,
-            MAX_RUNTIME_REQUEST_ID_BYTES,
-            "runtime request_id",
-        )?;
-        validate_frame_size(
-            self.payload.len(),
-            MAX_RUNTIME_RESPONSE_BYTES,
-            "runtime response payload",
-        )?;
-        match (self.next_page_offset, &self.page_etag) {
-            (None, None) => Ok(()),
-            (Some(offset), Some(etag)) if offset > 0 => {
-                validate_hex_token(etag, "runtime page_etag")
-            }
-            _ => Err(CatalogError::Decode(
-                "runtime paged response requires next_page_offset and page_etag".to_owned(),
-            )),
-        }
-    }
 }
 
-pub(crate) fn paged_runtime_response(
+pub(crate) fn paged_runtime_response<P: AsRef<[u8]> + From<Vec<u8>>>(
     request_id: String,
-    payload: Vec<u8>,
+    payload: P,
     page_offset: usize,
     requested_etag: Option<&str>,
-) -> CatalogResult<RuntimeResponse> {
-    let page_etag = runtime_payload_etag(&payload);
+) -> CatalogResult<RuntimeResponse<P>> {
+    if page_offset == 0
+        && payload.as_ref().len() <= MAX_RUNTIME_PAGE_PAYLOAD_BYTES
+        && requested_etag.is_none()
+    {
+        return RuntimeResponse::ok(request_id, payload);
+    }
+    let page_etag = runtime_payload_etag(payload.as_ref());
     if requested_etag.is_some_and(|requested| requested != page_etag) {
         return Err(CatalogError::InvalidMutation(
             "conflict: runtime response changed during pagination".to_owned(),
         ));
     }
-    if page_offset > payload.len() {
+    if page_offset > payload.as_ref().len() {
         return Err(CatalogError::Decode(format!(
             "runtime page offset {page_offset} exceeds payload length {}",
-            payload.len()
+            payload.as_ref().len()
         )));
     }
     let page_end = page_offset
         .saturating_add(MAX_RUNTIME_PAGE_PAYLOAD_BYTES)
-        .min(payload.len());
-    let mut response = RuntimeResponse::ok(request_id, payload[page_offset..page_end].to_vec())?;
-    if page_end < payload.len() {
+        .min(payload.as_ref().len());
+    let mut response = RuntimeResponse::ok(
+        request_id,
+        payload.as_ref()[page_offset..page_end].to_vec().into(),
+    )?;
+    if page_end < payload.as_ref().len() {
         response.next_page_offset = Some(page_end);
         response.page_etag = Some(page_etag);
         response.validate()?;
@@ -408,7 +339,10 @@ fn split_frame(bytes: &[u8]) -> CatalogResult<(&str, &[u8])> {
 }
 
 fn parse_magic(line: &str) -> CatalogResult<u16> {
-    let Some(version) = line.strip_prefix(&format!("{MAGIC}/")) else {
+    let Some(version) = line
+        .strip_prefix(MAGIC)
+        .and_then(|tail| tail.strip_prefix('/'))
+    else {
         return Err(CatalogError::Decode(
             "runtime frame has invalid magic".to_owned(),
         ));

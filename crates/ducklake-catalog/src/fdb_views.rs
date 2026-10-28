@@ -361,7 +361,7 @@ pub(crate) fn estimate_view_change_bytes(
         .saturating_add(
             snapshot_timestamp_key(catalog, snapshot.created_at_micros, snapshot.order).len(),
         )
-        .saturating_add(8);
+        .saturating_add(snapshot.encode().len());
     let replacement_bytes = prepared
         .replacements
         .iter()
@@ -411,7 +411,7 @@ pub(crate) fn stage_snapshot(
             &snapshot_timestamp_key(catalog, snapshot.created_at_micros, snapshot.order),
             snapshot_timestamp_key_order_offset(catalog, snapshot.created_at_micros),
         )?,
-        &snapshot.sequence.to_be_bytes(),
+        &snapshot.encode(),
         MutationType::SetVersionstampedKey,
     );
     stage_fdb_snapshot_indexes(kv, trx, catalog, snapshot)?;

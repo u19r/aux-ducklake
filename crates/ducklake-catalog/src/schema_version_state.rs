@@ -12,18 +12,14 @@ use crate::{
     },
 };
 
-pub(crate) fn load_current_schema_version(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-) -> CatalogResult<Option<u64>> {
-    load_schema_version(kv, &current_schema_version_key(catalog))
-}
-
 pub(crate) fn load_catalog_snapshot_version(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
 ) -> CatalogResult<Option<u64>> {
-    load_schema_version(kv, &catalog_snapshot_version_key(catalog))
+    let key = catalog_snapshot_version_key(catalog);
+    crate::catalog_request_read_set::fetch_value(kv, catalog, &key)?
+        .map(|value| decode_schema_version(&key, &value))
+        .transpose()
 }
 
 pub(crate) fn load_schema_version_begin_snapshot(
@@ -42,6 +38,12 @@ pub(crate) fn load_schema_version_at(
     catalog: CatalogId,
     order: CatalogOrderId,
 ) -> CatalogResult<u64> {
+    let key = current_schema_version_key(catalog);
+    if let Some(Some(value)) =
+        crate::catalog_request_read_set::find_value_at(kv, catalog, order, &key)
+    {
+        return decode_schema_version(&key, &value);
+    }
     let prefix = schema_version_history_prefix(catalog);
     let end = schema_version_history_scan_end(catalog, order);
     let row = kv
@@ -56,45 +58,104 @@ pub(crate) fn load_schema_versions_at(
     catalog: CatalogId,
     orders: &BTreeSet<CatalogOrderId>,
 ) -> CatalogResult<BTreeMap<CatalogOrderId, u64>> {
-    let Some(first_order) = orders.first() else {
+    if orders.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    if orders.len() == 1 {
+        let order = *orders.first().expect("one requested order");
+        return Ok(BTreeMap::from([(
+            order,
+            load_schema_version_at(kv, catalog, order)?,
+        )]));
+    }
+    let ranges = schema_version_read_ranges(catalog, orders);
+    let rows = kv.read_set(&[], &ranges)?.ranges;
+    resolve_schema_version_reads(catalog, orders, rows)
+}
+
+pub(crate) fn schema_version_read_ranges(
+    catalog: CatalogId,
+    orders: &BTreeSet<CatalogOrderId>,
+) -> Vec<crate::kv::CatalogReadRange> {
+    let Some(first) = orders.first() else {
+        return Vec::new();
+    };
+    let boundary = schema_version_history_scan_end(catalog, *first);
+    let mut ranges = vec![crate::kv::CatalogReadRange {
+        start: schema_version_history_prefix(catalog),
+        end: boundary.clone(),
+        direction: RangeDirection::Reverse,
+        limit: 1,
+    }];
+    if let Some(last) = orders.last().filter(|last| *last != first) {
+        ranges.push(crate::kv::CatalogReadRange {
+            start: boundary,
+            end: schema_version_history_scan_end(catalog, *last),
+            direction: RangeDirection::Forward,
+            limit: usize::MAX,
+        });
+    }
+    ranges
+}
+
+pub(crate) fn resolve_schema_version_reads(
+    catalog: CatalogId,
+    orders: &BTreeSet<CatalogOrderId>,
+    mut ranges: Vec<Vec<crate::RangeItem>>,
+) -> CatalogResult<BTreeMap<CatalogOrderId, u64>> {
+    let Some(first) = orders.first() else {
         return Ok(BTreeMap::new());
     };
-    let last_order = orders.last().copied().unwrap_or(*first_order);
-    let prefix = schema_version_history_prefix(catalog);
-    let rows = kv.scan_range(
-        &prefix,
-        &schema_version_history_scan_end(catalog, last_order),
-        RangeDirection::Forward,
-        usize::MAX,
-    )?;
-    let mut history = Vec::with_capacity(rows.len());
-    for item in rows {
-        let tail = item.key.strip_prefix(prefix.as_slice()).ok_or_else(|| {
-            CatalogError::InvalidKey("schema version history key has wrong prefix".to_owned())
-        })?;
-        let order_bytes: [u8; CatalogOrderId::LEN] = tail.try_into().map_err(|_| {
-            CatalogError::InvalidKey("schema version history order has wrong length".to_owned())
-        })?;
-        history.push((
-            CatalogOrderId::from_bytes(first_order.kind(), order_bytes),
-            decode_schema_version(&item.key, &item.value)?,
+    if ranges.len() != usize::from(orders.len() > 1) + 1 {
+        return Err(CatalogError::Backend(
+            "schema version read set has wrong range count".to_owned(),
         ));
     }
-    let mut versions = BTreeMap::new();
-    let mut history = history.into_iter().peekable();
-    let mut current = 0;
-    for order in orders {
-        while history
-            .peek()
-            .is_some_and(|(change_order, _)| change_order <= order)
-        {
-            if let Some((_, version)) = history.next() {
-                current = version;
-            }
-        }
-        versions.insert(*order, current);
-    }
-    Ok(versions)
+    let prefix = schema_version_history_prefix(catalog);
+    let current = ranges[0]
+        .first()
+        .map_or(Ok(0), |item| decode_schema_version(&item.key, &item.value))?;
+    let rows = if ranges.len() > 1 {
+        ranges.pop().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    crate::runtime_metrics::record_runtime_measurement(
+        "schema_history.interval_rows",
+        rows.len() as u64,
+        0,
+    );
+    let history = rows
+        .into_iter()
+        .map(|item| decode_schema_history_row(item, &prefix, first.kind()))
+        .collect::<CatalogResult<Vec<_>>>()?;
+    Ok(orders
+        .iter()
+        .map(|order| {
+            let end = history.partition_point(|(change_order, _)| change_order <= order);
+            (
+                *order,
+                end.checked_sub(1).map_or(current, |index| history[index].1),
+            )
+        })
+        .collect())
+}
+
+fn decode_schema_history_row(
+    item: crate::RangeItem,
+    prefix: &[u8],
+    kind: crate::CatalogOrderKind,
+) -> CatalogResult<(CatalogOrderId, u64)> {
+    let tail = item.key.strip_prefix(prefix).ok_or_else(|| {
+        CatalogError::InvalidKey("schema version history key has wrong prefix".to_owned())
+    })?;
+    let order_bytes: [u8; CatalogOrderId::LEN] = tail.try_into().map_err(|_| {
+        CatalogError::InvalidKey("schema version history order has wrong length".to_owned())
+    })?;
+    Ok((
+        CatalogOrderId::from_bytes(kind, order_bytes),
+        decode_schema_version(&item.key, &item.value)?,
+    ))
 }
 
 pub(crate) fn stage_next_schema_version(
@@ -143,7 +204,7 @@ fn load_schema_version(
         .transpose()
 }
 
-fn decode_schema_version(key: &[u8], value: &[u8]) -> CatalogResult<u64> {
+pub(crate) fn decode_schema_version(key: &[u8], value: &[u8]) -> CatalogResult<u64> {
     let bytes: [u8; 8] = value.try_into().map_err(|_| {
         let key_label = crate::keys::decode_key(key).unwrap_or_else(|_| "<invalid-key>".to_owned());
         CatalogError::InvalidKey(format!(

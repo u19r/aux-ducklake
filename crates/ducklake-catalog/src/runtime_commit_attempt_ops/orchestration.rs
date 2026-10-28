@@ -1,17 +1,16 @@
 use std::collections::BTreeMap;
 
 #[cfg(feature = "runtime-metrics")]
-use crate::runtime_metrics::{
-    RuntimeMetricStatus, record_runtime_method_elapsed, record_runtime_request,
-};
+use crate::runtime_metrics::{RuntimeMetricStatus, record_runtime_request};
+use crate::runtime_trace::RuntimeSpan;
 use crate::{
     CatalogError, CatalogId, CatalogResult, TableId,
     runtime_commit_attempt_ops::*,
     runtime_compaction_ops::commit_compaction_intent,
     runtime_data_mutation_ops::commit_data_and_inline_mutation,
     runtime_inline_ops::{inline_delete_payload, inline_rows_payloads, register_inline_tables},
+    runtime_mutable_catalog::{RuntimeMutableCatalog, open_runtime_catalog},
     runtime_protocol::RuntimeCatalogBackend,
-    runtime_schema_change_ops::{RuntimeMutableCatalog, open_runtime_catalog},
 };
 pub(crate) fn commit_attempt(
     backend: RuntimeCatalogBackend,
@@ -19,19 +18,18 @@ pub(crate) fn commit_attempt(
     payload: &[u8],
     snapshot_fence: Option<crate::SnapshotFence>,
 ) -> CatalogResult<Vec<u8>> {
-    let started = RuntimeMetricStage::start();
+    let stage = RuntimeSpan::enter("method.runtime_commit_attempt.ParseIntent");
     let mut intent = commit_attempt_intent(payload)?;
     intent.snapshot_fence = snapshot_fence;
     intent.validate_snapshot_fence()?;
-    record_commit_attempt_stage("ParseIntent", started);
-    let started = RuntimeMetricStage::start();
+    stage.finish(true);
+    let stage = RuntimeSpan::enter("method.runtime_commit_attempt.OpenForMetadata");
     let mut kv = open_runtime_catalog(backend)?;
-    let current = current_catalog_state(&kv, catalog)?;
-    record_commit_attempt_stage("OpenForMetadata", started);
-    let started = RuntimeMetricStage::start();
+    let current = current_catalog_state(&kv, catalog, intent.recovery_attempt_id)?;
+    stage.finish(true);
+    let stage = RuntimeSpan::enter("method.runtime_commit_attempt.MetadataIntents");
     let metadata = commit_metadata_intents(&mut kv, catalog, &intent, &current)?;
-    record_commit_attempt_stage("MetadataIntents", started);
-    crate::store::invalidate_runtime_read_context(catalog);
+    stage.finish(true);
     let schema_version = current.final_schema_version(metadata.public_schema_changed);
     let table_id_remaps = metadata.table_id_remaps();
     #[cfg_attr(
@@ -42,15 +40,14 @@ pub(crate) fn commit_attempt(
         )
     )]
     drop(kv);
-    let started = RuntimeMetricStage::start();
+    let stage = RuntimeSpan::enter("method.runtime_commit_attempt.PrepareInlineIntents");
     let pending_inline = prepare_inline_intents(backend, catalog, &intent, &table_id_remaps)?;
-    record_commit_attempt_stage("PrepareInlineIntents", started);
-    let started = RuntimeMetricStage::start();
+    stage.finish(true);
+    let stage = RuntimeSpan::enter("method.runtime_commit_attempt.CompactionIntents");
     let compaction_output_bytes =
         commit_compaction_intents(backend, catalog, &intent, &table_id_remaps)?;
-    record_commit_attempt_stage("CompactionIntents", started);
-    crate::store::invalidate_runtime_read_context(catalog);
-    let started = RuntimeMetricStage::start();
+    stage.finish(true);
+    let stage = RuntimeSpan::enter("method.runtime_commit_attempt.DataMutationIntent");
     let (data_mutation_payload_bytes, inline_output_bytes) =
         if intent.data_mutation_payload.is_empty() {
             (
@@ -69,8 +66,7 @@ pub(crate) fn commit_attempt(
             .ok_or(CatalogError::NotFound("data mutation payload"))?;
             (payload.len(), inline_output_bytes)
         };
-    record_commit_attempt_stage("DataMutationIntent", started);
-    crate::store::invalidate_runtime_read_context(catalog);
+    stage.finish(true);
     let mut output = format!(
         concat!(
             "commit_attempt_intent=true\n",
@@ -97,27 +93,12 @@ pub(crate) fn commit_attempt(
     for table in metadata.created_tables {
         output.push_str(&format!(
             "created_table\t{}\t{}\t{}\t{}\n",
-            table.requested_table_id.0,
-            table.persisted.table_id.0,
-            table.persisted.schema_id.0,
-            table.persisted.name
+            table.requested_table_id.0, table.table_id.0, table.schema_id.0, table.name
         ));
     }
     record_commit_attempt_child_metrics(backend, &intent)?;
     Ok(output.into_bytes())
 }
-
-#[cfg(feature = "runtime-metrics")]
-pub(super) fn record_commit_attempt_stage(stage: &str, started: RuntimeMetricStage) {
-    record_runtime_method_elapsed(
-        &format!("method.runtime_commit_attempt.{stage}"),
-        started.elapsed_micros(),
-    );
-}
-
-#[cfg(not(feature = "runtime-metrics"))]
-#[inline]
-pub(super) fn record_commit_attempt_stage(_stage: &str, _started: RuntimeMetricStage) {}
 
 #[cfg(feature = "runtime-metrics")]
 pub(super) fn record_commit_attempt_child_metrics(
@@ -318,6 +299,6 @@ pub(super) fn commit_metadata_intents_with_kv(
     catalog: CatalogId,
     intent: &RuntimeCommitAttemptIntent,
 ) -> CatalogResult<CommitMetadataResult> {
-    let current = current_catalog_state(kv, catalog)?;
+    let current = current_catalog_state(kv, catalog, intent.recovery_attempt_id)?;
     commit_metadata_intents_with_current_kv(kv, catalog, intent, &current)
 }

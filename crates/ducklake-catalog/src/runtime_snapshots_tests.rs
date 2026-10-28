@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    use super::decode_test_text;
     use std::{
         cell::{Cell, RefCell},
         rc::Rc,
@@ -39,10 +40,10 @@ mod tests {
     };
 
     use super::super::{
-        ListSnapshotsPayload, SnapshotMetadataChangeIndex, SnapshotReadContext,
-        catalog_schema_change_orders, list_snapshots_payload, snapshot_by_ducklake_sequence,
-        snapshot_by_public_sequence, snapshot_changes_after_payload, snapshot_changes_made,
-        snapshot_schema_version, snapshot_schema_versions_by_order,
+        ListSnapshotsPayload, SchemaVersionSnapshotScope, SnapshotMetadataChangeIndex,
+        SnapshotReadContext, catalog_schema_change_orders, list_snapshots_payload,
+        snapshot_by_ducklake_sequence, snapshot_by_public_sequence, snapshot_changes_after_payload,
+        snapshot_changes_made, snapshot_schema_version, snapshot_schema_versions_by_order,
     };
 
     #[test]
@@ -55,6 +56,37 @@ mod tests {
         let cloned = context.clone();
 
         assert!(context.shares_loaded_facts_with(&cloned));
+    }
+
+    #[test]
+    fn given_large_public_order_map_when_cloning_then_answers_remain_equal() {
+        let catalog = CatalogId(1);
+        let mut kv = FakeOrderedCatalogKv::new();
+        let mut batch = KvBatch::new();
+        for value in 1..=5_000_u128 {
+            stage_snapshot(
+                &mut batch,
+                catalog,
+                &SnapshotRow::new(
+                    CatalogOrderId::uuid_v7(value),
+                    RawSnapshotSequence(value as u64),
+                ),
+            );
+        }
+        kv.commit(batch).unwrap();
+        let context = SnapshotReadContext::for_current_catalog(&kv, catalog).unwrap();
+        let sequences = context.sequences_by_order();
+        assert_eq!(sequences.as_ref().len(), 5_000);
+        let started = std::time::Instant::now();
+        for _ in 0..100 {
+            let cloned = sequences.clone();
+            assert_eq!(cloned.as_ref().len(), 5_000);
+            std::hint::black_box(cloned);
+        }
+        eprintln!("public-order-map 100 clones {:?}", started.elapsed());
+        let cloned = sequences.clone();
+        assert_eq!(sequences.as_ref(), cloned.as_ref());
+        assert!(std::ptr::eq(sequences.as_ref(), cloned.as_ref()));
     }
 
     #[test]
@@ -186,7 +218,28 @@ mod tests {
         )
         .unwrap();
 
-        let indexed = snapshot_schema_versions_by_order(&kv, catalog).unwrap();
+        let allocations = alloc_counter::AllocationGuard::start(
+            module_path!(),
+            "snapshot_schema_map",
+            file!(),
+            line!(),
+            Some("hundred_lookups"),
+        );
+        for _ in 0..100 {
+            let versions =
+                snapshot_schema_versions_by_order(&kv, catalog, SchemaVersionSnapshotScope::All)
+                    .unwrap();
+            assert!(versions.get(&table.validity.begin_order).is_some());
+            std::hint::black_box(versions);
+        }
+        let allocations = allocations.finish();
+        eprintln!(
+            "snapshot_map_allocations={} bytes={}",
+            allocations.allocation_count, allocations.allocated_bytes
+        );
+        let indexed =
+            snapshot_schema_versions_by_order(&kv, catalog, SchemaVersionSnapshotScope::All)
+                .unwrap();
         for snapshot in [schema[0].validity.begin_order, table.validity.begin_order] {
             assert_eq!(
                 indexed.get(&snapshot).copied(),
@@ -198,6 +251,98 @@ mod tests {
             indexed.get(&latest.order).copied(),
             Some(snapshot_schema_version(&kv, catalog, latest.order).unwrap())
         );
+    }
+
+    #[test]
+    fn given_cached_active_schema_orders_when_context_ends_then_expiry_is_visible_on_reuse() {
+        let catalog = CatalogId(1);
+        let mut inner = FakeOrderedCatalogKv::new();
+        initialize_catalog_if_absent(&mut inner, catalog).unwrap();
+        let created = commit_create_table_row(
+            &mut inner,
+            catalog,
+            TableRow::new(TableId(10), "orders", CatalogOrderId::uuid_v7(0)),
+        )
+        .unwrap();
+        let original = latest_snapshot(&inner, catalog).unwrap().unwrap();
+        commit_append_table_columns(
+            &mut inner,
+            catalog,
+            TableId(10),
+            vec![TableColumnRow::new(
+                ColumnId(2),
+                "added",
+                "INTEGER",
+                true,
+                None,
+            )],
+        )
+        .unwrap();
+        let mut kv = SnapshotTimestampScanRecordingKv::new(inner, catalog);
+        let guard = crate::store::begin_runtime_read_request(Some(42));
+        let raw = snapshot_schema_versions_by_order(&kv, catalog, SchemaVersionSnapshotScope::All)
+            .unwrap();
+        let active =
+            snapshot_schema_versions_by_order(&kv, catalog, SchemaVersionSnapshotScope::Active)
+                .unwrap();
+        let repeated =
+            snapshot_schema_versions_by_order(&kv, catalog, SchemaVersionSnapshotScope::Active)
+                .unwrap();
+        assert!(std::ptr::eq(active.as_ref(), repeated.as_ref()));
+        assert_eq!(kv.snapshot_timestamp_scan_count(), 1);
+        assert_eq!(active.get(&created.validity.begin_order), Some(&1));
+        expire_snapshots(&mut kv.inner, catalog, &[original.sequence]).unwrap();
+        super::super::end_snapshot_schema_read_context(kv.catalog_cache_namespace(), catalog, 42);
+        drop(guard);
+        let _guard = crate::store::begin_runtime_read_request(Some(42));
+        let refreshed =
+            snapshot_schema_versions_by_order(&kv, catalog, SchemaVersionSnapshotScope::Active)
+                .unwrap();
+        assert_eq!(refreshed.get(&created.validity.begin_order), None);
+        assert_eq!(kv.snapshot_timestamp_scan_count(), 2);
+        let raw_again =
+            snapshot_schema_versions_by_order(&kv, catalog, SchemaVersionSnapshotScope::All)
+                .unwrap();
+        assert!(std::ptr::eq(raw.as_ref(), raw_again.as_ref()));
+        assert_eq!(raw_again.get(&created.validity.begin_order), Some(&1));
+    }
+
+    #[test]
+    fn given_expired_snapshot_when_indexing_schema_versions_then_active_and_raw_scopes_stay_separate()
+     {
+        let catalog = CatalogId(1);
+        let mut kv = FakeOrderedCatalogKv::new();
+        initialize_catalog_if_absent(&mut kv, catalog).unwrap();
+        let created = commit_create_table_row(
+            &mut kv,
+            catalog,
+            TableRow::new(TableId(10), "orders", CatalogOrderId::uuid_v7(0)),
+        )
+        .unwrap();
+        let original = latest_snapshot(&kv, catalog).unwrap().unwrap();
+        commit_append_table_columns(
+            &mut kv,
+            catalog,
+            TableId(10),
+            vec![TableColumnRow::new(
+                ColumnId(2),
+                "added",
+                "INTEGER",
+                true,
+                None,
+            )],
+        )
+        .unwrap();
+        expire_snapshots(&mut kv, catalog, &[original.sequence]).unwrap();
+        let raw = snapshot_schema_versions_by_order(&kv, catalog, SchemaVersionSnapshotScope::All)
+            .unwrap();
+        let active =
+            snapshot_schema_versions_by_order(&kv, catalog, SchemaVersionSnapshotScope::Active)
+                .unwrap();
+        assert_eq!(raw.get(&created.validity.begin_order), Some(&1));
+        assert_eq!(active.get(&created.validity.begin_order), None);
+        let latest = latest_snapshot(&kv, catalog).unwrap().unwrap();
+        assert_eq!(active.get(&latest.order), Some(&2));
     }
 
     #[test]
@@ -543,7 +688,7 @@ mod tests {
         )
         .unwrap();
 
-        let payload = String::from_utf8(
+        let payload = decode_test_text(
             list_snapshots_payload(
                 &kv,
                 catalog,
@@ -603,7 +748,7 @@ mod tests {
         );
         kv.commit(batch).unwrap();
 
-        let payload = String::from_utf8(
+        let payload = decode_test_text(
             list_snapshots_payload(
                 &kv,
                 catalog,
@@ -653,7 +798,7 @@ mod tests {
         )
         .unwrap();
 
-        let payload = String::from_utf8(
+        let payload = decode_test_text(
             list_snapshots_payload(
                 &kv,
                 catalog,
@@ -696,7 +841,7 @@ mod tests {
         )
         .unwrap();
 
-        let payload = String::from_utf8(
+        let payload = decode_test_text(
             snapshot_changes_after_payload(&kv, catalog, DuckLakeSnapshotId(0)).unwrap(),
         )
         .unwrap();
@@ -726,7 +871,7 @@ mod tests {
         kv.commit(batch).unwrap();
         expire_snapshots(&mut kv, catalog, &[RawSnapshotSequence(3)]).unwrap();
 
-        let payload = String::from_utf8(
+        let payload = decode_test_text(
             list_snapshots_payload(
                 &kv,
                 catalog,
@@ -775,7 +920,7 @@ mod tests {
         let payload =
             public_snapshot_payload(&kv, catalog, DuckLakeSnapshotId(expired.sequence.0)).unwrap();
         assert_eq!(
-            String::from_utf8(payload).unwrap(),
+            decode_test_text(payload).unwrap(),
             "catalog_snapshot_exists=false\n"
         );
         assert!(
@@ -795,7 +940,7 @@ mod tests {
         stage_data_snapshot(&mut kv, catalog, 30, 2, DataFileId(20), TableId(10));
         stage_data_snapshot(&mut kv, catalog, 40, 3, DataFileId(21), TableId(10));
 
-        let payload = String::from_utf8(
+        let payload = decode_test_text(
             list_snapshots_payload(
                 &kv,
                 catalog,
@@ -836,7 +981,7 @@ mod tests {
         )
         .unwrap();
         let current = latest_snapshot(&kv, catalog).unwrap().unwrap();
-        let payload = String::from_utf8(conflict_snapshot_payload(&kv, catalog).unwrap()).unwrap();
+        let payload = decode_test_text(conflict_snapshot_payload(&kv, catalog).unwrap()).unwrap();
 
         assert_eq!(current.sequence, RawSnapshotSequence(3));
         assert!(payload.contains("ducklake_schema_version=1\n"), "{payload}");
@@ -882,7 +1027,7 @@ mod tests {
         let latest = latest_snapshot(&kv, catalog).unwrap().unwrap();
         expire_snapshots(&mut kv, catalog, &[add_column.sequence]).unwrap();
 
-        let payload = String::from_utf8(
+        let payload = decode_test_text(
             list_snapshots_payload(
                 &kv,
                 catalog,
@@ -929,7 +1074,7 @@ mod tests {
         )
         .unwrap();
 
-        let payload = String::from_utf8(conflict_snapshot_payload(&kv, catalog).unwrap()).unwrap();
+        let payload = decode_test_text(conflict_snapshot_payload(&kv, catalog).unwrap()).unwrap();
 
         assert!(payload.contains("ducklake_snapshot_id=2\n"));
         assert!(payload.contains("ducklake_schema_version=2\n"));
@@ -976,7 +1121,7 @@ mod tests {
             )],
         )
         .unwrap();
-        let payload = String::from_utf8(conflict_snapshot_payload(&kv, catalog).unwrap()).unwrap();
+        let payload = decode_test_text(conflict_snapshot_payload(&kv, catalog).unwrap()).unwrap();
 
         assert!(payload.contains("ducklake_snapshot_id=3\n"));
         assert!(payload.contains("ducklake_schema_version=2\n"));
@@ -1005,7 +1150,7 @@ mod tests {
         table.path = "s1/orders".to_owned();
         commit_create_table_row(&mut kv, catalog, table).unwrap();
 
-        let payload = String::from_utf8(
+        let payload = decode_test_text(
             list_snapshots_payload(
                 &kv,
                 catalog,
@@ -1036,7 +1181,7 @@ mod tests {
         stage_table_snapshot_in_schema(&mut kv, catalog, 20, table_id, SchemaId(1), "orders", 1);
         stage_data_snapshot(&mut kv, catalog, 30, 1, DataFileId(20), table_id);
 
-        let payload = String::from_utf8(
+        let payload = decode_test_text(
             list_snapshots_payload(
                 &kv,
                 catalog,
@@ -1067,7 +1212,7 @@ mod tests {
         stage_table_snapshot_in_schema(&mut kv, catalog, 20, table_id, SchemaId(1), "orders", 1);
         stage_inline_insert_snapshot(&mut kv, catalog, 30, 1, table_id, SchemaId(1));
 
-        let payload = String::from_utf8(
+        let payload = decode_test_text(
             list_snapshots_payload(
                 &kv,
                 catalog,
@@ -1111,7 +1256,7 @@ mod tests {
             },
         );
 
-        let payload = String::from_utf8(
+        let payload = decode_test_text(
             list_snapshots_payload(
                 &kv,
                 catalog,
@@ -1224,9 +1369,22 @@ mod tests {
         assert_eq!(resolved.order, CatalogOrderId::uuid_v7(20));
         assert_eq!(
             kv.snapshot_timestamp_scan_count(),
-            1,
-            "historical DuckLake snapshots fall back to the canonical snapshot context in tests"
+            0,
+            "maintained DuckLake rows resolve without scanning snapshot history"
         );
+        let mut inner = kv.inner;
+        let mut batch = KvBatch::new();
+        batch.delete(crate::keys::raw_snapshot_row_key(
+            catalog,
+            crate::RawSnapshotSequence(1),
+        ));
+        inner.commit(batch).unwrap();
+        let legacy = SnapshotTimestampScanRecordingKv::new(inner, catalog);
+        let resolved = snapshot_by_ducklake_sequence(&legacy, catalog, DuckLakeSnapshotId(1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.order, CatalogOrderId::uuid_v7(20));
+        assert_eq!(legacy.snapshot_timestamp_scan_count(), 1);
     }
 
     #[test]
@@ -1330,6 +1488,23 @@ mod tests {
         assert_eq!(append_public.order, file.validity.begin_order);
         assert_eq!(delete_public.order, delete_snapshot.order);
         assert_ne!(append_public.order, delete_public.order);
+        let orders = [append_public.order, delete_public.order]
+            .into_iter()
+            .collect();
+        let sequences = crate::inline_data_snapshot_sequences::active_data_snapshot_sequences(
+            &kv, catalog, &orders,
+        )
+        .unwrap();
+        assert_eq!(sequences[&append_public.order], 2);
+        assert_eq!(sequences[&delete_public.order], 3);
+
+        expire_snapshots(&mut kv, catalog, &[RawSnapshotSequence(2)]).unwrap();
+        let sequences = crate::inline_data_snapshot_sequences::active_data_snapshot_sequences(
+            &kv, catalog, &orders,
+        )
+        .unwrap();
+        assert!(!sequences.contains_key(&append_public.order));
+        assert_eq!(sequences[&delete_public.order], 3);
     }
 
     #[test]
@@ -1365,7 +1540,7 @@ mod tests {
         )
         .unwrap();
 
-        let payload = String::from_utf8(
+        let payload = decode_test_text(
             list_snapshots_payload(
                 &kv,
                 catalog,
@@ -1392,7 +1567,7 @@ mod tests {
         stage_table_snapshot(&mut kv, catalog, 10, table_id, "orders", 1);
         stage_delete_file_snapshot(&mut kv, catalog, 20, 2, DeleteFileId(5), table_id);
 
-        let payload = String::from_utf8(
+        let payload = decode_test_text(
             list_snapshots_payload(
                 &kv,
                 catalog,
@@ -1431,7 +1606,7 @@ mod tests {
         inner.commit(watermarks).unwrap();
         let kv = SnapshotRenderReadRecordingKv::new(inner, catalog);
 
-        let payload = String::from_utf8(
+        let payload = decode_test_text(
             list_snapshots_payload(
                 &kv,
                 catalog,
@@ -1662,6 +1837,12 @@ mod tests {
     }
 
     impl OrderedCatalogKv for SnapshotTimestampScanRecordingKv {
+        fn catalog_cache_namespace(&self) -> crate::CatalogCacheNamespace {
+            self.inner
+                .catalog_cache_namespace()
+                .with_read_context(crate::store::active_runtime_read_context_id())
+        }
+
         fn get(&self, key: &[u8]) -> crate::CatalogResult<Option<Vec<u8>>> {
             OrderedCatalogKv::get(&self.inner, key)
         }
@@ -1951,4 +2132,8 @@ mod tests {
                 None
             })
     }
+}
+
+fn decode_test_text(payload: impl AsRef<[u8]>) -> Result<String, std::str::Utf8Error> {
+    std::str::from_utf8(payload.as_ref()).map(str::to_owned)
 }

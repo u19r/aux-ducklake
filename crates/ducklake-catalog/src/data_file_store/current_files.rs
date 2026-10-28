@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use crate::bounded_cache::{BoundedCache, static_bounded_cache};
 use crate::data_file_store::*;
@@ -20,7 +20,7 @@ pub fn list_current_data_files(
 ) -> CatalogResult<Vec<DataFileRow>> {
     if crate::store::runtime_read_context_enabled() {
         return TableCurrentDataFilesContext::for_table(kv, catalog, table_id)
-            .map(|context| context.rows);
+            .map(|context| Arc::unwrap_or_clone(context.rows));
     }
     let started = RuntimeMetricStage::start();
     let rows = scan_current_data_files(kv, catalog, table_id)?;
@@ -45,12 +45,12 @@ pub(super) fn list_current_data_files_for_mutation_validation(
             ),
             None => TableCurrentDataFilesContext::for_table(kv, catalog, table_id),
         }
-        .map(|context| context.rows);
+        .map(|context| Arc::unwrap_or_clone(context.rows));
     }
     scan_current_data_files(kv, catalog, table_id)
 }
 
-pub(super) fn scan_current_data_files(
+pub(crate) fn scan_current_data_files(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
     table_id: TableId,
@@ -71,7 +71,7 @@ pub(super) fn scan_current_data_files(
 
 #[derive(Clone)]
 pub(super) struct TableCurrentDataFilesContext {
-    pub(super) rows: Vec<DataFileRow>,
+    pub(super) rows: Arc<Vec<DataFileRow>>,
 }
 
 impl TableCurrentDataFilesContext {
@@ -81,7 +81,9 @@ impl TableCurrentDataFilesContext {
         table_id: TableId,
     ) -> CatalogResult<Self> {
         let Some(latest) = latest_snapshot(kv, catalog)? else {
-            return Ok(Self { rows: Vec::new() });
+            return Ok(Self {
+                rows: Arc::default(),
+            });
         };
         Self::for_table_at_order(kv, catalog, table_id, latest.order)
     }
@@ -103,7 +105,7 @@ impl TableCurrentDataFilesContext {
             return Ok(context);
         }
         let context = Self {
-            rows: scan_current_data_files(kv, catalog, table_id)?,
+            rows: Arc::new(scan_current_data_files(kv, catalog, table_id)?),
         };
         cache.insert(key, context.clone());
         Ok(context)
@@ -251,7 +253,7 @@ pub(super) fn list_data_files_at_uncached(
 
 #[derive(Clone)]
 pub(super) struct TableDataFilesAtContext {
-    visible_rows: Vec<DataFileRow>,
+    visible_rows: Arc<Vec<DataFileRow>>,
 }
 
 impl TableDataFilesAtContext {
@@ -311,12 +313,12 @@ impl TableDataFilesAtContext {
             }
         }
         Ok(Self {
-            visible_rows: without_backfilled_source_duplicates(kv, catalog, rows)?,
+            visible_rows: Arc::new(without_backfilled_source_duplicates(kv, catalog, rows)?),
         })
     }
 
-    pub(super) fn visible_rows(&self) -> Vec<DataFileRow> {
-        self.visible_rows.clone()
+    pub(super) fn visible_rows(self) -> Vec<DataFileRow> {
+        Arc::unwrap_or_clone(self.visible_rows)
     }
 }
 

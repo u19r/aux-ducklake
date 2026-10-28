@@ -1,3 +1,4 @@
+use crate::runtime_protocol::RuntimePayload;
 use crate::{
     CatalogId, CatalogResult, DataFileChangeKind, DataFileId, OrderedCatalogKv, PartitionKeyIndex,
     TableId,
@@ -28,7 +29,7 @@ pub(crate) fn list_data_files_at(
     _backend: RuntimeCatalogBackend,
     catalog: CatalogId,
     payload: &[u8],
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     let payload = list_data_files_at_payload_values(payload)?;
     runtime_list_foundationdb_data_files_at(catalog, payload)
 }
@@ -37,7 +38,7 @@ pub(crate) fn list_current_partition_files(
     _backend: RuntimeCatalogBackend,
     catalog: CatalogId,
     payload: &[u8],
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     let payload = current_partition_files_payload_values(payload)?;
     runtime_list_foundationdb_current_partition_files(catalog, payload)
 }
@@ -46,7 +47,7 @@ pub(crate) fn list_current_partition_files_batch(
     _backend: RuntimeCatalogBackend,
     catalog: CatalogId,
     payload: &[u8],
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     let payload = current_partition_files_batch_payload_values(payload)?;
     runtime_list_foundationdb_current_partition_files_batch(catalog, payload)
 }
@@ -55,7 +56,7 @@ pub(crate) fn list_current_partition_prune_files(
     _backend: RuntimeCatalogBackend,
     catalog: CatalogId,
     payload: &[u8],
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     let payload = current_partition_prune_files_payload_values(payload)?;
     runtime_list_foundationdb_current_partition_prune_files(catalog, payload)
 }
@@ -64,7 +65,7 @@ pub(crate) fn list_partition_files_at(
     _backend: RuntimeCatalogBackend,
     catalog: CatalogId,
     payload: &[u8],
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     let payload = partition_files_at_payload_values(payload)?;
     runtime_list_foundationdb_partition_files_at(catalog, payload)
 }
@@ -73,7 +74,7 @@ pub(crate) fn list_partition_files_at_batch(
     _backend: RuntimeCatalogBackend,
     catalog: CatalogId,
     payload: &[u8],
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     let payload = partition_files_at_batch_payload_values(payload)?;
     runtime_list_foundationdb_partition_files_at_batch(catalog, payload)
 }
@@ -82,7 +83,7 @@ pub(crate) fn list_partition_prune_files_at(
     _backend: RuntimeCatalogBackend,
     catalog: CatalogId,
     payload: &[u8],
-) -> CatalogResult<Vec<u8>> {
+) -> CatalogResult<RuntimePayload> {
     let payload = partition_prune_files_at_payload_values(payload)?;
     runtime_list_foundationdb_partition_prune_files_at(catalog, payload)
 }

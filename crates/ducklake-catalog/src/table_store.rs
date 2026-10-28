@@ -345,21 +345,39 @@ pub(crate) fn load_current_table_rows(
         .iter()
         .map(|table_id| current_table_row_key(catalog, *table_id))
         .collect::<Vec<_>>();
+    let ids = table_ids.iter().copied().collect::<Vec<_>>();
+    decode_current_table_rows(&ids, kv.batch_get(&keys)?)
+}
+
+pub(crate) fn decode_current_table_rows(
+    table_ids: &[TableId],
+    values: Vec<Option<Vec<u8>>>,
+) -> CatalogResult<Vec<TableRow>> {
+    if values.len() != table_ids.len() {
+        return Err(CatalogError::Backend(
+            "current table batch has wrong key count".to_owned(),
+        ));
+    }
     let mut rows = Vec::with_capacity(table_ids.len());
-    for (table_id, value) in table_ids.iter().zip(kv.batch_get(&keys)?) {
+    for (table_id, value) in table_ids.iter().zip(values) {
         let Some(value) = value else {
             continue;
         };
-        let row = TableRow::decode(&value)?;
-        if row.table_id != *table_id {
-            return Err(CatalogError::Decode(format!(
-                "current table key {} decoded as table {}",
-                table_id.0, row.table_id.0
-            )));
-        }
+        let row = decode_current_table_row(*table_id, &value)?;
         rows.push(row);
     }
     Ok(rows)
+}
+
+pub(crate) fn decode_current_table_row(table_id: TableId, value: &[u8]) -> CatalogResult<TableRow> {
+    let row = TableRow::decode(value)?;
+    if row.table_id != table_id {
+        return Err(CatalogError::Decode(format!(
+            "current table key {} decoded as table {}",
+            table_id.0, row.table_id.0
+        )));
+    }
+    Ok(row)
 }
 
 fn reject_duplicate_renames(renames: &[TableRename]) -> CatalogResult<()> {
@@ -530,7 +548,7 @@ pub(crate) fn list_current_table_rows(
     list_current_table_rows_uncached(kv, catalog)
 }
 
-fn list_current_table_rows_uncached(
+pub(crate) fn list_current_table_rows_uncached(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
 ) -> CatalogResult<Vec<TableRow>> {
@@ -711,7 +729,7 @@ pub(crate) fn stage_remove_current_table_row(
     batch.delete(current_table_row_key(catalog, table_id));
 }
 
-fn list_table_rows_uncached(
+pub(crate) fn list_table_rows_uncached(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
 ) -> CatalogResult<Vec<TableRow>> {

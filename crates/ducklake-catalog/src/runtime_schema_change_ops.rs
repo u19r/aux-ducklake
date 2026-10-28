@@ -2,10 +2,9 @@ use std::collections::BTreeMap;
 
 use crate::{
     CatalogError, CatalogId, CatalogOrderId, CatalogResult, ColumnDefaultChange, ColumnRename,
-    ColumnTypeChange, DuckLakeSnapshotId, KvBatch, MutableCatalogKv, OrderedCatalogKv,
-    RangeDirection, RangeItem, RawSnapshotSequence, TableColumnRow, TableId,
-    TableVersionReplacement, commit_append_table_columns_with_conflict_check,
-    commit_change_table_column_defaults, commit_change_table_column_defaults_with_conflict_check,
+    ColumnTypeChange, DuckLakeSnapshotId, OrderedCatalogKv, TableColumnRow, TableId,
+    commit_append_table_columns_with_conflict_check, commit_change_table_column_defaults,
+    commit_change_table_column_defaults_with_conflict_check,
     commit_change_table_column_types_with_conflict_check,
     commit_change_table_comments_with_conflict_check,
     commit_change_table_partition_with_conflict_check,
@@ -13,6 +12,7 @@ use crate::{
     commit_rename_table_columns, commit_rename_table_columns_with_conflict_check,
     commit_rename_tables_with_conflict_check, latest_snapshot,
     normalize_column_renames_to_current_shape,
+    runtime_mutable_catalog::open_runtime_catalog,
     runtime_protocol::RuntimeCatalogBackend,
     runtime_schema_change_payload::{
         ADD_COLUMNS, CHANGE_COLUMN_DEFAULTS, CHANGE_COLUMN_TYPES, CHANGE_COMMENTS,
@@ -24,16 +24,13 @@ use crate::{
     table_store::load_current_table_row,
 };
 
-#[cfg(feature = "foundationdb")]
-use crate::FdbOrderedCatalogKv;
-
 pub(crate) fn add_columns(
     backend: RuntimeCatalogBackend,
     catalog: CatalogId,
     payload: &[u8],
 ) -> CatalogResult<Vec<u8>> {
     let ddl = DdlPayload::parse(ADD_COLUMNS, payload)?;
-    let columns = parse_column_rows(ADD_COLUMNS, &ddl.rows)?;
+    let columns = parse_column_rows(ADD_COLUMNS, ddl.rows(), |id, column| (id, column))?;
     let Some(table_id) = one_column_table(ADD_COLUMNS, &columns)? else {
         return Ok(b"added_column_count=0\n".to_vec());
     };
@@ -67,10 +64,7 @@ pub(crate) fn rename_columns(
     payload: &[u8],
 ) -> CatalogResult<Vec<u8>> {
     let ddl = DdlPayload::parse(RENAME_COLUMNS, payload)?;
-    let renames = parse_column_rows(RENAME_COLUMNS, &ddl.rows)?
-        .into_iter()
-        .map(|(table_id, column)| ColumnRename::new(table_id, column))
-        .collect::<Vec<_>>();
+    let renames = parse_column_rows(RENAME_COLUMNS, ddl.rows(), ColumnRename::new)?;
     let count = renames.len();
     if renames.is_empty() {
         return Ok(b"renamed_column_count=0\n".to_vec());
@@ -88,10 +82,7 @@ pub(crate) fn change_column_types(
     payload: &[u8],
 ) -> CatalogResult<Vec<u8>> {
     let ddl = DdlPayload::parse(CHANGE_COLUMN_TYPES, payload)?;
-    let changes = parse_column_rows(CHANGE_COLUMN_TYPES, &ddl.rows)?
-        .into_iter()
-        .map(|(table_id, column)| ColumnTypeChange::new(table_id, column))
-        .collect::<Vec<_>>();
+    let changes = parse_column_rows(CHANGE_COLUMN_TYPES, ddl.rows(), ColumnTypeChange::new)?;
     let count = changes.len();
     if changes.is_empty() {
         return Ok(b"changed_column_type_count=0\n".to_vec());
@@ -110,10 +101,7 @@ pub(crate) fn change_column_defaults(
     payload: &[u8],
 ) -> CatalogResult<Vec<u8>> {
     let ddl = DdlPayload::parse(CHANGE_COLUMN_DEFAULTS, payload)?;
-    let changes = parse_column_rows(CHANGE_COLUMN_DEFAULTS, &ddl.rows)?
-        .into_iter()
-        .map(|(table_id, column)| ColumnDefaultChange::new(table_id, column))
-        .collect::<Vec<_>>();
+    let changes = parse_column_rows(CHANGE_COLUMN_DEFAULTS, ddl.rows(), ColumnDefaultChange::new)?;
     let count = changes.len();
     if changes.is_empty() {
         return Ok(b"changed_column_default_count=0\n".to_vec());
@@ -132,7 +120,7 @@ pub(crate) fn drop_columns(
     payload: &[u8],
 ) -> CatalogResult<Vec<u8>> {
     let ddl = DdlPayload::parse(DROP_COLUMNS, payload)?;
-    let drops = parse_column_drops(&ddl.rows)?;
+    let drops = parse_column_drops(ddl.rows())?;
     let count = drops.len();
     if drops.is_empty() {
         return Ok(b"dropped_column_count=0\n".to_vec());
@@ -149,7 +137,7 @@ pub(crate) fn rename_tables(
     payload: &[u8],
 ) -> CatalogResult<Vec<u8>> {
     let ddl = DdlPayload::parse(RENAME_TABLES, payload)?;
-    let renames = parse_table_renames(&ddl.rows)?;
+    let renames = parse_table_renames(ddl.rows())?;
     let count = renames.len();
     if renames.is_empty() {
         return Ok(b"renamed_table_count=0\n".to_vec());
@@ -169,7 +157,7 @@ pub(crate) fn change_partition_keys(
     let mut kv = open_runtime_catalog(backend)?;
     let (base, through) = load_ddl_orders(&kv, catalog, &ddl)?;
     let mut changed_count = 0;
-    for change in parse_partition_changes(&ddl.rows)? {
+    for change in parse_partition_changes(ddl.rows())? {
         let changed = commit_change_table_partition_with_conflict_check(
             &mut kv,
             catalog,
@@ -189,7 +177,7 @@ pub(crate) fn change_sort_keys(
     payload: &[u8],
 ) -> CatalogResult<Vec<u8>> {
     let ddl = DdlPayload::parse(CHANGE_SORT_KEYS, payload)?;
-    let change = parse_sort_change(&ddl.rows)?;
+    let change = parse_sort_change(ddl.rows())?;
     let mut kv = open_runtime_catalog(backend)?;
     let (base, through) = load_ddl_orders(&kv, catalog, &ddl)?;
     let changed =
@@ -203,7 +191,7 @@ pub(crate) fn change_comments(
     payload: &[u8],
 ) -> CatalogResult<Vec<u8>> {
     let ddl = DdlPayload::parse(CHANGE_COMMENTS, payload)?;
-    let (table_comments, column_comments) = parse_comment_changes(&ddl.rows)?;
+    let (table_comments, column_comments) = parse_comment_changes(ddl.rows())?;
     let table_count = table_comments.len();
     let column_count = column_comments.len();
     let mut kv = open_runtime_catalog(backend)?;
@@ -221,147 +209,6 @@ pub(crate) fn change_comments(
         changed.map_or(0, |changed| changed.table_id.0)
     )
     .into_bytes())
-}
-
-pub(crate) enum RuntimeMutableCatalog {
-    #[cfg(feature = "foundationdb")]
-    FoundationDb(FdbOrderedCatalogKv),
-    #[cfg(not(feature = "foundationdb"))]
-    Unavailable,
-}
-
-impl OrderedCatalogKv for RuntimeMutableCatalog {
-    fn catalog_cache_namespace(&self) -> crate::CatalogCacheNamespace {
-        match self {
-            #[cfg(feature = "foundationdb")]
-            Self::FoundationDb(kv) => kv.catalog_cache_namespace(),
-            #[cfg(not(feature = "foundationdb"))]
-            Self::Unavailable => {
-                crate::CatalogCacheNamespace::process_local(self as *const Self as usize)
-            }
-        }
-    }
-
-    fn get(&self, key: &[u8]) -> CatalogResult<Option<Vec<u8>>> {
-        #[cfg(not(feature = "foundationdb"))]
-        let _ = key;
-        match self {
-            #[cfg(feature = "foundationdb")]
-            Self::FoundationDb(kv) => kv.get(key),
-            #[cfg(not(feature = "foundationdb"))]
-            Self::Unavailable => Err(foundationdb_runtime_unavailable()),
-        }
-    }
-
-    fn scan_prefix(
-        &self,
-        prefix: &[u8],
-        direction: RangeDirection,
-        limit: usize,
-    ) -> CatalogResult<Vec<RangeItem>> {
-        #[cfg(not(feature = "foundationdb"))]
-        let _ = (prefix, direction, limit);
-        match self {
-            #[cfg(feature = "foundationdb")]
-            Self::FoundationDb(kv) => kv.scan_prefix(prefix, direction, limit),
-            #[cfg(not(feature = "foundationdb"))]
-            Self::Unavailable => Err(foundationdb_runtime_unavailable()),
-        }
-    }
-
-    fn scan_range(
-        &self,
-        start: &[u8],
-        end: &[u8],
-        direction: RangeDirection,
-        limit: usize,
-    ) -> CatalogResult<Vec<RangeItem>> {
-        #[cfg(not(feature = "foundationdb"))]
-        let _ = (start, end, direction, limit);
-        match self {
-            #[cfg(feature = "foundationdb")]
-            Self::FoundationDb(kv) => kv.scan_range(start, end, direction, limit),
-            #[cfg(not(feature = "foundationdb"))]
-            Self::Unavailable => Err(foundationdb_runtime_unavailable()),
-        }
-    }
-
-    fn read_conflict_fence(&self, key: &[u8]) -> CatalogResult<Option<Vec<u8>>> {
-        #[cfg(not(feature = "foundationdb"))]
-        let _ = key;
-        match self {
-            #[cfg(feature = "foundationdb")]
-            Self::FoundationDb(kv) => kv.read_conflict_fence(key),
-            #[cfg(not(feature = "foundationdb"))]
-            Self::Unavailable => Err(foundationdb_runtime_unavailable()),
-        }
-    }
-}
-
-impl MutableCatalogKv for RuntimeMutableCatalog {
-    fn generated_order_id(&mut self) -> CatalogResult<CatalogOrderId> {
-        match self {
-            #[cfg(feature = "foundationdb")]
-            Self::FoundationDb(kv) => kv.generated_order_id(),
-            #[cfg(not(feature = "foundationdb"))]
-            Self::Unavailable => Err(foundationdb_runtime_unavailable()),
-        }
-    }
-
-    fn commit(&mut self, batch: KvBatch) -> CatalogResult<()> {
-        #[cfg(not(feature = "foundationdb"))]
-        let _ = batch;
-        match self {
-            #[cfg(feature = "foundationdb")]
-            Self::FoundationDb(kv) => kv.commit(batch),
-            #[cfg(not(feature = "foundationdb"))]
-            Self::Unavailable => Err(foundationdb_runtime_unavailable()),
-        }
-    }
-
-    fn commit_table_replacements(
-        &mut self,
-        catalog: CatalogId,
-        previous_sequence: RawSnapshotSequence,
-        replacements: Vec<TableVersionReplacement>,
-    ) -> CatalogResult<()> {
-        #[cfg(not(feature = "foundationdb"))]
-        let _ = (catalog, previous_sequence, replacements);
-        match self {
-            #[cfg(feature = "foundationdb")]
-            Self::FoundationDb(kv) => {
-                kv.commit_table_replacements(catalog, previous_sequence, replacements)
-            }
-            #[cfg(not(feature = "foundationdb"))]
-            Self::Unavailable => Err(foundationdb_runtime_unavailable()),
-        }
-    }
-}
-
-#[cfg(not(feature = "foundationdb"))]
-fn foundationdb_runtime_unavailable() -> CatalogError {
-    CatalogError::Backend(
-        "foundationdb runtime requires ducklake-catalog --features foundationdb".to_owned(),
-    )
-}
-
-pub(crate) fn open_runtime_catalog(
-    _backend: RuntimeCatalogBackend,
-) -> CatalogResult<RuntimeMutableCatalog> {
-    open_runtime_foundationdb_catalog()
-}
-
-#[cfg(feature = "foundationdb")]
-fn open_runtime_foundationdb_catalog() -> CatalogResult<RuntimeMutableCatalog> {
-    crate::runtime_foundationdb::open_foundationdb_catalog()
-        .map(RuntimeMutableCatalog::FoundationDb)
-}
-
-#[cfg(not(feature = "foundationdb"))]
-fn open_runtime_foundationdb_catalog() -> CatalogResult<RuntimeMutableCatalog> {
-    Err(CatalogError::Backend(
-        "foundationdb runtime requires ducklake-catalog --features foundationdb".to_owned(),
-    ))
 }
 
 fn load_ddl_orders(

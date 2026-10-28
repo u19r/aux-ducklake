@@ -45,12 +45,9 @@ impl RuntimeMetricStage {
 #[cfg(feature = "runtime-metrics")]
 use std::{
     collections::BTreeMap,
-    fs::{File, OpenOptions},
-    io::{ErrorKind, Write},
-    sync::{
-        Mutex, OnceLock,
-        atomic::{AtomicU64, Ordering},
-    },
+    fs::OpenOptions,
+    io::Write,
+    sync::{Mutex, OnceLock},
 };
 
 #[cfg(feature = "runtime-metrics")]
@@ -74,10 +71,6 @@ struct MetricValue {
 
 #[cfg(feature = "runtime-metrics")]
 static RUNTIME_COUNTERS: OnceLock<Mutex<BTreeMap<MetricKey, MetricValue>>> = OnceLock::new();
-#[cfg(feature = "runtime-metrics")]
-static RUNTIME_TRACE: OnceLock<Mutex<Option<File>>> = OnceLock::new();
-#[cfg(feature = "runtime-metrics")]
-static RUNTIME_TRACE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(feature = "runtime-metrics")]
 pub(crate) fn record_runtime_request(
@@ -104,6 +97,17 @@ pub(crate) fn record_runtime_request_elapsed(
     status: RuntimeMetricStatus,
     elapsed_micros: u64,
 ) {
+    record_request_counter(backend, operation, status, elapsed_micros);
+    crate::runtime_trace::record_elapsed(operation, status, (0, 0), elapsed_micros);
+}
+
+#[cfg(feature = "runtime-metrics")]
+fn record_request_counter(
+    backend: RuntimeCatalogBackend,
+    operation: &str,
+    status: RuntimeMetricStatus,
+    elapsed_micros: u64,
+) {
     let key = MetricKey {
         backend: backend.as_str(),
         family: operation_family(operation),
@@ -118,8 +122,6 @@ pub(crate) fn record_runtime_request_elapsed(
     let value = counters.entry(key).or_default();
     value.count = value.count.saturating_add(1);
     value.elapsed_micros = value.elapsed_micros.saturating_add(elapsed_micros);
-    drop(counters);
-    write_runtime_trace(operation, status, 0, 0, elapsed_micros);
 }
 
 #[cfg(not(feature = "runtime-metrics"))]
@@ -163,6 +165,8 @@ pub(crate) fn record_runtime_measurement(operation: &str, items: u64, bytes: u64
     value.count = value.count.saturating_add(1);
     value.items = value.items.saturating_add(items);
     value.bytes = value.bytes.saturating_add(bytes);
+    drop(counters);
+    crate::runtime_trace::record_elapsed(operation, RuntimeMetricStatus::Ok, (items, bytes), 0);
 }
 
 #[cfg(not(feature = "runtime-metrics"))]
@@ -197,7 +201,7 @@ pub(crate) fn record_runtime_kv(
         value.items = value.items.saturating_add(items);
         value.bytes = value.bytes.saturating_add(bytes);
     }
-    write_runtime_trace(operation, status, items, bytes, elapsed_micros);
+    crate::runtime_trace::record_elapsed(operation, status, (items, bytes), elapsed_micros);
 }
 
 #[cfg(not(feature = "runtime-metrics"))]
@@ -240,7 +244,7 @@ pub(crate) enum RuntimeMetricStatus {
 
 #[cfg(feature = "runtime-metrics")]
 impl RuntimeMetricStatus {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Ok => "ok",
             Self::Error => "error",
@@ -295,7 +299,7 @@ fn runtime_metrics_text(counters: &BTreeMap<MetricKey, MetricValue>) -> String {
 }
 
 #[cfg(feature = "runtime-metrics")]
-fn runtime_metrics_scope() -> String {
+pub(crate) fn runtime_metrics_scope() -> String {
     std::env::var("AUX_DUCKLAKE_BENCHMARK_RUNTIME_METRICS_SCOPE")
         .ok()
         .filter(|value| !value.is_empty())
@@ -303,63 +307,24 @@ fn runtime_metrics_scope() -> String {
 }
 
 #[cfg(feature = "runtime-metrics")]
-fn write_runtime_trace(
+pub(crate) fn record_runtime_span_counter(
     operation: &str,
     status: RuntimeMetricStatus,
-    items: u64,
-    bytes: u64,
-    elapsed_micros: u64,
+    elapsed: u64,
 ) {
-    let trace = RUNTIME_TRACE.get_or_init(|| Mutex::new(open_runtime_trace()));
-    let Ok(mut trace) = trace.lock() else {
-        return;
-    };
-    let Some(file) = trace.as_mut() else {
-        return;
-    };
-    let sequence = RUNTIME_TRACE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let line = format!(
-        "{},{},{},{},{},{},{},{},{:?}\n",
-        sequence,
-        runtime_metrics_scope(),
+    record_request_counter(
+        RuntimeCatalogBackend::FoundationDb,
         operation,
-        status.as_str(),
-        items,
-        bytes,
-        elapsed_micros,
-        std::process::id(),
-        std::thread::current().id()
+        status,
+        elapsed,
     );
-    let _ = file.write_all(line.as_bytes());
-}
-
-#[cfg(feature = "runtime-metrics")]
-fn open_runtime_trace() -> Option<File> {
-    let path = std::env::var_os("AUX_DUCKLAKE_BENCHMARK_RUNTIME_TRACE_PATH")?;
-    match OpenOptions::new().write(true).create_new(true).open(&path) {
-        Ok(mut file) => {
-            let _ = writeln!(
-                file,
-                "seq,scope,operation,status,items,bytes,elapsed_micros,pid,thread_id"
-            );
-        }
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-            if std::fs::metadata(&path).is_ok_and(|metadata| metadata.len() == 0)
-                && let Ok(mut file) = OpenOptions::new().append(true).open(&path)
-            {
-                let _ = writeln!(
-                    file,
-                    "seq,scope,operation,status,items,bytes,elapsed_micros,pid,thread_id"
-                );
-            }
-        }
-        Err(_) => return None,
-    }
-    OpenOptions::new().create(true).append(true).open(path).ok()
 }
 
 #[cfg(feature = "runtime-metrics")]
 fn operation_family(operation: &str) -> &'static str {
+    if operation.starts_with("wait.") {
+        return "wait";
+    }
     if operation.starts_with("method.") {
         return "method";
     }

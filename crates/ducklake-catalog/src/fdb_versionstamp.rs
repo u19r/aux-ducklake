@@ -139,7 +139,7 @@ pub(crate) fn estimate_versionstamped_schema_create_bytes(
         .saturating_add(
             snapshot_timestamp_key(catalog, snapshot.created_at_micros, snapshot.order).len(),
         )
-        .saturating_add(8);
+        .saturating_add(snapshot.encode().len());
     let schema_bytes = schemas
         .iter()
         .map(|schema| {
@@ -163,7 +163,7 @@ pub(crate) fn estimate_versionstamped_table_create_bytes(
         .saturating_add(
             snapshot_timestamp_key(catalog, snapshot.created_at_micros, snapshot.order).len(),
         )
-        .saturating_add(8)
+        .saturating_add(snapshot.encode().len())
         .saturating_add(table_object_key(catalog, table.table_id, table.validity.begin_order).len())
         .saturating_add(row_len)
         .saturating_add(current_table_name_key(catalog, table.schema_id, &table.name).len())
@@ -232,7 +232,7 @@ pub(crate) fn estimate_versionstamped_append_bytes(
         .saturating_add(
             snapshot_timestamp_key(catalog, snapshot.created_at_micros, snapshot.order).len(),
         )
-        .saturating_add(8);
+        .saturating_add(snapshot.encode().len());
     let row_bytes = rows
         .iter()
         .map(|row| {
@@ -328,15 +328,6 @@ pub(crate) fn estimate_versionstamped_expire_bytes(
             )
             .len(),
         )
-}
-
-pub(crate) fn strip_namespace(key_prefix: &[u8], key: &[u8]) -> CatalogResult<Vec<u8>> {
-    let Some(tail) = key.strip_prefix(key_prefix) else {
-        return Err(CatalogError::InvalidKey(
-            "foundationdb key escaped catalog prefix".to_owned(),
-        ));
-    };
-    Ok(tail.to_vec())
 }
 
 pub(crate) fn batch_exceeds_commit_limit(batch: &KvBatch, max_commit_bytes: usize) -> bool {

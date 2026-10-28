@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Versions: software-versions.snapshot.json; details in software-version-consumers.md.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

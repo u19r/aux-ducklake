@@ -131,6 +131,33 @@ fn given_retryable_1031_failures_when_scan_budget_is_exhausted_then_error_is_typ
 }
 
 #[test]
+fn given_two_scans_when_both_retry_then_one_shared_allowance_is_enforced() {
+    let budget = futures::lock::Mutex::new(ScanBudget::with_limits(
+        1,
+        Instant::now() + Duration::from_secs(1),
+    ));
+    let attempt = || async {
+        budget.lock().await.begin_attempt()?;
+        budget
+            .lock()
+            .await
+            .record_retryable_failure(map_fdb_error(FdbError::from_code(1031)))
+    };
+    let (first, second) = futures::executor::block_on(futures::future::join(attempt(), attempt()));
+    assert!(first.is_ok());
+    assert!(matches!(
+        second,
+        Err(CatalogError::FoundationDbRetryExhausted {
+            operation: "scan_range",
+            attempts: 2,
+            code: 1031,
+            class: FoundationDbErrorClass::RetryableNotCommitted,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn given_expired_scan_deadline_when_starting_page_then_operation_is_rejected() {
     let mut budget = ScanBudget::with_limits(2, Instant::now() - Duration::from_millis(1));
 

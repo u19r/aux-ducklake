@@ -1,4 +1,4 @@
-use std::cmp::Ordering;
+use std::{borrow::Cow, cmp::Ordering};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum CatalogScalarType {
@@ -19,20 +19,25 @@ pub(crate) enum CatalogScalarType {
 }
 
 pub(crate) fn normalize_catalog_scalar_type(declaration: &str) -> CatalogScalarType {
-    let declaration = declaration.trim().to_ascii_uppercase();
-    if declaration.contains('[')
-        || declaration.starts_with("STRUCT")
-        || declaration.starts_with("MAP")
-    {
+    let declaration = declaration.trim();
+    if declaration.contains('[') {
         return CatalogScalarType::Unsupported;
     }
-    if declaration == "TIMESTAMP WITH TIME ZONE" {
+    if declaration.eq_ignore_ascii_case("TIMESTAMP WITH TIME ZONE") {
         return CatalogScalarType::TimestampTz;
     }
     let base = declaration
         .split(['(', ' ', ')'])
         .next()
         .unwrap_or_default();
+    let mut storage = [0_u8; crate::constants::SCALAR_TYPE_TOKEN_BYTES];
+    let Some(token) = storage.get_mut(..base.len()) else {
+        return CatalogScalarType::Unsupported;
+    };
+    for (destination, source) in token.iter_mut().zip(base.bytes()) {
+        *destination = source.to_ascii_uppercase();
+    }
+    let base = std::str::from_utf8(token).unwrap_or_default();
     match base {
         "TINYINT" | "INT1" => CatalogScalarType::SignedInteger { bits: 8 },
         "SMALLINT" | "INT2" | "INT16" | "SHORT" => CatalogScalarType::SignedInteger { bits: 16 },
@@ -126,9 +131,9 @@ fn parse_finite_timestamp(
         .map_or((value, false), |value| (value, true));
     // DuckDB prints large positive years without chrono's required leading sign.
     let value = if value.find('-').is_some_and(|index| index > 4) {
-        format!("+{value}")
+        Cow::Owned(format!("+{value}"))
     } else {
-        value.to_owned()
+        Cow::Borrowed(value)
     };
     let (local, offset_seconds) = match scalar_type {
         CatalogScalarType::Timestamp => (
@@ -160,23 +165,16 @@ pub(crate) fn typed_extrema_are_invalid(
     min_value: Option<&str>,
     max_value: Option<&str>,
 ) -> bool {
-    let min_valid =
-        min_value.is_none_or(|value| compare_typed_scalars(scalar_type, value, value).is_some());
-    let max_valid =
-        max_value.is_none_or(|value| compare_typed_scalars(scalar_type, value, value).is_some());
     let bounds_ordered = match (min_value, max_value) {
-        (Some(min_value), Some(max_value)) => {
-            compare_typed_scalars(scalar_type, min_value, max_value)
-                .is_some_and(|ordering| !ordering.is_gt())
-        }
-        _ => true,
+        (Some(minimum), Some(maximum)) => compare_typed_scalars(scalar_type, minimum, maximum)
+            .is_some_and(|ordering| !ordering.is_gt()),
+        (None, None) => true,
+        _ => false,
     };
     let all_values_are_known_null =
         value_count.is_some_and(|value_count| value_count <= null_count);
     let bounds_are_missing = min_value.is_none() && max_value.is_none();
-    !min_valid
-        || !max_valid
-        || !bounds_ordered
+    !bounds_ordered
         || min_value.is_some() != max_value.is_some()
         || (bounds_are_missing && !all_values_are_known_null)
         || (all_values_are_known_null && !bounds_are_missing)
@@ -234,15 +232,15 @@ fn compare_integer(left: ExactInteger, right: ExactInteger) -> Ordering {
     }
 }
 
-#[derive(Eq, PartialEq)]
-struct ExactDecimal {
+struct ExactDecimal<'a> {
     negative: bool,
-    digits: String,
+    digits: &'a [u8],
+    digit_count: usize,
     power: i64,
 }
 
-impl ExactDecimal {
-    fn parse(value: &str) -> Option<Self> {
+impl<'a> ExactDecimal<'a> {
+    fn parse(value: &'a str) -> Option<Self> {
         let value = value.trim();
         let (negative, unsigned) = match value.as_bytes().first() {
             Some(b'-') => (true, &value[1..]),
@@ -250,38 +248,57 @@ impl ExactDecimal {
             _ => (false, value),
         };
         let (mantissa, exponent) = split_decimal_exponent(unsigned)?;
-        let (mut digits, fractional_digits) = decimal_digits(mantissa)?;
-        let mut power = exponent.checked_sub(i64::try_from(fractional_digits).ok()?)?;
-        let first_nonzero = digits.find(|digit| digit != '0').unwrap_or(digits.len());
-        digits.drain(..first_nonzero);
-        if digits.is_empty() {
+        let fractional_digits = decimal_fractional_digits(mantissa)?;
+        let power = exponent.checked_sub(i64::try_from(fractional_digits).ok()?)?;
+        let bytes = mantissa.as_bytes();
+        let is_nonzero = |byte: &u8| *byte != b'0' && *byte != b'.';
+        let Some(first) = bytes.iter().position(is_nonzero) else {
             return Some(Self {
                 negative: false,
-                digits: "0".to_owned(),
+                digits: b"0",
+                digit_count: 1,
                 power: 0,
             });
-        }
-        while digits.ends_with('0') {
-            digits.pop();
-            power = power.checked_add(1)?;
-        }
+        };
+        let last = bytes.iter().rposition(is_nonzero)?;
+        let trailing = bytes[last + 1..]
+            .iter()
+            .filter(|byte| **byte == b'0')
+            .count();
+        let digits = &bytes[first..=last];
         Some(Self {
             negative,
             digits,
-            power,
+            digit_count: digits.len() - usize::from(digits.contains(&b'.')),
+            power: power.checked_add(i64::try_from(trailing).ok()?)?,
         })
     }
 
     fn magnitude_cmp(&self, other: &Self) -> Ordering {
-        let left_places = self.digits.len() as i128 + i128::from(self.power);
-        let right_places = other.digits.len() as i128 + i128::from(other.power);
-        left_places
-            .cmp(&right_places)
-            .then_with(|| compare_padded_digits(&self.digits, &other.digits))
+        match (self.digits == b"0", other.digits == b"0") {
+            (true, true) => return Ordering::Equal,
+            (true, false) => return Ordering::Less,
+            (false, true) => return Ordering::Greater,
+            _ => {}
+        }
+        let left_places = self.digit_count as i128 + i128::from(self.power);
+        let right_places = other.digit_count as i128 + i128::from(other.power);
+        left_places.cmp(&right_places).then_with(|| {
+            let width = self.digit_count.max(other.digit_count);
+            let digits = |value: &'a [u8]| {
+                value
+                    .iter()
+                    .copied()
+                    .filter(u8::is_ascii_digit)
+                    .chain(std::iter::repeat(b'0'))
+                    .take(width)
+            };
+            digits(self.digits).cmp(digits(other.digits))
+        })
     }
 }
 
-impl Ord for ExactDecimal {
+impl Ord for ExactDecimal<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self.negative, other.negative) {
             (true, false) => Ordering::Less,
@@ -292,11 +309,19 @@ impl Ord for ExactDecimal {
     }
 }
 
-impl PartialOrd for ExactDecimal {
+impl PartialOrd for ExactDecimal<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
+
+impl PartialEq for ExactDecimal<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+
+impl Eq for ExactDecimal<'_> {}
 
 fn split_decimal_exponent(value: &str) -> Option<(&str, i64)> {
     let mut parts = value.split(['e', 'E']);
@@ -311,28 +336,18 @@ fn split_decimal_exponent(value: &str) -> Option<(&str, i64)> {
     Some((mantissa, exponent))
 }
 
-fn decimal_digits(mantissa: &str) -> Option<(String, usize)> {
+fn decimal_fractional_digits(mantissa: &str) -> Option<usize> {
     let mut parts = mantissa.split('.');
     let integer = parts.next()?;
     let fractional = parts.next().unwrap_or_default();
     if parts.next().is_some() || (integer.is_empty() && fractional.is_empty()) {
         return None;
     }
-    if !integer
+    integer
         .bytes()
         .chain(fractional.bytes())
         .all(|byte| byte.is_ascii_digit())
-    {
-        return None;
-    }
-    Some((format!("{integer}{fractional}"), fractional.len()))
-}
-
-fn compare_padded_digits(left: &str, right: &str) -> Ordering {
-    let width = left.len().max(right.len());
-    let mut left = left.bytes().chain(std::iter::repeat(b'0')).take(width);
-    let mut right = right.bytes().chain(std::iter::repeat(b'0')).take(width);
-    left.by_ref().cmp(right.by_ref())
+        .then_some(fractional.len())
 }
 
 #[cfg(test)]

@@ -1,7 +1,6 @@
 use std::ops::Deref;
 
 use foundationdb::options::MutationType;
-use futures::executor::block_on;
 
 use crate::{
     CatalogError, CatalogId, CatalogResult, FdbOrderedCatalogKv, SchemaRow, SnapshotRow, TableRow,
@@ -146,8 +145,14 @@ impl FdbOrderedCatalogKv {
         stage_view_changes(self, &trx, catalog, &views)?;
 
         let versionstamp = trx.get_versionstamp();
-        block_on(trx.commit()).map_err(map_fdb_commit_error)?;
-        let order = committed_order(block_on(versionstamp).map_err(map_fdb_error)?.deref())?;
+        crate::fdb_runtime::record_transaction_usage(&trx);
+        crate::fdb_runtime::wait_for_fdb("wait.fdb.commit", trx.commit())
+            .map_err(map_fdb_commit_error)?;
+        let order = committed_order(
+            crate::fdb_runtime::wait_for_fdb("wait.fdb.versionstamp", versionstamp)
+                .map_err(map_fdb_error)?
+                .deref(),
+        )?;
         Ok(replacement_tables
             .into_iter()
             .map(|mut table| {

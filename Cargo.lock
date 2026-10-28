@@ -197,6 +197,7 @@ dependencies = [
  "chrono",
  "foundationdb",
  "futures",
+ "libc",
  "sha2",
  "tempfile",
 ]

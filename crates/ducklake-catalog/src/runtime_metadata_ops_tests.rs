@@ -1,22 +1,24 @@
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, collections::BTreeSet};
+    use std::{
+        cell::Cell,
+        collections::{BTreeMap, BTreeSet},
+    };
 
     use super::super::{
-        GlobalColumnStats, InlineStatsMerge, TableColumnStatsMirrorRow,
-        append_data_file_mirror_inserts, append_delete_file_mirror_inserts,
-        append_file_column_stats_mirror_inserts, append_file_partition_values_mirror_inserts,
-        append_table_inline_stats, begin_snapshot_for_schema_version, bounded_append_mirror_sql,
-        bounded_delete_file_mirror_payload_values, bounded_delete_file_mirror_sql,
-        bounded_scheduled_cleanup_mirror_sql_for_catalog, collect_data_file_ids_from_payload,
-        current_metadata_data_file_rows, current_metadata_file_column_stats,
-        data_file_rows_payload, delete_file_rows_payload,
+        GlobalColumnStats, InlineStatsMerge, append_data_file_mirror_inserts,
+        append_delete_file_mirror_inserts, append_file_column_stats_mirror_inserts,
+        append_file_partition_values_mirror_inserts, append_table_inline_stats,
+        begin_snapshot_for_schema_version, bounded_delete_file_mirror_sql,
+        collect_data_file_ids_from_payload, current_metadata_data_file_rows,
+        current_metadata_file_column_stats, data_file_rows_payload, delete_file_rows_payload,
         file_stats::{bounded_partition_info_mirror_sql, recompute_table_column_stats},
         initialization_metadata_settings, json_number_or_null,
         list_current_data_files_for_data_file_ids, list_data_files_for_data_file_ids,
         list_delete_files_for_data_file_ids, list_delete_files_for_delete_file_ids,
-        list_file_column_stats_for_data_file_ids, optional_metadata_payload_bool,
-        partition_value_request, payload_u64_values, scheduled_cleanup_delta_sql,
+        mirror_refresh::bounded_append_mirror_sql_for_catalog,
+        optional_metadata_payload_bool, partition_value_request, payload_u64_values,
+        render_mutation_mirror_sql_for_catalog, scheduled_cleanup_delta_sql,
         semantic_delete_begin_orders_for_rows, stats_snapshot_for_request,
     };
     use crate::{
@@ -26,12 +28,298 @@ mod tests {
         RangeDirection, RangeItem, SnapshotRow, TableColumnRow, TableId, TablePartitionRow,
         TableRow, TableVersionReplacement, commit_append_data_files,
         commit_change_table_column_types, commit_create_table_row, commit_register_delete_files,
-        expire_data_file, expire_snapshots, initialize_catalog_if_absent, latest_snapshot,
-        list_data_files, list_file_column_stats, list_file_partition_values, list_snapshots,
-        load_table_at, public_snapshot_sequence_for_order, register_file_column_stats,
+        expire_data_file, expire_snapshots, file_stats::list_file_column_stats_for_data_file_ids,
+        initialize_catalog_if_absent, latest_snapshot, list_data_files, list_file_column_stats,
+        list_file_partition_values, list_snapshots, load_table_at,
+        public_snapshot_sequence_for_order, register_file_column_stats,
         register_file_partition_value, store::stage_snapshot,
         typed_scalar::normalize_catalog_scalar_type,
     };
+
+    fn cleanup_mirror_payload(ids: &[DataFileId]) -> Vec<u8> {
+        ids.iter()
+            .map(|id| format!("file\t{}\t4\n", id.0))
+            .collect::<String>()
+            .into_bytes()
+    }
+
+    #[cfg(feature = "foundationdb")]
+    #[test]
+    fn given_contiguous_and_sparse_statistics_when_aggregating_then_reads_stay_within_requested_keys()
+     {
+        use crate::runtime_metadata_ops::file_stats_aggregate::fetch_aggregate_source_rows;
+        let catalog = CatalogId(987_064);
+        let files = [DataFileId(1), DataFileId(2), DataFileId(3)];
+        let mut inner = FakeOrderedCatalogKv::new();
+        let mut batch = KvBatch::new();
+        for file in &files[..2] {
+            for column in [0, 1, 2, 3, 4, 100_000] {
+                if *file == DataFileId(2) && column == 2 {
+                    continue;
+                }
+                let row = FileColumnStatsRow::new(
+                    *file,
+                    TableId(7),
+                    ColumnId(column),
+                    0,
+                    Some("2".into()),
+                    Some("10".into()),
+                );
+                crate::file_stats::stage_file_column_stats(&mut batch, catalog, &row);
+            }
+        }
+        inner.commit(batch).unwrap();
+        let kv = BatchGetCountingKv::new(inner);
+        let contiguous = BTreeSet::from([ColumnId(1), ColumnId(2), ColumnId(3)]);
+        let rows = fetch_aggregate_source_rows(&kv, catalog, &files, &contiguous).unwrap();
+        assert_eq!(rows.len(), 5);
+        assert!(rows.iter().all(|row| contiguous.contains(&row.column_id)));
+        assert_eq!(kv.batch_get_key_count(), 0);
+        assert_eq!(kv.range_read_count.get(), 3);
+        assert_eq!(kv.range_row_count.get(), 5);
+        let sparse = BTreeSet::from([ColumnId(1), ColumnId(3)]);
+        let rows = fetch_aggregate_source_rows(&kv, catalog, &files, &sparse).unwrap();
+        assert_eq!(rows.len(), 4);
+        assert_eq!(kv.batch_get_key_count(), 6);
+        assert_eq!(kv.range_read_count.get(), 3);
+        assert_eq!(kv.range_row_count.get(), 5);
+        let rows =
+            fetch_aggregate_source_rows(&kv, catalog, &files, &BTreeSet::from([ColumnId(1)]))
+                .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(kv.batch_get_key_count(), 9);
+        let mut inner = kv.inner;
+        for (file, column) in [(2, 2), (1, 100_000), (1, 3)] {
+            let mut batch = KvBatch::new();
+            let wrong = FileColumnStatsRow::new(
+                DataFileId(file),
+                TableId(7),
+                ColumnId(column),
+                0,
+                None,
+                None,
+            );
+            batch.put(
+                crate::keys::file_column_stats_key(catalog, DataFileId(1), ColumnId(2)),
+                wrong.encode(),
+            );
+            inner.commit(batch).unwrap();
+            assert!(fetch_aggregate_source_rows(&inner, catalog, &files, &contiguous).is_err());
+        }
+    }
+
+    #[cfg(feature = "foundationdb")]
+    #[test]
+    fn given_scoped_stats_inputs_when_table_is_missing_or_misidentified_then_results_preserve_identity()
+     {
+        use crate::runtime_metadata_ops::file_stats_aggregate::StatsTableInputs;
+        let catalog = CatalogId(987_062);
+        let id = TableId(7);
+        let table = TableRow::new(id, "stats", CatalogOrderId::uuid_v7(1));
+        let mut kv = FakeOrderedCatalogKv::new();
+        let mut batch = KvBatch::new();
+        crate::table_store::stage_current_table_row(&mut batch, catalog, &table);
+        batch.put(
+            crate::keys::table_next_row_id_key(catalog, id),
+            42_u64.to_be_bytes().to_vec(),
+        );
+        kv.commit(batch).unwrap();
+        let ids = std::collections::BTreeSet::from([id, TableId(8)]);
+        let inputs =
+            StatsTableInputs::fetch(&kv, catalog, table.validity.begin_order, &ids).unwrap();
+        assert_eq!(inputs.tables, vec![table.clone()]);
+        assert_eq!(inputs.stamps[&id].allocated_next_row_id, 42);
+        let mut wrong_table = table;
+        wrong_table.table_id = TableId(9);
+        let mut batch = KvBatch::new();
+        batch.put(
+            crate::keys::current_table_row_key(catalog, id),
+            wrong_table.encode(),
+        );
+        kv.commit(batch).unwrap();
+        assert!(matches!(
+            StatsTableInputs::fetch(&kv, catalog, wrong_table.validity.begin_order, &ids),
+            Err(crate::CatalogError::Decode(_))
+        ));
+    }
+
+    #[cfg(feature = "foundationdb")]
+    #[test]
+    fn given_versioned_file_stats_when_sources_change_then_aggregate_tracks_version_membership_and_type()
+     {
+        use crate::runtime_metadata_ops::file_stats_aggregate::{
+            FileStatsAggregateInput, fetch_file_stats_aggregate, fetch_file_stats_read_stamps,
+        };
+        let catalog = CatalogId(987_061);
+        let mut kv = FakeOrderedCatalogKv::new();
+        let mut table = TableRow::new(TableId(7), "aggregate", CatalogOrderId::uuid_v7(1));
+        table.columns.push(TableColumnRow::new(
+            ColumnId(1),
+            "value",
+            "INTEGER",
+            false,
+            None,
+        ));
+        let files = [
+            GlobalStatsFileRow {
+                data_file_id: DataFileId(1),
+                record_count: 2,
+                file_size_bytes: 10,
+                row_id_start: Some(0),
+                has_deletions: false,
+            },
+            GlobalStatsFileRow {
+                data_file_id: DataFileId(2),
+                record_count: 2,
+                file_size_bytes: 10,
+                row_id_start: Some(2),
+                has_deletions: false,
+            },
+        ];
+        let render = |kv: &FakeOrderedCatalogKv, table: &TableRow, files: &[GlobalStatsFileRow]| {
+            let stamp = fetch_file_stats_read_stamps(kv, catalog, std::slice::from_ref(table))
+                .unwrap()
+                .remove(&table.table_id)
+                .unwrap();
+            let stats = fetch_file_stats_aggregate(
+                kv,
+                catalog,
+                FileStatsAggregateInput {
+                    table,
+                    files,
+                    stamp,
+                },
+            )
+            .unwrap();
+            let mut out = String::new();
+            stats.append_to(&mut out).unwrap();
+            out
+        };
+        let mut batch = KvBatch::new();
+        for (file, min, max) in [(1, "2", "10"), (2, "-3", "9")] {
+            let row = FileColumnStatsRow::new(
+                DataFileId(file),
+                table.table_id,
+                ColumnId(1),
+                0,
+                Some(min.to_owned()),
+                Some(max.to_owned()),
+            )
+            .with_value_count(Some(2));
+            crate::file_stats::stage_file_column_stats(&mut batch, catalog, &row);
+        }
+        batch.put(
+            crate::keys::table_file_stats_version_key(catalog, table.table_id),
+            vec![1],
+        );
+        kv.commit(batch).unwrap();
+        let first = render(&kv, &table, &files);
+        assert_eq!(
+            first,
+            "global_table_stats\t7\t4\t4\t20\nglobal_table_column_stats\t7\t1\ttrue\tfalse\ttrue\t-3\ttrue\t10\tfalse\t\n"
+        );
+        assert_eq!(render(&kv, &table, &files), first);
+        let mut allocation = KvBatch::new();
+        crate::conflict_watermarks::stage_table_next_row_id(
+            &kv,
+            &mut allocation,
+            catalog,
+            table.table_id,
+            100,
+        )
+        .unwrap();
+        kv.commit(allocation).unwrap();
+        table.name = "renamed-with-same-stats".to_owned();
+        let allocated = render(&kv, &table, &files);
+        assert_eq!(allocated, first.replace("\t4\t4\t20", "\t4\t100\t20"));
+        let mut unknown_files = files;
+        unknown_files[0].row_id_start = None;
+        let unknown = render(&kv, &table, &unknown_files);
+        // A known file after an unknown one cannot undo the allocator offset.
+        assert!(unknown.starts_with("global_table_stats\t7\t4\t102\t20\n"));
+        let mut allocation = KvBatch::new();
+        crate::conflict_watermarks::stage_table_next_row_id(
+            &kv,
+            &mut allocation,
+            catalog,
+            table.table_id,
+            u64::MAX,
+        )
+        .unwrap();
+        kv.commit(allocation).unwrap();
+        assert!(
+            render(&kv, &table, &unknown_files)
+                .starts_with(&format!("global_table_stats\t7\t4\t{}\t20\n", u64::MAX))
+        );
+
+        table.columns[0].column_type = "VARCHAR".to_owned();
+        assert!(
+            render(&kv, &table, &files).contains(
+                "global_table_column_stats\t7\t1\ttrue\tfalse\tfalse\t\tfalse\t\tfalse\t\n"
+            )
+        );
+        table.columns[0].column_type = "INTEGER".to_owned();
+        assert!(render(&kv, &table, &files[..1]).contains("\ttrue\t2\ttrue\t10\tfalse"));
+        let mut batch = KvBatch::new();
+        let replacement = FileColumnStatsRow::new(
+            DataFileId(2),
+            table.table_id,
+            ColumnId(1),
+            0,
+            Some("20".to_owned()),
+            Some("30".to_owned()),
+        )
+        .with_value_count(Some(2));
+        crate::file_stats::stage_file_column_stats(&mut batch, catalog, &replacement);
+        batch.put(
+            crate::keys::table_file_stats_version_key(catalog, table.table_id),
+            vec![2],
+        );
+        kv.commit(batch).unwrap();
+        assert!(render(&kv, &table, &files).contains("\ttrue\t2\ttrue\t30\tfalse"));
+    }
+
+    #[test]
+    fn given_committed_schema_index_when_fetching_descriptor_then_the_mapping_can_be_reused() {
+        let catalog = CatalogId(45);
+        let mut kv = FakeOrderedCatalogKv::default();
+        let mut batch = KvBatch::new();
+        batch.put(
+            crate::keys::schema_version_begin_snapshot_key(catalog, 3),
+            7_u64.to_be_bytes().to_vec(),
+        );
+        kv.commit(batch).unwrap();
+
+        let output =
+            super::super::render_schema_begin_descriptor(&kv, catalog, TableId(10), 3).unwrap();
+
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "begin_snapshot_id=7\nstable_schema_begin=true\n"
+        );
+    }
+
+    #[test]
+    fn given_file_statistics_columns_when_parsing_then_identifiers_are_validated() {
+        use super::super::file_statistics_request::requested_file_statistics;
+        let (files, columns) = requested_file_statistics(
+            b"data_file_id\t2\ncolumn_id\t1\ncolumn_id\t1\ncolumn_id\t9\n",
+        )
+        .unwrap();
+        assert_eq!(files, vec![DataFileId(2)]);
+        assert_eq!(columns, BTreeSet::from([ColumnId(1), ColumnId(9)]));
+        for invalid in [
+            "column_id\tnope\n",
+            "column_id\t1\textra\n",
+            "unknown\t1\n",
+            "data_file_id\n",
+        ] {
+            assert!(
+                requested_file_statistics(invalid.as_bytes()).is_err(),
+                "{invalid}"
+            );
+        }
+    }
 
     #[test]
     fn given_decimal_global_bounds_when_comparing_then_order_is_numeric() {
@@ -301,6 +589,15 @@ mod tests {
             begin_snapshot_for_schema_version(&kv, catalog, table_id, 99).unwrap(),
             expected
         );
+
+        let descriptor = String::from_utf8(
+            super::super::render_schema_begin_descriptor(&kv, catalog, table_id, 99).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            descriptor.contains("stable_schema_begin=false"),
+            "{descriptor}"
+        );
         assert_ne!(expected.0, 99);
     }
 
@@ -488,12 +785,45 @@ mod tests {
         data_file.row_id_start = 42;
         data_file.row_id_start_known = true;
         let mut data_sql = String::new();
-        append_data_file_mirror_inserts(&mut data_sql, &[data_file], &snapshots);
+        append_data_file_mirror_inserts(
+            &mut data_sql,
+            &[data_file.clone()],
+            &snapshots,
+            &BTreeMap::from([(DataFileId(7), 17)]),
+        );
+        assert!(!data_sql.contains("SELECT partition_id"), "{data_sql}");
+        assert!(
+            data_sql.contains("unnest([42]), unnest([17]), "),
+            "{data_sql}"
+        );
+        let mut unpartitioned_sql = String::new();
+        append_data_file_mirror_inserts(
+            &mut unpartitioned_sql,
+            &[data_file],
+            &snapshots,
+            &BTreeMap::new(),
+        );
+        assert!(
+            unpartitioned_sql.contains("unnest([42]), unnest([NULL]), "),
+            "{unpartitioned_sql}"
+        );
         assert!(data_sql.contains("'main/table/a''b.parquet'"), "{data_sql}");
-        assert!(data_sql.contains(", 10, 11, 7,"), "{data_sql}");
-        assert!(data_sql.contains(", 128, 42,"), "{data_sql}");
-        assert!(data_sql.contains(", 'AQIDBA==', 99,"), "{data_sql}");
-        assert!(data_sql.contains(", 99, 12, NULL);"), "{data_sql}");
+        assert!(
+            data_sql.contains("unnest([10]), unnest([11]), unnest([7]),"),
+            "{data_sql}"
+        );
+        assert!(
+            data_sql.contains("unnest([128]), unnest([42]),"),
+            "{data_sql}"
+        );
+        assert!(
+            data_sql.contains("unnest(['AQIDBA==']), unnest([99]),"),
+            "{data_sql}"
+        );
+        assert!(
+            data_sql.contains("unnest([99]), unnest([12]), unnest([NULL]);"),
+            "{data_sql}"
+        );
 
         let mut partition_sql = String::new();
         append_file_partition_values_mirror_inserts(
@@ -513,10 +843,10 @@ mod tests {
                 ),
             ],
         );
-        assert!(partition_sql.contains("'north''west'"), "{partition_sql}");
-        assert!(
-            partition_sql.contains("VALUES (8, 4, 1, NULL);"),
-            "{partition_sql}"
+        assert_eq!(
+            partition_sql,
+            "INSERT INTO {METADATA_CATALOG}.ducklake_file_partition_value SELECT unnest([7, 8]), \
+             unnest([4, 4]), unnest([0, 1]), unnest(['north''west', NULL]);\n"
         );
 
         let mut stats_sql = String::new();
@@ -534,7 +864,10 @@ mod tests {
             }],
         );
         assert!(
-            stats_sql.contains("VALUES (7, 4, 2, NULL, NULL, 3, 'a''b', NULL, NULL, 'x''y');"),
+            stats_sql.contains(
+                "SELECT unnest([7]), unnest([4]), unnest([2]), unnest([NULL]), unnest([NULL]), \
+                 unnest([3]), unnest(['a''b']), unnest([NULL]), unnest([NULL]), unnest(['x''y']);"
+            ),
             "{stats_sql}"
         );
 
@@ -556,10 +889,16 @@ mod tests {
             &super::super::semantic_delete_begin_orders_from_rows(&delete_rows),
             &snapshots,
         );
+        assert!(!delete_sql.contains("SELECT table_id"), "{delete_sql}");
+        assert_eq!(delete_sql.matches("LEFT JOIN").count(), 1);
         assert!(delete_sql.contains("'delete''a.parquet'"), "{delete_sql}");
-        assert!(delete_sql.contains(", 10, 11, 7,"), "{delete_sql}");
         assert!(
-            delete_sql.contains(", 0, 'BQYHCA==', NULL, NULL);"),
+            delete_sql.contains("unnest([10]), unnest([11]), unnest([7]),"),
+            "{delete_sql}"
+        );
+        assert!(
+            delete_sql
+                .contains("unnest([0]), unnest(['BQYHCA==']), unnest([NULL]), unnest([NULL]))"),
             "{delete_sql}"
         );
 
@@ -585,15 +924,13 @@ mod tests {
                 schedule_start_micros: 2_345_678,
             }],
         );
-        assert!(
-            cleanup_sql
-                .contains("VALUES (6, 'data''a.parquet', false, make_timestamptz(1234567));"),
-            "{cleanup_sql}"
-        );
-        assert!(
-            cleanup_sql
-                .contains("VALUES (5, 'delete''a.parquet', false, make_timestamptz(2345678));"),
-            "{cleanup_sql}"
+        assert_eq!(
+            cleanup_sql,
+            "DELETE FROM {METADATA_CATALOG}.ducklake_files_scheduled_for_deletion WHERE \
+             data_file_id IN (5, 6);\nINSERT INTO \
+             {METADATA_CATALOG}.ducklake_files_scheduled_for_deletion SELECT unnest([6, 5]), \
+             unnest(['data''a.parquet', 'delete''a.parquet']), unnest([false, false]), \
+             unnest([make_timestamptz(1234567), make_timestamptz(2345678)]);\n"
         );
     }
 
@@ -674,10 +1011,9 @@ mod tests {
         inner.commit(batch).unwrap();
         let kv = CleanupMirrorScanRecordingKv::new(inner, catalog);
 
-        let sql = bounded_scheduled_cleanup_mirror_sql_for_catalog(
-            &kv,
-            catalog,
-            &[data_file.data_file_id],
+        let payload = cleanup_mirror_payload(&[data_file.data_file_id]);
+        let sql = String::from_utf8(
+            render_mutation_mirror_sql_for_catalog(&kv, catalog, &payload).unwrap(),
         )
         .unwrap();
 
@@ -741,10 +1077,9 @@ mod tests {
         inner.commit(batch).unwrap();
         let kv = CleanupMirrorScanRecordingKv::new(inner, catalog);
 
-        let sql = bounded_scheduled_cleanup_mirror_sql_for_catalog(
-            &kv,
-            catalog,
-            &[data_file.data_file_id],
+        let payload = cleanup_mirror_payload(&[data_file.data_file_id]);
+        let sql = String::from_utf8(
+            render_mutation_mirror_sql_for_catalog(&kv, catalog, &payload).unwrap(),
         )
         .unwrap();
 
@@ -1348,6 +1683,31 @@ mod tests {
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].data_file_id, DataFileId(2));
+        register_file_column_stats(
+            &mut kv,
+            catalog,
+            FileColumnStatsRow::new(DataFileId(2), table_id, ColumnId(2), 4, None, None),
+        )
+        .unwrap();
+        let selected = crate::file_stats::list_file_column_stats_for_data_file_columns(
+            &kv,
+            catalog,
+            &[DataFileId(2), DataFileId(2)],
+            &BTreeSet::from([ColumnId(1), ColumnId(99)]),
+        )
+        .unwrap();
+        assert_eq!(selected, rows);
+        let unknown = crate::file_stats::list_file_column_stats_for_data_file_columns(
+            &kv,
+            catalog,
+            &[DataFileId(2)],
+            &BTreeSet::from([ColumnId(2)]),
+        )
+        .unwrap();
+        assert_eq!(unknown.len(), 1);
+        assert_eq!(unknown[0].null_count, 4);
+        assert_eq!(unknown[0].min_value, None);
+        assert_eq!(unknown[0].max_value, None);
     }
 
     #[test]
@@ -1372,35 +1732,97 @@ mod tests {
     }
 
     #[test]
-    fn given_one_affected_table_when_rendering_append_delta_then_table_stats_refresh_is_bounded() {
-        let data_file = data_file(DataFileId(1), TableId(7), 0);
-        let stats = FileColumnStatsRow::new(
-            DataFileId(1),
-            TableId(7),
-            ColumnId(1),
-            0,
-            Some("1".to_owned()),
-            Some("9".to_owned()),
+    fn given_remapped_table_when_rendering_append_delta_then_partition_and_stats_use_committed_owner()
+     {
+        let catalog = CatalogId(1);
+        let mut inner = FakeOrderedCatalogKv::new();
+        initialize_catalog_if_absent(&mut inner, catalog).unwrap();
+        for table in 1..=100 {
+            let mut row = TableRow::new(
+                TableId(table),
+                format!("table_{table}"),
+                CatalogOrderId::uuid_v7(0),
+            );
+            if table == 7 {
+                row.partition = Some(TablePartitionRow::new(17, Vec::new()));
+            }
+            row.columns.push(TableColumnRow::new(
+                ColumnId(1),
+                "value",
+                "INTEGER",
+                false,
+                None,
+            ));
+            commit_create_table_row(&mut inner, catalog, row).unwrap();
+            commit_append_data_files(
+                &mut inner,
+                catalog,
+                vec![data_file(DataFileId(table), TableId(table), 0)],
+            )
+            .unwrap();
+            register_file_column_stats(
+                &mut inner,
+                catalog,
+                FileColumnStatsRow::new(
+                    DataFileId(table),
+                    TableId(table),
+                    ColumnId(1),
+                    0,
+                    Some("1".to_owned()),
+                    Some("9".to_owned()),
+                )
+                .with_value_count(Some(1)),
+            )
+            .unwrap();
+        }
+        commit_append_data_files(
+            &mut inner,
+            catalog,
+            vec![data_file(DataFileId(1007), TableId(7), 1)],
+        )
+        .unwrap();
+        register_file_column_stats(
+            &mut inner,
+            catalog,
+            FileColumnStatsRow::new(
+                DataFileId(1007),
+                TableId(7),
+                ColumnId(1),
+                0,
+                Some("-7".to_owned()),
+                Some("12".to_owned()),
+            )
+            .with_value_count(Some(1)),
+        )
+        .unwrap();
+        let partition =
+            FilePartitionValueRow::new(DataFileId(7), TableId(7), PartitionKeyIndex(0), "eu");
+        register_file_partition_value(&mut inner, catalog, partition.clone()).unwrap();
+        let mut partition = partition;
+        partition.table_id = TableId(1); // The C++ plan retains the requested ID after commit remaps it.
+        let mut kv = MirrorScanCountingKv::new(inner, catalog);
+        let sql = String::from_utf8(
+            bounded_append_mirror_sql_for_catalog(
+                &kv,
+                catalog,
+                &[DataFileId(7), DataFileId(7)],
+                vec![partition],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(kv.broad_history_scans(), 0);
+        assert!(!sql.contains("SELECT partition_id"), "{sql}");
+        assert!(
+            sql.contains(
+                "unnest([0]), unnest([17]), unnest([NULL]), unnest([NULL]), unnest([NULL]), \
+                 unnest([NULL])"
+            ),
+            "{sql}"
         );
-        let snapshots = vec![SnapshotRow::new(
-            data_file.validity.begin_order,
-            crate::RawSnapshotSequence(1),
-        )];
-
-        let sql = bounded_append_mirror_sql(
-            &[DataFileId(1)],
-            &[TableId(7)],
-            Vec::new(),
-            &[data_file],
-            &[stats],
-            &[TableColumnStatsMirrorRow {
-                table_id: TableId(7),
-                column_id: ColumnId(1),
-                contains_null: false,
-                min_value: Some("1".to_owned()),
-                max_value: Some("9".to_owned()),
-            }],
-            &snapshots,
+        assert!(
+            sql.contains("SELECT unnest([7]), unnest([7]), unnest([0]), unnest(['eu'])"),
+            "{sql}"
         );
 
         assert!(
@@ -1415,13 +1837,30 @@ mod tests {
         assert!(
             sql.contains(
                 "INSERT INTO {METADATA_CATALOG}.ducklake_table_column_stats (table_id, column_id, \
-                 contains_null, contains_nan, min_value, max_value, extra_stats) VALUES (7, 1, \
-                 false, NULL, '1', '9', NULL);"
+                 contains_null, contains_nan, min_value, max_value, extra_stats) SELECT unnest([7]), \
+                 unnest([1]), unnest([false]), unnest([NULL]), unnest(['-7']), unnest(['12']), unnest([NULL]);"
             ),
             "{sql}"
         );
         assert!(!sql.contains("min(stats.min_value)"), "{sql}");
         assert!(!sql.contains("max(stats.max_value)"), "{sql}");
+        for id in [7, 1007] {
+            expire_data_file(
+                &mut kv.inner,
+                catalog,
+                DataFileId(id),
+                CatalogOrderId::uuid_v7(999),
+            )
+            .unwrap();
+        }
+        let expired = String::from_utf8(
+            bounded_append_mirror_sql_for_catalog(&kv, catalog, &[DataFileId(1007)], Vec::new())
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(expired.contains("ducklake_table_column_stats WHERE table_id IN (7);"));
+        assert!(!expired.contains("INSERT INTO {METADATA_CATALOG}.ducklake_table_column_stats"));
+        assert_eq!(kv.broad_history_scans(), 0);
     }
 
     #[test]
@@ -1508,14 +1947,72 @@ mod tests {
     }
 
     #[test]
-    fn given_mixed_delete_mirror_ids_when_parsing_payload_then_ids_are_typed_and_deduplicated() {
-        let (delete_file_ids, data_file_ids) = bounded_delete_file_mirror_payload_values(
-            b"data_file_id\t2\ndelete_file_id\t11\ndata_file_id\t1\ndelete_file_id\t11\n",
+    fn given_combined_mirror_roles_when_rendering_then_each_requested_projection_is_replaced() {
+        let kv = FakeOrderedCatalogKv::new();
+        for roles in 1..=7 {
+            let payload = format!("file\t7\t{roles}\nfile\t7\t{roles}\n");
+            let sql = String::from_utf8(
+                render_mutation_mirror_sql_for_catalog(&kv, CatalogId(1), payload.as_bytes())
+                    .unwrap(),
+            )
+            .unwrap();
+            for (role, table) in [
+                (1, "ducklake_data_file"),
+                (2, "ducklake_delete_file"),
+                (4, "ducklake_files_scheduled_for_deletion"),
+            ] {
+                assert_eq!(
+                    sql.contains(&format!("DELETE FROM {{METADATA_CATALOG}}.{table} WHERE")),
+                    roles & role != 0,
+                    "{sql}"
+                );
+            }
+            assert!(!sql.contains("(7, 7)"), "{sql}");
+        }
+    }
+
+    #[test]
+    fn given_invalid_mirror_targets_when_rendering_then_request_is_rejected() {
+        let kv = FakeOrderedCatalogKv::new();
+        for payload in [
+            "file\t7\t0\n",
+            "file\t7\t8\n",
+            "file\tnope\t1\n",
+            "file\t7\n",
+            "unknown\t7\n",
+            "file\t7\t4\nfile_partition\t7\t1\t0\tvalue\n",
+            "file\t7\t1\nfile_partition\t7\t1\t4294967296\tvalue\n",
+        ] {
+            assert!(
+                render_mutation_mirror_sql_for_catalog(&kv, CatalogId(1), payload.as_bytes())
+                    .is_err(),
+                "{payload}"
+            );
+        }
+        assert!(
+            render_mutation_mirror_sql_for_catalog(&kv, CatalogId(1), b"")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn given_duplicate_mirror_targets_when_rendering_then_targets_are_typed_and_deduplicated() {
+        let kv = FakeOrderedCatalogKv::new();
+        let sql = String::from_utf8(
+            render_mutation_mirror_sql_for_catalog(
+                &kv,
+                CatalogId(1),
+                b"file\t2\t2\ndelete_file_id\t11\nfile\t1\t2\ndelete_file_id\t11\n",
+            )
+            .unwrap(),
         )
         .unwrap();
-
-        assert_eq!(delete_file_ids, vec![DeleteFileId(11)]);
-        assert_eq!(data_file_ids, vec![DataFileId(1), DataFileId(2)]);
+        assert!(
+            sql.contains("WHERE delete_file_id IN (11) OR data_file_id IN (1, 2);"),
+            "{sql}"
+        );
+        assert_eq!(sql.matches("DELETE FROM").count(), 1, "{sql}");
     }
 
     #[test]
@@ -1541,7 +2038,7 @@ mod tests {
                 .collect(),
         )
         .unwrap();
-        let kv = DeleteTimelineScanCountingKv::new(inner, catalog);
+        let kv = MirrorScanCountingKv::new(inner, catalog);
 
         let rows = list_delete_files_for_data_file_ids(&kv, catalog, &[DataFileId(42)]).unwrap();
 
@@ -1549,6 +2046,36 @@ mod tests {
         assert_eq!(rows[0].delete_file_id, DeleteFileId(142));
         assert_eq!(kv.timeline_scans(), 1);
         assert_eq!(kv.broad_history_scans(), 0);
+    }
+
+    #[test]
+    fn given_stamped_timeline_key_when_listing_mirror_rows_then_commit_orders_are_resolved() {
+        let catalog = CatalogId(1);
+        let file_id = DataFileId(42);
+        let committed = CatalogOrderId::fdb_versionstamp([1; 10], 0);
+        let placeholder = crate::ids::incomplete_fdb_order();
+        let row = DeleteFileRow::new(
+            DeleteFileId(7),
+            file_id,
+            "delete.parquet",
+            1,
+            128,
+            placeholder,
+        )
+        .with_max_partial_order(Some(placeholder));
+        let mut kv = FakeOrderedCatalogKv::new();
+        let mut batch = KvBatch::new();
+        batch.put(
+            crate::keys::delete_file_timeline_key(catalog, file_id, committed, row.delete_file_id),
+            row.encode(),
+        );
+        kv.commit(batch).unwrap();
+
+        let rows = list_delete_files_for_data_file_ids(&kv, catalog, &[file_id]).unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].validity.begin_order, committed);
+        assert_eq!(rows[0].max_partial_order, Some(committed));
     }
 
     #[test]
@@ -1576,7 +2103,11 @@ mod tests {
             sql.contains("WHERE delete_file_id IN (10, 11) OR data_file_id IN (1);"),
             "{sql}"
         );
-        assert_eq!(sql.matches("INSERT INTO").count(), 2, "{sql}");
+        assert_eq!(sql.matches("INSERT INTO").count(), 1, "{sql}");
+        assert!(sql.contains("unnest([10, 11])"), "{sql}");
+        assert!(sql.contains("unnest([1, 1])"), "{sql}");
+        assert!(sql.contains("'delete-10.parquet'"), "{sql}");
+        assert!(sql.contains("'delete-11.parquet'"), "{sql}");
     }
 
     #[test]
@@ -1805,17 +2336,20 @@ mod tests {
     struct BatchGetCountingKv {
         inner: FakeOrderedCatalogKv,
         batch_get_key_count: Cell<usize>,
+        range_read_count: Cell<usize>,
+        range_row_count: Cell<usize>,
     }
 
-    struct DeleteTimelineScanCountingKv {
+    struct MirrorScanCountingKv {
         inner: FakeOrderedCatalogKv,
         delete_file_family_prefix: Vec<u8>,
         delete_file_timeline_family_prefix: Vec<u8>,
+        broad_file_prefixes: [Vec<u8>; 2],
         timeline_scans: Cell<usize>,
         broad_history_scans: Cell<usize>,
     }
 
-    impl DeleteTimelineScanCountingKv {
+    impl MirrorScanCountingKv {
         fn new(inner: FakeOrderedCatalogKv, catalog: CatalogId) -> Self {
             Self {
                 inner,
@@ -1827,6 +2361,11 @@ mod tests {
                     catalog,
                     crate::keys::KeyFamily::DeleteFileTimeline,
                 ),
+                broad_file_prefixes: [
+                    crate::keys::KeyFamily::DataFile,
+                    crate::keys::KeyFamily::FileColumnStats,
+                ]
+                .map(|family| crate::keys::family_prefix(catalog, family)),
                 timeline_scans: Cell::new(0),
                 broad_history_scans: Cell::new(0),
             }
@@ -1841,7 +2380,7 @@ mod tests {
         }
     }
 
-    impl crate::OrderedCatalogKv for DeleteTimelineScanCountingKv {
+    impl crate::OrderedCatalogKv for MirrorScanCountingKv {
         fn get(&self, key: &[u8]) -> crate::CatalogResult<Option<Vec<u8>>> {
             crate::OrderedCatalogKv::get(&self.inner, key)
         }
@@ -1858,6 +2397,10 @@ mod tests {
         ) -> crate::CatalogResult<Vec<RangeItem>> {
             if prefix == self.delete_file_family_prefix
                 || prefix == self.delete_file_timeline_family_prefix
+                || self
+                    .broad_file_prefixes
+                    .iter()
+                    .any(|family| prefix == family)
             {
                 self.broad_history_scans
                     .set(self.broad_history_scans.get().saturating_add(1));
@@ -1888,6 +2431,8 @@ mod tests {
             Self {
                 inner,
                 batch_get_key_count: Cell::new(0),
+                range_read_count: Cell::new(0),
+                range_row_count: Cell::new(0),
             }
         }
 
@@ -1923,7 +2468,12 @@ mod tests {
             direction: RangeDirection,
             limit: usize,
         ) -> crate::CatalogResult<Vec<RangeItem>> {
-            crate::OrderedCatalogKv::scan_range(&self.inner, start, end, direction, limit)
+            self.range_read_count.set(self.range_read_count.get() + 1);
+            let rows =
+                crate::OrderedCatalogKv::scan_range(&self.inner, start, end, direction, limit)?;
+            self.range_row_count
+                .set(self.range_row_count.get() + rows.len());
+            Ok(rows)
         }
 
         fn read_conflict_fence(&self, key: &[u8]) -> crate::CatalogResult<Option<Vec<u8>>> {

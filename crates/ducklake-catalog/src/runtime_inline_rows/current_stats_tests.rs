@@ -18,6 +18,7 @@ fn fdb_current_inline_stats_track_delete_reinsert_flush_and_high_watermark() {
     let schema_id = SchemaId(7);
     let table_name = "current_inline_stats_inlined";
     let kv = FdbOrderedCatalogKv::open_default_with_prefix(unique_prefix().into_bytes()).unwrap();
+    let _cleanup = InlineStatsPrefixCleanup(kv.clone());
     kv.initialize_catalog_if_absent_versionstamped(catalog)
         .unwrap();
     let created = kv
@@ -62,6 +63,54 @@ fn fdb_current_inline_stats_track_delete_reinsert_flush_and_high_watermark() {
         b"row\t0\ti:101\n".to_vec(),
     )
     .unwrap();
+    for _ in 0..80 {
+        kv.commit_delete_inline_table_rows_versionstamped(catalog, table_id, schema_id, &[0], None)
+            .unwrap();
+        kv.register_inline_table_payload_with_table_versionstamped(
+            catalog,
+            attached.clone(),
+            schema_id,
+            b"row\t0\ti:101\n".to_vec(),
+        )
+        .unwrap();
+    }
+    let allocations = alloc_counter::AllocationGuard::start(
+        module_path!(),
+        "current_inline_capture",
+        file!(),
+        line!(),
+        Some("forty_contexts"),
+    );
+    let started = std::time::Instant::now();
+    for context_id in 1..=40 {
+        let _request = crate::store::begin_runtime_read_request(Some(context_id));
+        let captured_stats = stats(&kv, catalog, table_name, None);
+        assert!(
+            captured_stats.contains("inline_aggregate_stats\t2\n"),
+            "{captured_stats}"
+        );
+        assert!(
+            captured_stats.contains("\ttrue\t5\ttrue\t101"),
+            "{captured_stats}"
+        );
+        assert_eq!(
+            rows(&kv, catalog, table_name, None)
+                .matches("row_change\t")
+                .count(),
+            2
+        );
+        crate::runtime_inline_snapshot::capture::end_runtime_read_context(&kv, catalog, context_id);
+    }
+    eprintln!(
+        "inline_capture_40_contexts_us={}",
+        started.elapsed().as_micros()
+    );
+    let allocations = allocations.finish();
+    eprintln!(
+        "inline_capture_allocations={} bytes={}",
+        allocations.allocation_count, allocations.allocated_bytes
+    );
+    require_capture_isolation(&kv, catalog, &attached, table_name);
     let reinserted = crate::latest_snapshot(&kv, catalog).unwrap().unwrap();
 
     require_stats(&stats(&kv, catalog, table_name, None), 2, 3, "5", "101");
@@ -151,23 +200,65 @@ fn fdb_current_inline_stats_track_delete_reinsert_flush_and_high_watermark() {
     assert!(high.contains("inline_aggregate_next_row_id\t301"), "{high}");
 }
 
+fn require_capture_isolation(
+    kv: &FdbOrderedCatalogKv,
+    catalog: CatalogId,
+    attached: &TableRow,
+    table_name: &str,
+) {
+    let schema = SchemaId(7);
+    {
+        let _request = crate::store::begin_runtime_read_request(Some(9001));
+        require_stats(&stats(kv, catalog, table_name, None), 2, 3, "5", "101");
+        let captured = rows(kv, catalog, table_name, None);
+        kv.commit_delete_inline_table_rows_versionstamped(
+            catalog,
+            attached.table_id,
+            schema,
+            &[0],
+            None,
+        )
+        .unwrap();
+        assert_eq!(rows(kv, catalog, table_name, None), captured);
+        std::thread::sleep(std::time::Duration::from_secs(6));
+        assert_eq!(rows(kv, catalog, table_name, None), captured);
+        crate::runtime_inline_snapshot::capture::end_runtime_read_context(kv, catalog, 9001);
+    }
+    {
+        let _request = crate::store::begin_runtime_read_request(Some(9002));
+        require_stats(&stats(kv, catalog, table_name, None), 1, 3, "5", "5");
+        crate::runtime_inline_snapshot::capture::end_runtime_read_context(kv, catalog, 9002);
+    }
+    kv.register_inline_table_payload_with_table_versionstamped(
+        catalog,
+        attached.clone(),
+        schema,
+        b"row\t0\ti:101\n".to_vec(),
+    )
+    .unwrap();
+}
+
 fn rows(
     kv: &FdbOrderedCatalogKv,
     catalog: CatalogId,
     table_name: &str,
     snapshot: Option<u64>,
 ) -> String {
+    let _request =
+        crate::store::begin_runtime_read_request(crate::store::active_runtime_read_context_id());
     String::from_utf8(
-        read_foundationdb_inline_rows_payload(
-            kv,
-            catalog,
-            ReadInlineRowsPayload {
-                table_name: table_name.to_owned(),
-                snapshot: snapshot.map(|id| ReadSnapshot::new(DuckLakeSnapshotId(id))),
-                include_flushed: false,
-                include_deleted: false,
-            },
-        )
+        crate::runtime_read_versions::read_with_retry(|| {
+            read_foundationdb_inline_rows_payload(
+                kv,
+                catalog,
+                ReadInlineRowsPayload {
+                    table_name: table_name.to_owned(),
+                    snapshot: snapshot.map(|id| ReadSnapshot::new(DuckLakeSnapshotId(id))),
+                    include_flushed: false,
+                    include_deleted: false,
+                },
+            )
+        })
         .unwrap(),
     )
     .unwrap()
@@ -196,17 +287,21 @@ fn stats(
     table_name: &str,
     snapshot: Option<u64>,
 ) -> String {
+    let _request =
+        crate::store::begin_runtime_read_request(crate::store::active_runtime_read_context_id());
     String::from_utf8(
-        read_foundationdb_inline_rows_aggregate_stats_payload(
-            kv,
-            catalog,
-            ReadInlineRowsPayload {
-                table_name: table_name.to_owned(),
-                snapshot: snapshot.map(|id| ReadSnapshot::new(DuckLakeSnapshotId(id))),
-                include_flushed: false,
-                include_deleted: false,
-            },
-        )
+        crate::runtime_read_versions::read_with_retry(|| {
+            read_foundationdb_inline_rows_aggregate_stats_payload(
+                kv,
+                catalog,
+                ReadInlineRowsPayload {
+                    table_name: table_name.to_owned(),
+                    snapshot: snapshot.map(|id| ReadSnapshot::new(DuckLakeSnapshotId(id))),
+                    include_flushed: false,
+                    include_deleted: false,
+                },
+            )
+        })
         .unwrap(),
     )
     .unwrap()
@@ -221,4 +316,14 @@ fn unique_prefix() -> String {
             .unwrap()
             .as_nanos()
     )
+}
+
+struct InlineStatsPrefixCleanup(FdbOrderedCatalogKv);
+
+impl Drop for InlineStatsPrefixCleanup {
+    fn drop(&mut self) {
+        if let Ok(database) = crate::fdb_runtime::shared_foundationdb_database(None) {
+            let _ = crate::clear_foundationdb_prefix(&database, self.0.key_prefix());
+        }
+    }
 }

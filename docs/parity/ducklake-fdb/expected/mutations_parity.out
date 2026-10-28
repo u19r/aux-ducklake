@@ -6,3 +6,5 @@ mutations_parity_delete_cdf=1,30
 mutations_parity_time_travel_update=3,260
 mutations_parity_readback=3,270
 mutations_parity_readback_changes=9
+mutations_parity_delete_history=2,2,2
+mutations_parity_delete_history_tail=1,1

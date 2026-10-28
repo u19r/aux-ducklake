@@ -3,7 +3,6 @@ use std::sync::Mutex;
 use std::{collections::BTreeSet, ops::Deref};
 
 use foundationdb::options::MutationType;
-use futures::executor::block_on;
 
 use crate::{
     CatalogError, CatalogResult, CommitAttemptRow, DataMutationCommit, FdbOrderedCatalogKv,
@@ -37,37 +36,7 @@ use crate::{
 #[cfg(debug_assertions)]
 static LAST_COMMIT_UNKNOWN_INJECTION: Mutex<Option<String>> = Mutex::new(None);
 
-#[cfg(feature = "runtime-metrics")]
-#[derive(Clone, Copy)]
-struct MutationMetricStage(std::time::Instant);
-
-#[cfg(not(feature = "runtime-metrics"))]
-#[derive(Clone, Copy)]
-struct MutationMetricStage;
-
-impl MutationMetricStage {
-    fn start() -> Self {
-        #[cfg(feature = "runtime-metrics")]
-        {
-            Self(std::time::Instant::now())
-        }
-        #[cfg(not(feature = "runtime-metrics"))]
-        {
-            Self
-        }
-    }
-}
-
-#[cfg(feature = "runtime-metrics")]
-fn record_mutation_stage(stage: &str, started: MutationMetricStage) {
-    crate::runtime_metrics::record_runtime_method_elapsed(
-        &format!("method.fdb_data_mutation.{stage}"),
-        u64::try_from(started.0.elapsed().as_micros()).unwrap_or(u64::MAX),
-    );
-}
-
-#[cfg(not(feature = "runtime-metrics"))]
-fn record_mutation_stage(_stage: &str, _started: MutationMetricStage) {}
+use crate::runtime_trace::RuntimeSpan;
 
 impl FdbOrderedCatalogKv {
     pub(super) fn commit_planned_data_mutation(
@@ -103,7 +72,10 @@ impl FdbOrderedCatalogKv {
                     crate::store::invalidate_runtime_read_context(catalog);
                     return Ok(result);
                 }
-                MutationCommitAttempt::Retry(error) => last_retry_error = Some(error),
+                MutationCommitAttempt::Retry(error) => {
+                    crate::runtime_metrics::record_runtime_measurement("fdb.mutation.retry", 1, 0);
+                    last_retry_error = Some(error);
+                }
             }
         }
         Err(last_retry_error.unwrap_or_else(|| {
@@ -120,14 +92,19 @@ impl FdbOrderedCatalogKv {
         attempt_index: usize,
         recovery_id: Option<crate::CommitAttemptId>,
     ) -> CatalogResult<MutationCommitAttempt> {
+        let recovery_span = RuntimeSpan::enter("method.fdb_data_mutation.Recovery");
         if let Some(result) = recover_committed_mutation(self, catalog, recovery_id)? {
+            recovery_span.finish(true);
             return Ok(MutationCommitAttempt::Done(result));
         }
+        recovery_span.finish(true);
+        let reserve_span = RuntimeSpan::enter("method.fdb_data_mutation.ReserveFileIds");
         self.reserve_mutation_file_ids(
             catalog,
             &mut plan.mutation,
             &mut plan.read_context.append_partitions,
         )?;
+        reserve_span.finish(true);
         let FdbMutationPlan {
             attempt,
             commit_metadata,
@@ -149,9 +126,7 @@ impl FdbOrderedCatalogKv {
             file_column_stats,
             dropped_data_file_ids,
         } = mutation;
-        let started = MutationMetricStage::start();
-        record_mutation_stage("Recovery", started);
-        let started = MutationMetricStage::start();
+        let stage = RuntimeSpan::enter("method.fdb_data_mutation.Preflight");
         let mut delete_file_materializations = delete_files
             .into_iter()
             .map(DeleteFileMaterialization::historical_delete_file)
@@ -210,8 +185,8 @@ impl FdbOrderedCatalogKv {
         for materialization in &mut delete_file_materializations {
             prepare_delete_file_for_versionstamped_commit(materialization.row_mut(), placeholder);
         }
-        record_mutation_stage("Preflight", started);
-        let started = MutationMetricStage::start();
+        stage.finish(true);
+        let stage = RuntimeSpan::enter("method.fdb_data_mutation.DataContext");
         let mut data_file_context = MutationDataFileContext::load(
             self,
             catalog,
@@ -233,8 +208,8 @@ impl FdbOrderedCatalogKv {
         for row in &mut inline_file_deletions {
             row.validity = ValidityWindow::new(placeholder, None);
         }
-        record_mutation_stage("DataContext", started);
-        let started = MutationMetricStage::start();
+        stage.finish(true);
+        let stage = RuntimeSpan::enter("method.fdb_data_mutation.Validation");
         let prepared_inline_flushes = prepare_inline_flushes(self, catalog, &inline_flushes)?;
         data_file_context.load_missing(
             self,
@@ -245,9 +220,9 @@ impl FdbOrderedCatalogKv {
                 &dropped_data_file_ids,
             ),
         )?;
-        record_mutation_stage("Validation", started);
+        stage.finish(true);
 
-        let started = MutationMetricStage::start();
+        let stage = RuntimeSpan::enter("method.fdb_data_mutation.ConflictValidation");
         let trx = self.create_transaction()?;
         if let Some(fence) = read_context.snapshot_fence {
             fence.stage(self, &trx, catalog)?;
@@ -272,11 +247,11 @@ impl FdbOrderedCatalogKv {
                 dropped_data_file_ids: &dropped_data_file_ids,
             },
         )? {
-            record_mutation_stage("ConflictValidation", started);
+            stage.finish(true);
             return Ok(MutationCommitAttempt::Done(DataMutationCommit::default()));
         }
-        record_mutation_stage("ConflictValidation", started);
-        let started = MutationMetricStage::start();
+        stage.finish(true);
+        let stage = RuntimeSpan::enter("method.fdb_data_mutation.StageTransaction");
         let mut staged_inline_flush_items = 0usize;
         for flush in &prepared_inline_flushes {
             match stage_prepared_inline_flush_versionstamped(self, &trx, catalog, flush) {
@@ -404,13 +379,12 @@ impl FdbOrderedCatalogKv {
             if let ExpiredObjectCleanupPolicy::Schedule(cleanup_kind) =
                 expired_object_cleanup_policy
             {
-                trx.set(
-                    &self.namespaced_key(&scheduled_data_file_cleanup_key(catalog, data_file_id)),
-                    &encode_scheduled_data_cleanup_value(
-                        cleanup_kind,
-                        cleanup_schedule_start_micros,
-                    ),
+                let key = scheduled_data_file_cleanup_key(catalog, data_file_id);
+                let value = encode_scheduled_data_cleanup_value(
+                    cleanup_kind,
+                    cleanup_schedule_start_micros,
                 );
+                self.stage_transaction_value(&trx, &key, &value)?;
             }
         }
         for expired in expired_delete_files {
@@ -421,23 +395,21 @@ impl FdbOrderedCatalogKv {
                 expired_object_cleanup_policy,
                 ExpiredObjectCleanupPolicy::Schedule(_)
             ) {
-                trx.set(
-                    &self.namespaced_key(&scheduled_delete_file_cleanup_key(
-                        catalog,
-                        row.delete_file_id,
-                    )),
-                    &encode_scheduled_delete_cleanup_value(
-                        expired.table_id,
-                        cleanup_schedule_start_micros,
-                    ),
+                let key = scheduled_delete_file_cleanup_key(catalog, row.delete_file_id);
+                let value = encode_scheduled_delete_cleanup_value(
+                    expired.table_id,
+                    cleanup_schedule_start_micros,
                 );
+                self.stage_transaction_value(&trx, &key, &value)?;
             }
         }
-        record_mutation_stage("StageTransaction", started);
+        stage.finish(true);
         reject_oversized_staged_data_mutation(&trx)?;
 
-        let started = MutationMetricStage::start();
+        let stage = RuntimeSpan::enter("method.fdb_data_mutation.CommitTransaction");
         let versionstamp = trx.get_versionstamp();
+        // A maybe-committed result must not reuse the preparation's absent receipt.
+        crate::catalog_request_read_set::invalidate_after_mutation(catalog);
         if let Err(error) = commit_transaction(trx, attempt_id) {
             let error_class = classify_fdb_error(error);
             if read_context.snapshot_fence.is_none()
@@ -448,9 +420,12 @@ impl FdbOrderedCatalogKv {
             }
             match mutation_failure_action(error_class, attempt_index) {
                 MutationFailureAction::RecoverMaybeCommitted => {
+                    let recovery_span = RuntimeSpan::enter("method.fdb_data_mutation.Recovery");
                     if let Some(result) = recover_committed_mutation(self, catalog, recovery_id)? {
+                        recovery_span.finish(true);
                         return Ok(MutationCommitAttempt::Done(result));
                     }
+                    recovery_span.finish(true);
                 }
                 MutationFailureAction::Retry => {
                     return Ok(MutationCommitAttempt::Retry(map_fdb_error(error)));
@@ -465,9 +440,13 @@ impl FdbOrderedCatalogKv {
             ));
         }
 
-        let order = committed_order(block_on(versionstamp).map_err(map_fdb_error)?.deref())?;
-        record_mutation_stage("CommitTransaction", started);
-        let started = MutationMetricStage::start();
+        let order = committed_order(
+            crate::fdb_runtime::wait_for_fdb("wait.fdb.versionstamp", versionstamp)
+                .map_err(map_fdb_error)?
+                .deref(),
+        )?;
+        stage.finish(true);
+        let stage = RuntimeSpan::enter("method.fdb_data_mutation.Finalize");
         for row in &mut data_files {
             if row.max_partial_order.is_some() {
                 row.validity.end_order = None;
@@ -493,7 +472,7 @@ impl FdbOrderedCatalogKv {
             remove_cached_file_partition_values(self, catalog, row.data_file_id);
         }
         remove_cached_file_column_stats_rows(self, catalog, &file_column_stats);
-        record_mutation_stage("Finalize", started);
+        stage.finish(true);
         Ok(MutationCommitAttempt::Done(DataMutationCommit {
             data_files,
             delete_files: DeleteFileMaterialization::rows(&delete_file_materializations),
@@ -509,7 +488,9 @@ impl FdbOrderedCatalogKv {
 fn reject_oversized_staged_data_mutation(
     transaction: &foundationdb::Transaction,
 ) -> CatalogResult<()> {
-    let approximate_size = block_on(transaction.get_approximate_size()).map_err(map_fdb_error)?;
+    let approximate_size =
+        crate::fdb_runtime::wait_for_fdb("wait.fdb.size", transaction.get_approximate_size())
+            .map_err(map_fdb_error)?;
     let approximate_size = usize::try_from(approximate_size).map_err(|_| {
         CatalogError::InvalidMutation(
             "foundationdb returned a negative staged data mutation size".to_owned(),
@@ -531,7 +512,8 @@ fn commit_transaction(
     #[cfg(test)]
     crate::snapshot_fence::snapshot_fence_tests::invoke_before_commit();
     inject_commit_unknown("before", attempt_id)?;
-    block_on(transaction.commit())
+    crate::fdb_runtime::record_transaction_usage(&transaction);
+    crate::fdb_runtime::wait_for_fdb("wait.fdb.commit", transaction.commit())
         .map(|_| ())
         .map_err(|error| *error)?;
     inject_commit_unknown("after", attempt_id)

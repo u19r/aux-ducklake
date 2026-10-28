@@ -5,7 +5,7 @@ use crate::{
     keys::{data_file_begin_prefix, data_file_begin_scan_end, data_file_key},
     list_data_file_changes, list_snapshots, list_table_deletion_scan_files,
     runtime_snapshot_range::{ChangeFeedEndSnapshot, ChangeFeedStartSnapshot},
-    runtime_snapshots::{public_snapshot_order_span, public_snapshot_sequences_by_order},
+    runtime_snapshots::{public_snapshot_order_span, public_snapshot_sequences_by_order_shared},
     snapshot_operations::{SnapshotOperationKind, snapshot_operation_table_ids_at},
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -431,18 +431,13 @@ fn display_delete_file(row: Option<&DeleteFileRow>) -> (String, String, String, 
     )
 }
 
-fn public_sequences_by_order(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-) -> CatalogResult<BTreeMap<CatalogOrderId, u64>> {
-    public_snapshot_sequences_by_order(kv, catalog)
-}
-
 fn snapshot_ids_by_order(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
 ) -> CatalogResult<BTreeMap<CatalogOrderId, u64>> {
-    let mut ids = public_sequences_by_order(kv, catalog)?;
+    let mut ids = public_snapshot_sequences_by_order_shared(kv, catalog)?
+        .as_ref()
+        .clone();
     for snapshot in list_snapshots(kv, catalog)? {
         ids.insert(snapshot.order, snapshot.sequence.0);
     }

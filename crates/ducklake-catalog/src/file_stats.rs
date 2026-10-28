@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use crate::runtime_metrics::RuntimeMetricStage;
@@ -28,7 +28,7 @@ static FILE_COLUMN_STATS_ROW_CACHE: OnceLock<
     Mutex<LruCache<FileColumnStatsCacheKey, FileColumnStatsRow>>,
 > = OnceLock::new();
 static FILE_COLUMN_STATS_FILE_CACHE: OnceLock<
-    Mutex<LruCache<FileColumnStatsFileCacheKey, Vec<FileColumnStatsRow>>>,
+    Mutex<LruCache<FileColumnStatsFileCacheKey, Arc<Vec<FileColumnStatsRow>>>>,
 > = OnceLock::new();
 
 #[cfg(feature = "runtime-metrics")]
@@ -113,49 +113,30 @@ impl FileColumnStatsRow {
     }
 
     pub fn decode(bytes: &[u8]) -> CatalogResult<Self> {
-        let version = bytes
-            .first()
-            .copied()
-            .ok_or_else(|| CatalogError::Decode("file column stats row is empty".to_owned()))?;
-        let fixed_len = match version {
-            1 => 1 + 8 + 8 + 8 + 8,
-            2 | 3 => 1 + 8 + 8 + 8 + 9 + 8,
-            other => {
-                return Err(CatalogError::Decode(format!(
-                    "unsupported file column stats row version {other}"
-                )));
-            }
-        };
-        if bytes.len() < fixed_len {
-            return Err(CatalogError::Decode(format!(
-                "file column stats row is too short: {} bytes",
-                bytes.len()
-            )));
-        }
-        let data_file_start = 1;
-        let table_start = data_file_start + 8;
-        let column_start = table_start + 8;
-        let value_count_start = column_start + 8;
-        let (value_count, null_count_start) = if version >= 2 {
-            (
-                decode_optional_u64(bytes, value_count_start, "value count")?,
-                value_count_start + 9,
-            )
+        FileColumnStatsRef::decode(bytes).map(Into::into)
+    }
+}
+
+pub(crate) struct FileColumnStatsRef<'a> {
+    pub data_file_id: DataFileId,
+    pub table_id: TableId,
+    pub column_id: ColumnId,
+    pub value_count: Option<u64>,
+    pub null_count: u64,
+    pub min_value: Option<&'a str>,
+    pub max_value: Option<&'a str>,
+    pub extra_stats: Option<&'a str>,
+}
+
+impl<'a> FileColumnStatsRef<'a> {
+    pub(crate) fn decode(bytes: &'a [u8]) -> CatalogResult<Self> {
+        let (version, fixed_len) = validate_stats_row_layout(bytes)?;
+        let value_count = if version >= 2 {
+            decode_optional_u64(bytes, 25, "value count")?
         } else {
-            (None, value_count_start)
+            None
         };
-        let values_start = null_count_start + 8;
-        let data_file_id = DataFileId(decode_u64(
-            &bytes[data_file_start..table_start],
-            "data file id",
-        )?);
-        let table_id = TableId(decode_u64(&bytes[table_start..column_start], "table id")?);
-        let column_id = ColumnId(decode_u64(
-            &bytes[column_start..value_count_start],
-            "column id",
-        )?);
-        let null_count = decode_u64(&bytes[null_count_start..values_start], "null count")?;
-        let (min_value, offset) = decode_optional_string(bytes, values_start, "min value")?;
+        let (min_value, offset) = decode_optional_string(bytes, fixed_len, "min value")?;
         let (max_value, offset) = decode_optional_string(bytes, offset, "max value")?;
         let (extra_stats, offset) = if version >= 3 {
             decode_optional_string(bytes, offset, "extra stats")?
@@ -169,15 +150,68 @@ impl FileColumnStatsRow {
             )));
         }
         Ok(Self {
-            data_file_id,
-            table_id,
-            column_id,
+            data_file_id: DataFileId(decode_u64(&bytes[1..9], "data file id")?),
+            table_id: TableId(decode_u64(&bytes[9..17], "table id")?),
+            column_id: ColumnId(decode_u64(&bytes[17..25], "column id")?),
             value_count,
-            null_count,
+            null_count: decode_u64(&bytes[fixed_len - 8..fixed_len], "null count")?,
             min_value,
             max_value,
             extra_stats,
         })
+    }
+}
+
+fn validate_stats_row_layout(bytes: &[u8]) -> CatalogResult<(u8, usize)> {
+    let version = bytes
+        .first()
+        .copied()
+        .ok_or_else(|| CatalogError::Decode("file column stats row is empty".to_owned()))?;
+    let fixed_len = match version {
+        1 => 1 + 8 + 8 + 8 + 8,
+        2 | 3 => 1 + 8 + 8 + 8 + 9 + 8,
+        other => {
+            return Err(CatalogError::Decode(format!(
+                "unsupported file column stats row version {other}"
+            )));
+        }
+    };
+    if bytes.len() < fixed_len {
+        return Err(CatalogError::Decode(format!(
+            "file column stats row is too short: {} bytes",
+            bytes.len()
+        )));
+    }
+    Ok((version, fixed_len))
+}
+
+impl From<FileColumnStatsRef<'_>> for FileColumnStatsRow {
+    fn from(row: FileColumnStatsRef<'_>) -> Self {
+        Self {
+            data_file_id: row.data_file_id,
+            table_id: row.table_id,
+            column_id: row.column_id,
+            value_count: row.value_count,
+            null_count: row.null_count,
+            min_value: row.min_value.map(str::to_owned),
+            max_value: row.max_value.map(str::to_owned),
+            extra_stats: row.extra_stats.map(str::to_owned),
+        }
+    }
+}
+
+impl<'a> From<&'a FileColumnStatsRow> for FileColumnStatsRef<'a> {
+    fn from(row: &'a FileColumnStatsRow) -> Self {
+        Self {
+            data_file_id: row.data_file_id,
+            table_id: row.table_id,
+            column_id: row.column_id,
+            value_count: row.value_count,
+            null_count: row.null_count,
+            min_value: row.min_value.as_deref(),
+            max_value: row.max_value.as_deref(),
+            extra_stats: row.extra_stats.as_deref(),
+        }
     }
 }
 
@@ -357,7 +391,7 @@ pub(crate) fn list_file_column_stats_for_data_file_ids(
         }
         let key = file_column_stats_file_cache_key(kv, catalog, *data_file_id);
         if let Some(cached) = cached_file_column_stats_for_data_file(&key) {
-            rows.extend(cached);
+            rows.extend(cached.iter().cloned());
         } else {
             missing.push(key);
         }
@@ -370,6 +404,33 @@ pub(crate) fn list_file_column_stats_for_data_file_ids(
         "method.file_stats.list_file_column_stats_for_data_file_ids",
         started,
     );
+    Ok(rows)
+}
+
+pub(crate) fn list_file_column_stats_for_data_file_columns(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    files: &[DataFileId],
+    columns: &BTreeSet<ColumnId>,
+) -> CatalogResult<Vec<FileColumnStatsRow>> {
+    if columns.is_empty() {
+        return list_file_column_stats_for_data_file_ids(kv, catalog, files);
+    }
+    let keys = files
+        .iter()
+        .flat_map(|file| {
+            columns
+                .iter()
+                .map(move |column| file_column_stats_cache_key(kv, catalog, *file, *column))
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let (mut rows, missing) = cached_file_column_stats_rows(keys);
+    rows.extend(load_missing_file_column_stats_for_data_file_columns(
+        kv, catalog, missing,
+    )?);
+    rows.sort_by_key(|row| (row.table_id.0, row.data_file_id.0, row.column_id.0));
     Ok(rows)
 }
 
@@ -386,10 +447,20 @@ fn load_missing_file_column_stats_for_data_file_ids(
         return load_dense_file_column_stats_uncached(kv, catalog, missing);
     }
 
+    let prefixes = missing
+        .iter()
+        .map(|key| file_column_stats_data_file_prefix(catalog, key.data_file_id))
+        .collect::<Vec<_>>();
+    let scans = kv.scan_prefixes(&prefixes, RangeDirection::Forward, usize::MAX)?;
     let mut rows = Vec::new();
-    for key in missing {
-        let file_rows =
-            load_file_column_stats_for_data_file_uncached(kv, catalog, key.data_file_id)?;
+    for (key, items) in missing.into_iter().zip(scans) {
+        let mut file_rows = Vec::with_capacity(items.len());
+        for item in items {
+            let row = FileColumnStatsRow::decode(&item.value)?;
+            validate_file_column_stats_data_file_row(catalog, key.data_file_id, &row)?;
+            file_rows.push(row);
+        }
+        file_rows.sort_by_key(|row| (row.table_id.0, row.data_file_id.0, row.column_id.0));
         insert_file_column_stats_rows(kv, catalog, &file_rows);
         insert_file_column_stats_for_data_file(key, file_rows.clone());
         rows.extend(file_rows);
@@ -457,25 +528,6 @@ fn load_dense_file_column_stats_uncached(
         insert_file_column_stats_for_data_file(key, file_rows.clone());
         rows.extend(file_rows);
     }
-    Ok(rows)
-}
-
-fn load_file_column_stats_for_data_file_uncached(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    data_file_id: DataFileId,
-) -> CatalogResult<Vec<FileColumnStatsRow>> {
-    let mut rows = Vec::new();
-    for item in kv.scan_prefix(
-        &file_column_stats_data_file_prefix(catalog, data_file_id),
-        RangeDirection::Forward,
-        usize::MAX,
-    )? {
-        let row = FileColumnStatsRow::decode(&item.value)?;
-        validate_file_column_stats_data_file_row(catalog, data_file_id, &row)?;
-        rows.push(row);
-    }
-    rows.sort_by_key(|row| (row.table_id.0, row.data_file_id.0, row.column_id.0));
     Ok(rows)
 }
 
@@ -592,13 +644,13 @@ fn load_missing_file_column_stats_for_data_file_columns(
             .map(|key| key.column_id)
             .collect::<BTreeSet<_>>();
         if let Some(cached_rows) = cached_file_column_stats_for_data_file(&file_key) {
-            for row in cached_rows {
+            for row in cached_rows.iter() {
                 if requested_columns.contains(&row.column_id) {
                     insert_file_column_stats(
                         file_column_stats_cache_key_for_row(kv, catalog, &row),
                         row.clone(),
                     );
-                    rows.push(row);
+                    rows.push(row.clone());
                 }
             }
         } else if requested_columns.len() >= FULL_FILE_STATS_LOAD_MIN_COLUMNS {
@@ -747,7 +799,7 @@ fn insert_file_column_stats(key: FileColumnStatsCacheKey, row: FileColumnStatsRo
 
 fn cached_file_column_stats_for_data_file(
     key: &FileColumnStatsFileCacheKey,
-) -> Option<Vec<FileColumnStatsRow>> {
+) -> Option<Arc<Vec<FileColumnStatsRow>>> {
     let Ok(mut cache) = file_column_stats_file_cache().lock() else {
         return None;
     };
@@ -761,7 +813,7 @@ fn insert_file_column_stats_for_data_file(
     let Ok(mut cache) = file_column_stats_file_cache().lock() else {
         return;
     };
-    cache.insert(key, rows);
+    cache.insert(key, Arc::new(rows));
 }
 
 pub(crate) fn remove_cached_file_column_stats(
@@ -830,7 +882,7 @@ fn file_column_stats_row_cache()
 }
 
 fn file_column_stats_file_cache()
--> &'static Mutex<LruCache<FileColumnStatsFileCacheKey, Vec<FileColumnStatsRow>>> {
+-> &'static Mutex<LruCache<FileColumnStatsFileCacheKey, Arc<Vec<FileColumnStatsRow>>>> {
     FILE_COLUMN_STATS_FILE_CACHE
         .get_or_init(|| Mutex::new(LruCache::new(FILE_COLUMN_STATS_ROW_CACHE_CAPACITY)))
 }
@@ -900,11 +952,11 @@ fn encode_optional_string(out: &mut Vec<u8>, value: Option<&str>) {
     }
 }
 
-fn decode_optional_string(
-    bytes: &[u8],
+fn decode_optional_string<'a>(
+    bytes: &'a [u8],
     offset: usize,
     field: &str,
-) -> CatalogResult<(Option<String>, usize)> {
+) -> CatalogResult<(Option<&'a str>, usize)> {
     if bytes.len() < offset + 5 {
         return Err(CatalogError::Decode(format!("{field} is truncated")));
     }
@@ -929,8 +981,7 @@ fn decode_optional_string(
         }
         1 => Some(
             std::str::from_utf8(&bytes[value_start..value_end])
-                .map_err(|err| CatalogError::Decode(format!("{field} is not utf8: {err}")))?
-                .to_owned(),
+                .map_err(|err| CatalogError::Decode(format!("{field} is not utf8: {err}")))?,
         ),
         other => {
             return Err(CatalogError::Decode(format!(

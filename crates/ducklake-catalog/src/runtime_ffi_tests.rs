@@ -1,6 +1,7 @@
 #![cfg_attr(not(feature = "foundationdb"), allow(unused_imports))]
 
 #[cfg(feature = "foundationdb")]
+use crate::runtime_protocol::RuntimeRequest;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::*;
@@ -25,7 +26,7 @@ fn mutating_runtime_operation_rejects_page_continuation_before_execution() {
     .with_page(1, "a".repeat(64))
     .unwrap();
 
-    let error = runtime_response_from_request(request).unwrap_err();
+    let error = runtime_response_from_request((&request).into()).unwrap_err();
 
     assert!(error.to_string().contains("cannot be paginated"));
 }
@@ -57,7 +58,7 @@ fn given_cached_read_context_when_mutation_fails_then_retry_reads_latest_snapsho
     .with_read_context_id(read_context_id)
     .unwrap();
 
-    assert!(runtime_response_from_request(request).is_err());
+    assert!(runtime_response_from_request((&request).into()).is_err());
 
     let _retry = crate::store::begin_runtime_read_request(Some(read_context_id));
     assert_eq!(crate::latest_snapshot(&kv, catalog).unwrap(), Some(latest));
@@ -82,9 +83,9 @@ fn ending_runtime_read_context_allows_context_id_reuse_without_cached_reads() {
     .unwrap()
     .with_read_context_id(context_id)
     .unwrap();
-    let response = runtime_response_from_request(request).unwrap();
+    let response = runtime_response_from_request((&request).into()).unwrap();
     assert!(
-        String::from_utf8(response.payload)
+        decode_test_text(response.payload)
             .unwrap()
             .contains("runtime_read_context_ended=9003991")
     );
@@ -119,7 +120,7 @@ fn ffi_probe_round_trips_runtime_frame() {
     let response = RuntimeResponse::decode(&response_bytes).unwrap();
     assert_eq!(response.request_id, "ffi-probe");
     assert_eq!(response.status, RuntimeResponseStatus::Ok);
-    let payload = String::from_utf8(response.payload).unwrap();
+    let payload = decode_test_text(response.payload).unwrap();
     assert!(payload.contains("runtime_ffi=ok"));
     assert!(payload.contains("backend=foundationdb"));
 }
@@ -654,7 +655,7 @@ fn ffi_get_catalog_for_snapshot_reads_live_foundationdb_catalog_when_enabled() {
     unsafe { ducklake_catalog_runtime_free(out.ptr, out.len) };
     let response = RuntimeResponse::decode(&response_bytes).unwrap();
     assert_eq!(response.status, RuntimeResponseStatus::Ok);
-    let payload = String::from_utf8(response.payload).unwrap();
+    let payload = decode_test_text(response.payload).unwrap();
     assert!(payload.contains("table_count=0"));
 }
 
@@ -949,6 +950,13 @@ fn ffi_standalone_inline_insert_then_flush_moves_snapshot_insert_feed_to_file_wh
         ),
     );
 
+    let kv = crate::FdbOrderedCatalogKv::open_default_with_prefix(prefix.as_bytes()).unwrap();
+    let [flushed_file] = crate::list_current_data_files(&kv, CatalogId(1), TableId(15))
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_eq!(flushed_file.path, "main/runtime/inline-flush.parquet");
+    assert_eq!(flushed_file.record_count, 2);
     remove_env("AUX_DUCKLAKE_FDB_PREFIX");
     assert!(initialized.contains("operation=InitializeDuckLake"));
     assert!(created_table.contains("created_table_count=1"));
@@ -966,7 +974,8 @@ fn ffi_standalone_inline_insert_then_flush_moves_snapshot_insert_feed_to_file_wh
     );
     assert!(
         files_after_flush.contains(&format!(
-            "change_file\tadded\t{public_inline_insert}\t30\t15\t"
+            "change_file\tadded\t{public_inline_insert}\t{}\t15\t",
+            flushed_file.data_file_id.0
         )),
         "after flush: {files_after_flush}"
     );
@@ -1039,6 +1048,25 @@ fn ffi_two_connections_keep_inline_rows_at_file_list_snapshot_during_flush_when_
         .append_data_files_versionstamped(catalog, files)
         .unwrap();
     let query_snapshot = crate::latest_snapshot(&reader, catalog).unwrap().unwrap();
+    let scan_reader = reader.with_read_version().unwrap();
+    let started = std::time::Instant::now();
+    for _ in 0..80 {
+        let files = futures::executor::block_on(scan_reader.list_data_files_at_async(
+            catalog,
+            table,
+            query_snapshot.order,
+        ))
+        .unwrap();
+        assert_eq!(files.len(), 99);
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| file.data_file_id)
+                .collect::<std::collections::BTreeSet<_>>(),
+            (0..99).map(|id| DataFileId(1600 + id)).collect()
+        );
+    }
+    eprintln!("file_index_80_reads_us={}", started.elapsed().as_micros());
     let flusher = crate::FdbOrderedCatalogKv::open_default_with_prefix(prefix.as_bytes()).unwrap();
     let read_context_id = 16_001;
 
@@ -1472,25 +1500,27 @@ fn ffi_list_snapshots_reads_live_foundationdb_catalog_when_enabled() {
     )
     .unwrap();
     let initial = crate::latest_snapshot(&kv, CatalogId(1)).unwrap().unwrap();
-    kv.commit_data_mutation_versionstamped(
-        CatalogId(1),
-        None,
-        crate::FdbDataMutation::new(
-            vec![DataFileRow::new(
-                DataFileId(42),
-                table,
-                "main/runtime/fdb-snapshot-list.parquet",
-                5,
-                1024,
-                initial.order,
-            )],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        ),
-    )
-    .unwrap();
+    let commit = kv
+        .commit_data_mutation_versionstamped(
+            CatalogId(1),
+            None,
+            crate::FdbDataMutation::new(
+                vec![DataFileRow::new(
+                    DataFileId(42),
+                    table,
+                    "main/runtime/fdb-snapshot-list.parquet",
+                    5,
+                    1024,
+                    initial.order,
+                )],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+        )
+        .unwrap();
+    let source_file_id = commit.data_files[0].data_file_id;
     kv.commit_data_mutation_versionstamped(
         CatalogId(1),
         None,
@@ -1498,7 +1528,7 @@ fn ffi_list_snapshots_reads_live_foundationdb_catalog_when_enabled() {
             Vec::new(),
             vec![DeleteFileRow::new(
                 DeleteFileId(43),
-                DataFileId(42),
+                source_file_id,
                 "main/runtime/fdb-snapshot-list-delete.parquet",
                 2,
                 128,
@@ -1594,7 +1624,7 @@ fn ffi_list_data_files_at_reads_live_foundationdb_catalog_when_enabled() {
     unsafe { ducklake_catalog_runtime_free(out.ptr, out.len) };
     let response = RuntimeResponse::decode(&response_bytes).unwrap();
     assert_eq!(response.status, RuntimeResponseStatus::Ok);
-    let payload = String::from_utf8(response.payload).unwrap();
+    let payload = decode_test_text(response.payload).unwrap();
     assert!(payload.contains("file_count=1"));
     assert!(payload.contains(&format!(
         "file\t{}\t{}\tmain/runtime/fdb-file.parquet\t7\t1024\t11",
@@ -1923,7 +1953,9 @@ fn ffi_compaction_mutations_update_live_foundationdb_catalog_when_enabled() {
     let latest = crate::latest_snapshot(&kv, CatalogId(1)).unwrap().unwrap();
     let current = list_data_files_at(&kv, CatalogId(1), table, latest.order).unwrap();
     assert_eq!(current.len(), 1);
-    assert_eq!(current[0].data_file_id, DataFileId(92));
+    assert_eq!(current[0].data_file_id, DataFileId(2));
+    assert_eq!(current[0].path, "main/runtime/fdb-merged.parquet");
+    assert_eq!(current[0].record_count, 22);
 }
 
 #[cfg(feature = "foundationdb")]
@@ -2009,7 +2041,12 @@ fn ffi_rewrite_delete_mutation_updates_live_foundationdb_catalog_when_enabled() 
     let latest = crate::latest_snapshot(&kv, CatalogId(1)).unwrap().unwrap();
     let current = list_data_files_at(&kv, CatalogId(1), table, latest.order).unwrap();
     assert_eq!(current.len(), 1);
-    assert_eq!(current[0].data_file_id, DataFileId(102));
+    assert_eq!(current[0].data_file_id, DataFileId(2));
+    assert_eq!(
+        current[0].path,
+        "main/runtime/fdb-rewrite-replacement.parquet"
+    );
+    assert_eq!(current[0].record_count, 15);
 }
 
 #[test]
@@ -2398,7 +2435,7 @@ fn runtime_request_payload_for_catalog_with_optional_context(
         "{}",
         String::from_utf8_lossy(&response.payload)
     );
-    String::from_utf8(response.payload).unwrap()
+    decode_test_text(response.payload).unwrap()
 }
 
 fn payload_line_u64(payload: &str, key: &str) -> u64 {
@@ -2465,4 +2502,8 @@ impl Drop for FoundationDbPrefixCleanup {
             let _ = crate::clear_foundationdb_prefix(&database, self.prefix.as_bytes());
         }
     }
+}
+
+fn decode_test_text(payload: impl AsRef<[u8]>) -> Result<String, std::str::Utf8Error> {
+    std::str::from_utf8(payload.as_ref()).map(str::to_owned)
 }

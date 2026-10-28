@@ -1,10 +1,6 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    ops::Deref,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 use foundationdb::options::ConflictRangeType;
-use futures::{executor::block_on, future::try_join_all};
 
 #[cfg(test)]
 use crate::store::latest_snapshot;
@@ -12,7 +8,7 @@ use crate::{
     CatalogError, CatalogResult, CommitAttemptId, CommitAttemptRow, DataFileId, DataFileRow,
     DataMutationCommit, DeleteFileId, DeleteFileRow, FdbOrderedCatalogKv, FilePartitionValueRow,
     InlineTableFlush, TableRow,
-    conflict::{commit_attempt_key, load_commit_attempt},
+    conflict::commit_attempt_key,
     data_file_store::data_file_next_row_id,
     data_mutation_intents::DeleteFileMaterialization,
     fdb_data_mutations::FdbAppendPartitionExpectation,
@@ -158,8 +154,7 @@ pub(super) fn reject_existing_file_ids(
         .iter()
         .map(|row| delete_file_key(catalog, row.row().delete_file_id))
         .collect::<Vec<_>>();
-    let existing = transaction_batch_get(
-        kv,
+    let existing = kv.fetch_transaction_values(
         trx,
         &data_file_keys
             .iter()
@@ -186,23 +181,6 @@ pub(super) fn reject_existing_file_ids(
         }
     }
     Ok(())
-}
-
-pub(super) fn transaction_batch_get(
-    kv: &FdbOrderedCatalogKv,
-    trx: &foundationdb::Transaction,
-    keys: &[Vec<u8>],
-) -> CatalogResult<Vec<Option<Vec<u8>>>> {
-    let reads = keys.iter().map(|key| {
-        let namespaced = kv.namespaced_key(key);
-        async move {
-            trx.get(&namespaced, false)
-                .await
-                .map_err(map_fdb_error)
-                .map(|value| value.map(|bytes| bytes.deref().to_vec()))
-        }
-    });
-    block_on(try_join_all(reads))
 }
 
 pub(super) fn stage_current_data_file_conflicts(
@@ -241,7 +219,7 @@ pub(super) fn reject_allocated_table_row_id_reuse_in_transaction(
         .iter()
         .map(|table_id| table_next_row_id_key(catalog, *table_id))
         .collect::<Vec<_>>();
-    let values = transaction_batch_get(kv, trx, &keys)?;
+    let values = kv.fetch_transaction_values(trx, &keys)?;
     for ((table_id, rows), value) in by_table.into_iter().zip(values) {
         let next_row_id = match value {
             Some(value) => u64::from_be_bytes(value.try_into().map_err(|_| {
@@ -252,7 +230,8 @@ pub(super) fn reject_allocated_table_row_id_reuse_in_transaction(
         for row in rows {
             if row.row_id_start < next_row_id {
                 return Err(CatalogError::InvalidMutation(format!(
-                    "conflict committing data mutation: data file {} row ids [{}..{}) reuse allocated row ids below table {} next row id {}",
+                    "conflict committing data mutation: data file {} row ids [{}..{}) reuse \
+                     allocated row ids below table {} next row id {}",
                     row.data_file_id.0,
                     row.row_id_start,
                     row.row_id_start.saturating_add(row.record_count),
@@ -343,7 +322,7 @@ pub(super) fn reject_stale_data_file_targets_in_transaction(
             .iter()
             .map(|table_id| current_table_row_key(catalog, *table_id)),
     );
-    let first_read_values = transaction_batch_get(kv, trx, &first_read_keys)?;
+    let first_read_values = kv.fetch_transaction_values(trx, &first_read_keys)?;
     let recovery_value_count = usize::from(recovery_id.is_some());
     let recovery_value = if recovery_value_count == 1 {
         first_read_values.first()
@@ -400,7 +379,8 @@ pub(super) fn reject_stale_data_file_targets_in_transaction(
             else {
                 if read_order.is_some() {
                     return Err(CatalogError::InvalidMutation(format!(
-                        "conflict committing data mutation: partition expectation is missing for data file {}",
+                        "conflict committing data mutation: partition expectation is missing for \
+                         data file {}",
                         data_file.data_file_id.0
                     )));
                 }
@@ -454,7 +434,7 @@ pub(super) fn reject_stale_data_file_targets_in_transaction(
         .collect::<Vec<_>>();
     for ((data_file_id, _), value) in legacy_delete_ids
         .iter()
-        .zip(transaction_batch_get(kv, trx, &keys)?)
+        .zip(kv.fetch_transaction_values(trx, &keys)?)
     {
         let Some(value) = value else {
             return Err(CatalogError::NotFound("delete file"));
@@ -510,7 +490,8 @@ pub(super) fn reject_duplicate_proposed_file_ids(
     for delete_file_id in delete_file_ids_iter {
         if !seen_delete_file_ids.insert(delete_file_id) {
             return Err(CatalogError::InvalidMutation(format!(
-                "conflict committing data mutation: delete file id {} is duplicated in the mutation",
+                "conflict committing data mutation: delete file id {} is duplicated in the \
+                 mutation",
                 delete_file_id.0
             )));
         }
@@ -526,7 +507,13 @@ pub(crate) fn recover_committed_mutation(
     let Some(attempt_id) = attempt_id else {
         return Ok(None);
     };
-    Ok(load_commit_attempt(kv, catalog, attempt_id)?.map(|_| DataMutationCommit::default()))
+    crate::catalog_request_read_set::fetch_value(
+        kv,
+        catalog,
+        &commit_attempt_key(catalog, attempt_id),
+    )?
+    .map(|bytes| CommitAttemptRow::decode(&bytes).map(|_| DataMutationCommit::default()))
+    .transpose()
 }
 
 #[cfg(test)]

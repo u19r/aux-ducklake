@@ -1,11 +1,16 @@
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+    use super::decode_test_text;
+    use std::{
+        cell::{Cell, RefCell},
+        collections::BTreeMap,
+        rc::Rc,
+    };
 
     use super::super::{
         CatalogSnapshotIdKind, catalog_snapshot_payload, catalog_snapshot_payload_with_kind,
-        columns_parent_before_children, conflict_snapshot_watermarks, public_snapshot_payload,
-        snapshot_payload,
+        columns_parent_before_children, public_snapshot_payload, snapshot_payload,
+        snapshot_watermarks,
     };
     #[cfg(feature = "foundationdb")]
     use crate::FdbOrderedCatalogKv;
@@ -32,6 +37,88 @@ mod tests {
     };
 
     #[test]
+    fn given_current_conflict_state_when_rendering_then_identifiers_and_schema_are_consistent() {
+        let catalog = CatalogId(1);
+        let mut inner = FakeOrderedCatalogKv::new();
+        initialize_catalog_if_absent(&mut inner, catalog).unwrap();
+        commit_create_table_row(
+            &mut inner,
+            catalog,
+            TableRow::new(TableId(10), "orders", CatalogOrderId::uuid_v7(0)),
+        )
+        .unwrap();
+        let kv = CatalogFactsScanRecordingKv::new(inner, catalog);
+        let _request = crate::store::begin_runtime_read_request(None);
+        let result =
+            decode_test_text(super::super::conflict_snapshot_payload(&kv, catalog).unwrap())
+                .unwrap();
+        assert!(result.contains("ducklake_next_catalog_id=11\n"), "{result}");
+        assert!(result.contains("ducklake_next_file_id=0\n"), "{result}");
+        assert!(result.contains("ducklake_schema_version=1\n"), "{result}");
+        eprintln!(
+            "conflict-state batches={} point_reads={}",
+            kv.batches.get(),
+            kv.point_reads.get()
+        );
+        assert_eq!(kv.batches.get(), 1);
+        assert_eq!(kv.point_reads.get(), 0);
+    }
+
+    #[test]
+    fn given_missing_or_invalid_current_schema_when_rendering_conflict_then_history_fallback_and_errors_are_preserved()
+     {
+        for current in [None, Some(Vec::new()), Some(vec![1])] {
+            let catalog = CatalogId(1);
+            let mut kv = FakeOrderedCatalogKv::new();
+            initialize_catalog_if_absent(&mut kv, catalog).unwrap();
+            commit_create_table_row(
+                &mut kv,
+                catalog,
+                TableRow::new(TableId(10), "orders", CatalogOrderId::uuid_v7(0)),
+            )
+            .unwrap();
+            let snapshot = latest_snapshot(&kv, catalog).unwrap().unwrap();
+            let mut batch = KvBatch::new();
+            let key = crate::keys::current_schema_version_key(catalog);
+            if let Some(value) = &current {
+                batch.put(key, value.clone());
+            } else {
+                batch.delete(key);
+            }
+            kv.commit(batch).unwrap();
+            assert!(snapshot_watermarks(&kv, catalog, snapshot.order).is_ok());
+            let result = super::super::conflict_snapshot_payload_for_row(&kv, catalog, snapshot);
+            if current.is_none() {
+                assert!(
+                    decode_test_text(result.unwrap())
+                        .unwrap()
+                        .contains("ducklake_schema_version=1\n")
+                );
+            } else {
+                assert!(matches!(result, Err(crate::CatalogError::InvalidKey(_))));
+            }
+        }
+    }
+
+    #[test]
+    fn given_short_conflict_batch_when_loading_then_both_readers_return_backend_error() {
+        let catalog = CatalogId(1);
+        let mut inner = FakeOrderedCatalogKv::new();
+        initialize_catalog_if_absent(&mut inner, catalog).unwrap();
+        let snapshot = latest_snapshot(&inner, catalog).unwrap().unwrap();
+        let kv = CatalogFactsScanRecordingKv::new(inner, catalog);
+        kv.batch_limit.set(Some(2));
+        assert!(matches!(
+            snapshot_watermarks(&kv, catalog, snapshot.order),
+            Err(crate::CatalogError::Backend(_))
+        ));
+        assert!(matches!(
+            super::super::conflict_snapshot_payload_for_row(&kv, catalog, snapshot),
+            Err(crate::CatalogError::Backend(_))
+        ));
+    }
+
+    #[test]
     fn given_initialized_empty_catalog_when_loading_conflict_watermarks_then_file_families_are_not_scanned()
      {
         let catalog = CatalogId(1);
@@ -39,8 +126,7 @@ mod tests {
         initialize_empty_catalog(&mut inner, catalog).unwrap();
         let kv = CatalogFactsScanRecordingKv::new(inner, catalog);
 
-        let watermarks =
-            conflict_snapshot_watermarks(&kv, catalog, CatalogOrderId::uuid_v7(10)).unwrap();
+        let watermarks = snapshot_watermarks(&kv, catalog, CatalogOrderId::uuid_v7(10)).unwrap();
 
         for family in [
             "data_file",
@@ -60,10 +146,9 @@ mod tests {
         let catalog = CatalogId(1);
         let mut kv = FakeOrderedCatalogKv::new();
         initialize_empty_catalog(&mut kv, catalog).unwrap();
-        let next_catalog_id =
-            conflict_snapshot_watermarks(&kv, catalog, CatalogOrderId::uuid_v7(0))
-                .unwrap()
-                .next_catalog_id;
+        let next_catalog_id = snapshot_watermarks(&kv, catalog, CatalogOrderId::uuid_v7(0))
+            .unwrap()
+            .next_catalog_id;
         assert_eq!(next_catalog_id, 1);
         let runtime_schema_id = SchemaId(next_catalog_id);
 
@@ -190,7 +275,7 @@ mod tests {
         assert_eq!(context.views[0].schema_id, runtime_schema_id);
 
         assert_eq!(
-            conflict_snapshot_watermarks(&kv, catalog, latest.order)
+            snapshot_watermarks(&kv, catalog, latest.order)
                 .unwrap()
                 .next_catalog_id,
             5
@@ -210,9 +295,7 @@ mod tests {
             }
             let kv = CatalogFactsScanRecordingKv::new(inner, catalog);
 
-            assert!(
-                conflict_snapshot_watermarks(&kv, catalog, CatalogOrderId::uuid_v7(10)).is_err()
-            );
+            assert!(snapshot_watermarks(&kv, catalog, CatalogOrderId::uuid_v7(10)).is_err());
             for family in [
                 "data_file",
                 "delete_file",
@@ -288,8 +371,7 @@ mod tests {
         )
         .unwrap();
 
-        let payload =
-            String::from_utf8(catalog_snapshot_payload(&kv, catalog, 1).unwrap()).unwrap();
+        let payload = decode_test_text(catalog_snapshot_payload(&kv, catalog, 1).unwrap()).unwrap();
 
         assert!(payload.contains("schema\t0\tmain-uuid\tmain\tmain/\t"));
         assert!(payload.contains("table\t10\t0\torders-uuid\torders\tmain/orders\t"));
@@ -324,8 +406,7 @@ mod tests {
         )
         .unwrap();
 
-        let payload =
-            String::from_utf8(catalog_snapshot_payload(&kv, catalog, 1).unwrap()).unwrap();
+        let payload = decode_test_text(catalog_snapshot_payload(&kv, catalog, 1).unwrap()).unwrap();
 
         assert!(payload.contains("macro_param\t1\t0\t0\tavg_val\tfloat\tNULL\tdouble\n"));
     }
@@ -527,6 +608,43 @@ mod tests {
     }
 
     #[test]
+    fn given_writer_advances_after_selection_when_loading_facts_then_selected_schema_is_preserved()
+    {
+        let catalog = CatalogId(1);
+        let mut kv = FakeOrderedCatalogKv::new();
+        initialize_catalog_if_absent(&mut kv, catalog).unwrap();
+        commit_create_table_row(&mut kv, catalog, original_table(TableId(10))).unwrap();
+        let selected = latest_snapshot(&kv, catalog).unwrap().unwrap();
+        let mut reader = CatalogSnapshotRequestContext::for_current_catalog(&kv, catalog).unwrap();
+        commit_append_table_columns(
+            &mut kv,
+            catalog,
+            TableId(10),
+            vec![TableColumnRow::new(
+                ColumnId(99),
+                "new_column",
+                "INTEGER",
+                true,
+                None,
+            )],
+        )
+        .unwrap();
+        let old = reader.snapshot_context_for(&kv, catalog, selected).unwrap();
+        assert_eq!(old.tables[0].columns.len(), 2);
+        let latest = latest_snapshot(&kv, catalog).unwrap().unwrap();
+        let mut fresh = CatalogSnapshotRequestContext::for_current_catalog(&kv, catalog).unwrap();
+        assert_eq!(
+            fresh
+                .snapshot_context_for(&kv, catalog, latest)
+                .unwrap()
+                .tables[0]
+                .columns
+                .len(),
+            3
+        );
+    }
+
+    #[test]
     fn given_request_renders_latest_then_historical_snapshot_then_facts_upgrade_to_complete_history()
      {
         let catalog = CatalogId(1);
@@ -613,7 +731,7 @@ mod tests {
         commit_drop_table_columns(&mut kv, catalog, &[ColumnDrop::new(table, ColumnId(2))])
             .unwrap();
 
-        let snapshot_payload = String::from_utf8(
+        let snapshot_payload = decode_test_text(
             public_snapshot_payload(&kv, catalog, pre_drop_public_snapshot).unwrap(),
         )
         .unwrap();
@@ -624,7 +742,7 @@ mod tests {
             "{snapshot_payload}"
         );
 
-        let payload = String::from_utf8(
+        let payload = decode_test_text(
             catalog_snapshot_payload_with_kind(
                 &kv,
                 catalog,
@@ -715,7 +833,7 @@ mod tests {
         let kv = CatalogFactsScanRecordingKv::new(inner, catalog);
 
         let payload =
-            String::from_utf8(snapshot_payload(&kv, catalog, historical).unwrap()).unwrap();
+            decode_test_text(snapshot_payload(&kv, catalog, historical).unwrap()).unwrap();
 
         assert!(
             payload.contains("ducklake_next_catalog_id=11\n"),
@@ -764,8 +882,7 @@ mod tests {
         )
         .unwrap();
 
-        let payload =
-            String::from_utf8(catalog_snapshot_payload(&kv, catalog, 1).unwrap()).unwrap();
+        let payload = decode_test_text(catalog_snapshot_payload(&kv, catalog, 1).unwrap()).unwrap();
 
         assert!(payload.contains("schema_count=1\n"), "{payload}");
         assert!(
@@ -859,7 +976,7 @@ mod tests {
         commit_append_data_files(&mut kv, catalog, vec![snapshot_payload_data_file(4, table)])
             .unwrap();
 
-        let payload = String::from_utf8(
+        let payload = decode_test_text(
             public_snapshot_payload(&kv, catalog, crate::DuckLakeSnapshotId(6)).unwrap(),
         )
         .unwrap();
@@ -867,7 +984,7 @@ mod tests {
         assert!(payload.contains("ducklake_snapshot_id=7\n"));
         assert!(payload.contains("catalog_snapshot_sequence=7\n"));
 
-        let raw_payload = String::from_utf8(
+        let raw_payload = decode_test_text(
             snapshot_payload(
                 &kv,
                 catalog,
@@ -933,7 +1050,7 @@ mod tests {
         )
         .unwrap();
 
-        let payload = String::from_utf8(
+        let payload = decode_test_text(
             catalog_snapshot_payload_with_kind(
                 kv,
                 catalog,
@@ -1030,6 +1147,9 @@ mod tests {
         inner: FakeOrderedCatalogKv,
         prefixes: BTreeMap<&'static str, Vec<u8>>,
         scans: Rc<RefCell<BTreeMap<&'static str, usize>>>,
+        point_reads: Cell<usize>,
+        batches: Cell<usize>,
+        batch_limit: Cell<Option<usize>>,
     }
 
     impl CatalogFactsScanRecordingKv {
@@ -1058,6 +1178,9 @@ mod tests {
                     ),
                 ]),
                 scans: Rc::new(RefCell::new(BTreeMap::new())),
+                point_reads: Cell::new(0),
+                batches: Cell::new(0),
+                batch_limit: Cell::new(None),
             }
         }
 
@@ -1077,7 +1200,17 @@ mod tests {
 
     impl OrderedCatalogKv for CatalogFactsScanRecordingKv {
         fn get(&self, key: &[u8]) -> CatalogResult<Option<Vec<u8>>> {
+            self.point_reads.set(self.point_reads.get() + 1);
             OrderedCatalogKv::get(&self.inner, key)
+        }
+
+        fn batch_get(&self, keys: &[Vec<u8>]) -> CatalogResult<Vec<Option<Vec<u8>>>> {
+            self.batches.set(self.batches.get() + 1);
+            let mut values = OrderedCatalogKv::batch_get(&self.inner, keys)?;
+            if let Some(limit) = self.batch_limit.get() {
+                values.truncate(limit);
+            }
+            Ok(values)
         }
 
         fn scan_prefix(
@@ -1152,4 +1285,8 @@ mod tests {
             CatalogOrderId::uuid_v7(0),
         )
     }
+}
+
+fn decode_test_text(payload: impl AsRef<[u8]>) -> Result<String, std::str::Utf8Error> {
+    std::str::from_utf8(payload.as_ref()).map(str::to_owned)
 }

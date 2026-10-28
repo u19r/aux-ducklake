@@ -153,7 +153,9 @@ run_one_test() {
     fi
     (
         cd "$DUCKLAKE_DIR"
-        "$UNITTEST" --test-config "$config" --test-dir ./ "$test_path"
+        LD_LIBRARY_PATH="$DUCKLAKE_DIR/build/debug/src${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+            DYLD_LIBRARY_PATH="$DUCKLAKE_DIR/build/debug/src${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" \
+            "$UNITTEST" --test-config "$config" --test-dir ./ "$test_path"
     ) >"$output_file" 2>&1 || status=$?
     if [[ "$status" -eq 0 ]]; then
         if rg -q "All tests skipped|No tests ran|test cases: 0" "$output_file"; then

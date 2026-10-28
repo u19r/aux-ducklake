@@ -26,7 +26,7 @@ pub(super) fn commit_metadata_intents_with_current_kv(
     if intent.metadata_intents.is_empty() {
         return Ok(CommitMetadataResult::default());
     }
-    let started = RuntimeMetricStage::start();
+    let stage = RuntimeSpan::enter("method.runtime_commit_attempt.MetadataAssembleFacts");
     let mut tables = TableIntentAssembler::new(kv, catalog, current.latest.order)?;
     let mut created_schemas = Vec::new();
     let mut dropped_schema_ids = Vec::new();
@@ -71,7 +71,8 @@ pub(super) fn commit_metadata_intents_with_current_kv(
             }
             RuntimeMetadataOperation::AddColumns => {
                 let ddl = DdlPayload::parse(operation, &payload)?;
-                let columns = parse_column_rows(ADD_COLUMNS, &ddl.rows)?;
+                let columns =
+                    parse_column_rows(ADD_COLUMNS, ddl.rows(), |id, column| (id, column))?;
                 if let Some(table_id) = one_column_table(ADD_COLUMNS, &columns)? {
                     touched_existing_table_ids.insert(table_id);
                     for (column_table_id, column) in columns {
@@ -82,35 +83,43 @@ pub(super) fn commit_metadata_intents_with_current_kv(
             }
             RuntimeMetadataOperation::RenameColumns => {
                 let ddl = DdlPayload::parse(operation, &payload)?;
-                for (table_id, column) in parse_column_rows(RENAME_COLUMNS, &ddl.rows)? {
+                for (table_id, column) in
+                    parse_column_rows(RENAME_COLUMNS, ddl.rows(), |id, column| (id, column))?
+                {
                     touched_existing_table_ids.insert(table_id);
                     tables.apply_rename_column_fact(table_id, column)?;
                 }
             }
             RuntimeMetadataOperation::ChangeColumnDefaults => {
                 let ddl = DdlPayload::parse(operation, &payload)?;
-                for (table_id, column) in parse_column_rows(CHANGE_COLUMN_DEFAULTS, &ddl.rows)? {
+                for (table_id, column) in
+                    parse_column_rows(CHANGE_COLUMN_DEFAULTS, ddl.rows(), |id, column| {
+                        (id, column)
+                    })?
+                {
                     touched_existing_table_ids.insert(table_id);
                     tables.apply_column_default_fact(table_id, column)?;
                 }
             }
             RuntimeMetadataOperation::ChangeColumnTypes => {
                 let ddl = DdlPayload::parse(operation, &payload)?;
-                for (table_id, column) in parse_column_rows(CHANGE_COLUMN_TYPES, &ddl.rows)? {
+                for (table_id, column) in
+                    parse_column_rows(CHANGE_COLUMN_TYPES, ddl.rows(), |id, column| (id, column))?
+                {
                     touched_existing_table_ids.insert(table_id);
                     tables.apply_column_type_fact(table_id, column)?;
                 }
             }
             RuntimeMetadataOperation::RenameTables => {
                 let ddl = DdlPayload::parse(operation, &payload)?;
-                for rename in parse_table_renames(&ddl.rows)? {
+                for rename in parse_table_renames(ddl.rows())? {
                     touched_existing_table_ids.insert(rename.table_id);
                     tables.apply_rename_table_fact(rename.table_id, rename.new_name)?;
                 }
             }
             RuntimeMetadataOperation::ChangeComments => {
                 let ddl = DdlPayload::parse(operation, &payload)?;
-                let (table_comments, column_comments) = parse_comment_changes(&ddl.rows)?;
+                let (table_comments, column_comments) = parse_comment_changes(ddl.rows())?;
                 for change in table_comments {
                     touched_existing_table_ids.insert(change.table_id);
                     tables.apply_table_comment_fact(change.table_id, change.comment)?;
@@ -126,14 +135,14 @@ pub(super) fn commit_metadata_intents_with_current_kv(
             }
             RuntimeMetadataOperation::DropColumns => {
                 let ddl = DdlPayload::parse(operation, &payload)?;
-                for drop in parse_column_drops(&ddl.rows)? {
+                for drop in parse_column_drops(ddl.rows())? {
                     touched_existing_table_ids.insert(drop.table_id);
                     tables.apply_drop_column_fact(drop.table_id, drop.column_id)?;
                 }
             }
             RuntimeMetadataOperation::ChangeSortKeys => {
                 let ddl = DdlPayload::parse(operation, &payload)?;
-                let change = parse_sort_change(&ddl.rows)?;
+                let change = parse_sort_change(ddl.rows())?;
                 touched_existing_table_ids.insert(change.table_id);
                 tables.table_mut(change.table_id)?.sort = change.sort;
             }
@@ -143,17 +152,17 @@ pub(super) fn commit_metadata_intents_with_current_kv(
             }
             RuntimeMetadataOperation::ChangePartitionKeys => {
                 let ddl = DdlPayload::parse(operation, &payload)?;
-                for change in parse_partition_changes(&ddl.rows)? {
+                for change in parse_partition_changes(ddl.rows())? {
                     touched_existing_table_ids.insert(change.table_id);
                     tables.table_mut(change.table_id)?.partition = change.partition;
                 }
             }
         }
     }
-    record_commit_attempt_stage("MetadataAssembleFacts", started);
-    let started = RuntimeMetricStage::start();
+    stage.finish(true);
+    let stage = RuntimeSpan::enter("method.runtime_commit_attempt.MetadataTableParts");
     let table_changes = tables.into_commit_parts()?;
-    record_commit_attempt_stage("MetadataTableParts", started);
+    stage.finish(true);
     let public_schema_changed = public_schema_changed_by_metadata(
         !created_schemas.is_empty(),
         !dropped_schema_ids.is_empty(),
@@ -182,7 +191,7 @@ pub(super) fn commit_metadata_intents_with_current_kv(
         public_schema_changed,
     };
     let sequence = commit_attempt_sequence(intent.proposed_commit_snapshot)?;
-    let started = RuntimeMetricStage::start();
+    let stage = RuntimeSpan::enter("method.runtime_commit_attempt.MetadataConflictChecks");
     reject_schema_create_conflicts(
         kv,
         catalog,
@@ -215,8 +224,8 @@ pub(super) fn commit_metadata_intents_with_current_kv(
         &touched_existing_table_ids,
     )?;
     reject_view_comment_conflicts(kv, catalog, intent.read_snapshot, &view_comment_changes)?;
-    record_commit_attempt_stage("MetadataConflictChecks", started);
-    let started = RuntimeMetricStage::start();
+    stage.finish(true);
+    let stage = RuntimeSpan::enter("method.runtime_commit_attempt.MetadataCommit");
     let replaced_tables = kv.commit_metadata_changes(
         catalog,
         MetadataCommitChanges {
@@ -235,7 +244,8 @@ pub(super) fn commit_metadata_intents_with_current_kv(
             view_comment_changes,
         },
     )?;
-    record_commit_attempt_stage("MetadataCommit", started);
+    crate::store::invalidate_runtime_read_context(catalog);
+    stage.finish(true);
     let mut result = result;
     result
         .created_tables
@@ -395,7 +405,7 @@ pub(super) fn reject_stale_existing_table_changes(
     }
     let created_table_ids = created_tables
         .iter()
-        .flat_map(|table| [table.requested_table_id, table.persisted.table_id])
+        .flat_map(|table| [table.requested_table_id, table.table_id])
         .collect::<BTreeSet<_>>();
     let stale_checked_table_ids = touched_existing_table_ids
         .difference(&created_table_ids)

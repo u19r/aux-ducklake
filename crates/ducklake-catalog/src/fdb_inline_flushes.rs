@@ -1,7 +1,6 @@
 use std::ops::Deref;
 
 use foundationdb::options::{ConflictRangeType, MutationType};
-use futures::executor::block_on;
 
 use crate::{
     CatalogError, CatalogId, CatalogResult, FdbOrderedCatalogKv, InlineFileDeletionRow,
@@ -197,7 +196,7 @@ fn stage_inline_flush_fence(
 ) -> CatalogResult<()> {
     let key = inline_flush_fence_key(catalog, flush);
     let namespaced = kv.namespaced_key(&key);
-    let current = block_on(trx.get(&namespaced, false))
+    let current = crate::fdb_runtime::wait_for_fdb("wait.fdb.get", trx.get(&namespaced, false))
         .map_err(map_fdb_error)?
         .map(|value| decode_flush_fence(value.deref()))
         .transpose()?

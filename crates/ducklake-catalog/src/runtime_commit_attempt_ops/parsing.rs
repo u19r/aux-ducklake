@@ -96,7 +96,7 @@ pub(crate) fn commit_attempt_intent(payload: &[u8]) -> CatalogResult<RuntimeComm
                         "{COMMIT_ATTEMPT} payload row appears before an intent section"
                     )));
                 };
-                section.push_tabular_row(fields.to_vec());
+                section.push_tabular_row(row.line());
             }
         }
     }
@@ -184,7 +184,7 @@ impl RuntimeCommitAttemptSection {
         })
     }
 
-    fn push_tabular_row(&mut self, fields: Vec<&str>) {
+    fn push_tabular_row(&mut self, line: &str) {
         let payload = match self {
             Self::Metadata { payload, .. }
             | Self::Compaction { payload, .. }
@@ -194,7 +194,7 @@ impl RuntimeCommitAttemptSection {
         if !payload.is_empty() {
             payload.push(b'\n');
         }
-        payload.extend(fields.join("\t").as_bytes());
+        payload.extend_from_slice(line.as_bytes());
     }
 }
 

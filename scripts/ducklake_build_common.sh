@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Versions: software-versions.snapshot.json; details in software-version-consumers.md.
 
 # Keep script-owned SQL output independent of inherited coding-agent markers.
 export DUCKDB_AGENT_MODE=0
@@ -43,7 +44,7 @@ ducklake_default_build_generator() {
 }
 
 ducklake_cargo_target_dir() {
-    "$1/scripts/cargo_with_sccache.sh" metadata --format-version 1 --no-deps |
+    "$1/scripts/cargo_with_sccache.sh" metadata --manifest-path "$1/Cargo.toml" --format-version 1 --no-deps |
         sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p'
 }
 

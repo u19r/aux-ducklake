@@ -17,7 +17,7 @@ build:
     @just ducklake-build
 
 # Run cargo check for the full workspace.
-check:
+check: versions-check versions-test
     @just _check
 
 # Check Rust formatting without modifying files.
@@ -41,7 +41,7 @@ pre-push:
     @just _pre-push
 
 # Run the CI repository gate.
-ci-check:
+ci-check: versions-check versions-test
     @just _ci-check
 
 _default:
@@ -351,3 +351,20 @@ setup-linux-linker:
   #!/usr/bin/env bash
   set -euo pipefail
   exec bash scripts/install-mold.sh
+
+# Check catalog-managed software versions without a sibling checkout.
+versions-check:
+  node scripts/software-versions.ts check
+
+# List or update the software pins maintained by this repository.
+versions-list:
+  node scripts/software-versions.ts list
+
+versions-sync:
+  node scripts/software-versions.ts sync
+
+versions-update:
+  node scripts/software-versions.ts update
+
+versions-test:
+  node --test scripts/software-versions.test.ts

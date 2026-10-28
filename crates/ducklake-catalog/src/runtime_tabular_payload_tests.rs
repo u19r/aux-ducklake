@@ -88,4 +88,16 @@ mod perf_tests {
             started.elapsed().as_nanos()
         );
     }
+    #[test]
+    fn given_inline_capacity_boundary_when_parsing_then_only_overflow_allocates() {
+        for width in [15, 16, 17] {
+            let line = (0..width).map(|_| "x").collect::<Vec<_>>().join("\t");
+            let guard =
+                AllocationGuard::start(module_path!(), "field_capacity", file!(), line!(), None);
+            let fields = super::super::TabularFields::new(&line);
+            let report = guard.finish();
+            assert_eq!(fields.as_slice().len(), width);
+            assert_eq!(report.allocation_count == 0, width <= 16);
+        }
+    }
 }

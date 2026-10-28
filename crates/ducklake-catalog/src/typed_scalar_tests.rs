@@ -265,4 +265,14 @@ mod tests {
             CatalogScalarType::Unsupported
         );
     }
+    #[test]
+    fn given_zero_and_fractional_decimals_when_compared_then_numeric_order_is_preserved() {
+        for (left, right, expected) in [
+            ("0", "0.001", Ordering::Less),
+            ("-0.0", "-0.001", Ordering::Greater),
+            ("0e100", "-0e-100", Ordering::Equal),
+        ] {
+            assert_eq!(compare("DECIMAL", left, right), expected);
+        }
+    }
 }

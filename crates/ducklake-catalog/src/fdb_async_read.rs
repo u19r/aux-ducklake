@@ -4,10 +4,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use foundationdb::{RangeOption, options::TransactionOption};
+use foundationdb::options::TransactionOption;
 use futures::{
-    TryStreamExt,
+    StreamExt, TryStreamExt,
     future::{try_join, try_join_all},
+    lock::Mutex,
+    stream,
 };
 
 use crate::{
@@ -120,35 +122,32 @@ impl FdbOrderedCatalogKv {
         let historical_end = data_file_begin_scan_end(catalog, table, snapshot_order);
         let current_start = current_data_file_prefix(catalog, table);
         let current_end = prefix_end(&current_start);
-        let mut budget = ScanBudget::new();
-        let historical_scan = self
-            .scan_range_with_budget(
+        let budget = Mutex::new(ScanBudget::new());
+        let (historical_scan, current_scan) = try_join(
+            self.scan_range_with_budget(
                 &historical_start,
                 &historical_end,
                 RangeDirection::Forward,
                 ScanLimit::All,
                 DEFAULT_ASYNC_SCAN_PAGE_SIZE,
-                &mut budget,
-            )
-            .await?
-            .items;
-        let current_scan = self
-            .scan_range_with_budget(
+                &budget,
+            ),
+            self.scan_range_with_budget(
                 &current_start,
                 &current_end,
                 RangeDirection::Forward,
                 ScanLimit::All,
                 DEFAULT_ASYNC_SCAN_PAGE_SIZE,
-                &mut budget,
-            )
-            .await?
-            .items;
+                &budget,
+            ),
+        )
+        .await?;
 
         let mut seen = BTreeSet::new();
         let mut rows = Vec::new();
         let (historical_rows, current_rows) = try_join(
-            fetch_historical_data_file_rows(self, &trx, catalog, table, historical_scan),
-            fetch_current_data_file_rows(self, &trx, catalog, current_scan),
+            fetch_historical_data_file_rows(self, &trx, catalog, table, historical_scan.items),
+            fetch_current_data_file_rows(self, &trx, catalog, current_scan.items),
         )
         .await?;
         for row in historical_rows {
@@ -238,19 +237,47 @@ impl FdbOrderedCatalogKv {
             .await
     }
 
+    pub(crate) async fn scan_prefixes_with_budget(
+        &self,
+        prefixes: &[Vec<u8>],
+        direction: RangeDirection,
+        limit: usize,
+    ) -> CatalogResult<Vec<Vec<RangeItem>>> {
+        if limit == 0 {
+            return Ok(vec![Vec::new(); prefixes.len()]);
+        }
+        let budget = Mutex::new(ScanBudget::new());
+        let budget = &budget;
+        stream::iter(prefixes.iter().map(|prefix| async move {
+            self.scan_range_with_budget(
+                prefix,
+                &prefix_end(prefix),
+                direction,
+                ScanLimit::from_legacy(limit),
+                DEFAULT_ASYNC_SCAN_PAGE_SIZE,
+                budget,
+            )
+            .await
+            .map(|scan| scan.items)
+        }))
+        .buffered(crate::constants::FDB_PREFIX_SCAN_CONCURRENCY)
+        .try_collect()
+        .await
+    }
+
     async fn scan_prefix_bounded_async(
         &self,
         prefix: &[u8],
         chunk_size: usize,
     ) -> CatalogResult<BoundedScan> {
-        let mut budget = ScanBudget::new();
+        let budget = Mutex::new(ScanBudget::new());
         self.scan_range_with_budget(
             prefix,
             &prefix_end(prefix),
             RangeDirection::Forward,
             ScanLimit::All,
             chunk_size,
-            &mut budget,
+            &budget,
         )
         .await
     }
@@ -265,7 +292,7 @@ impl FdbOrderedCatalogKv {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let mut budget = ScanBudget::new();
+        let budget = Mutex::new(ScanBudget::new());
         let scan_limit = ScanLimit::from_legacy(limit);
         Ok(self
             .scan_range_with_budget(
@@ -274,7 +301,7 @@ impl FdbOrderedCatalogKv {
                 direction,
                 scan_limit,
                 DEFAULT_ASYNC_SCAN_PAGE_SIZE,
-                &mut budget,
+                &budget,
             )
             .await?
             .items)
@@ -286,7 +313,7 @@ impl FdbOrderedCatalogKv {
         end: &[u8],
         direction: RangeDirection,
     ) -> CatalogResult<Vec<RangeItem>> {
-        let mut budget = ScanBudget::new();
+        let budget = Mutex::new(ScanBudget::new());
         Ok(self
             .scan_range_with_budget(
                 start,
@@ -294,7 +321,7 @@ impl FdbOrderedCatalogKv {
                 direction,
                 ScanLimit::All,
                 DEFAULT_ASYNC_SCAN_PAGE_SIZE,
-                &mut budget,
+                &budget,
             )
             .await?
             .items)
@@ -307,7 +334,7 @@ impl FdbOrderedCatalogKv {
         direction: RangeDirection,
         limit: ScanLimit,
         page_size: usize,
-        budget: &mut ScanBudget,
+        budget: &Mutex<ScanBudget>,
     ) -> CatalogResult<BoundedScan> {
         let mut cursor =
             ScanCursor::new(start.to_vec(), end.to_vec(), direction, page_size, limit)?;
@@ -337,17 +364,17 @@ impl FdbOrderedCatalogKv {
         end: &[u8],
         direction: RangeDirection,
         limit: usize,
-        budget: &mut ScanBudget,
+        budget: &Mutex<ScanBudget>,
     ) -> CatalogResult<Vec<RangeItem>> {
         loop {
-            let timeout_ms = budget.begin_attempt()?;
+            let timeout_ms = budget.lock().await.begin_attempt()?;
             match self
                 .scan_range_once_async(start, end, direction, limit, timeout_ms)
                 .await
             {
                 Ok(items) => return Ok(items),
                 Err(error) if is_retryable_fdb_read_error(&error) => {
-                    budget.record_retryable_failure(error)?;
+                    budget.lock().await.record_retryable_failure(error)?;
                 }
                 Err(error) => return Err(error),
             }
@@ -365,23 +392,27 @@ impl FdbOrderedCatalogKv {
         let trx = self.create_transaction()?;
         trx.set_option(TransactionOption::Timeout(i64::from(timeout_ms)))
             .map_err(map_fdb_error)?;
-        let mut options = RangeOption::from(self.namespaced_key(start)..self.namespaced_key(end));
-        options.limit = Some(limit);
-        if direction == RangeDirection::Reverse {
-            options = options.rev();
-        }
+        let options = self.create_scan_options(start, end, direction, limit);
         let values = trx
             .get_ranges_keyvalues(options, false)
             .try_collect::<Vec<_>>()
             .await
             .map_err(map_fdb_error)?;
+        crate::fdb_runtime::record_transaction_usage(&trx);
+        crate::runtime_metrics::record_runtime_measurement(
+            "fdb.range.logical_page",
+            values.len() as u64,
+            values
+                .iter()
+                .map(|item| (item.key().len() + item.value().len()) as u64)
+                .sum(),
+        );
         values
             .into_iter()
             .map(|item| {
-                Ok(RangeItem {
-                    key: self.strip_namespace(item.key())?,
-                    value: item.value().to_vec(),
-                })
+                let key = self.strip_namespace(item.key())?;
+                let value = crate::fdb_key_codec::decode_value(&key, item.value())?;
+                Ok(RangeItem { key, value })
             })
             .collect()
     }
@@ -392,8 +423,8 @@ impl FdbOrderedCatalogKv {
         prefix: &[u8],
     ) {
         trx.clear_range(
-            &self.namespaced_key(prefix),
-            &self.namespaced_key(&prefix_end(prefix)),
+            &self.namespaced_range_bound(prefix),
+            &self.namespaced_range_bound(&prefix_end(prefix)),
         );
     }
 }
@@ -523,11 +554,7 @@ async fn scan_range_in_transaction(
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let mut options = RangeOption::from(kv.namespaced_key(start)..kv.namespaced_key(end));
-    options.limit = Some(limit);
-    if direction == RangeDirection::Reverse {
-        options = options.rev();
-    }
+    let options = kv.create_scan_options(start, end, direction, limit);
     let values = trx
         .get_ranges_keyvalues(options, false)
         .try_collect::<Vec<_>>()
@@ -536,10 +563,9 @@ async fn scan_range_in_transaction(
     values
         .into_iter()
         .map(|item| {
-            Ok(RangeItem {
-                key: kv.strip_namespace(item.key())?,
-                value: item.value().to_vec(),
-            })
+            let key = kv.strip_namespace(item.key())?;
+            let value = crate::fdb_key_codec::decode_value(&key, item.value())?;
+            Ok(RangeItem { key, value })
         })
         .collect()
 }
@@ -996,6 +1022,7 @@ impl ScanBudget {
     }
 
     fn record_retryable_failure(&mut self, error: CatalogError) -> CatalogResult<()> {
+        crate::runtime_metrics::record_runtime_measurement("fdb.range.retry", 1, 0);
         self.last_retry_error = Some(error);
         if self.retries_remaining == 0 {
             return Err(self.exhausted_error());

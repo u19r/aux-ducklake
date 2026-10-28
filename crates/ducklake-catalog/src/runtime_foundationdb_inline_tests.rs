@@ -1,14 +1,14 @@
 #[cfg(test)]
 mod tests {
-    use crate::{
-        CatalogCacheNamespace, CatalogId, CatalogOrderId, ColumnId, DuckLakeSnapshotId,
-        InlinedTableRow, TableColumnRow, TableId, TablePartitionFieldRow, TablePartitionRow,
-        TableRow, ValidityWindow,
-    };
-
     #[cfg(feature = "foundationdb")]
     use super::super::prepare_foundationdb_inline_mutations;
     use super::super::same_user_visible_table_for_inline_insert;
+    #[cfg(feature = "foundationdb")]
+    use crate::{CatalogCacheNamespace, CatalogId, DuckLakeSnapshotId};
+    use crate::{
+        CatalogOrderId, ColumnId, InlinedTableRow, TableColumnRow, TableId, TablePartitionFieldRow,
+        TablePartitionRow, TableRow, ValidityWindow,
+    };
 
     #[test]
     fn given_only_inline_table_registration_changed_when_checking_inline_insert_then_table_is_same()
@@ -148,6 +148,93 @@ mod tests {
         assert!(tables.is_empty());
         assert_eq!(payloads.len(), 1);
         assert!(deletes.is_empty());
+    }
+
+    #[cfg(feature = "foundationdb")]
+    #[test]
+    fn given_current_table_visible_at_read_when_preparing_inline_rows_then_current_metadata_is_reused()
+     {
+        use crate::{FakeOrderedCatalogKv, KvBatch, RawSnapshotSequence, SnapshotRow};
+        let catalog = CatalogId(8_409);
+        let mut kv = FakeOrderedCatalogKv::new();
+        let table = table_with_column(CatalogOrderId::uuid_v7(1));
+        let mut batch = KvBatch::new();
+        crate::store::stage_snapshot(
+            &mut batch,
+            catalog,
+            &SnapshotRow::new(CatalogOrderId::uuid_v7(2), RawSnapshotSequence(2)),
+        );
+        crate::table_store::stage_current_table_row(&mut batch, catalog, &table);
+        kv.commit(batch).unwrap();
+        let (tables, payloads, deletes) = super::super::prepare_foundationdb_inline_mutations(
+            &kv,
+            catalog,
+            vec![inline_request(Some(DuckLakeSnapshotId(2)))],
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].table_id, table.table_id);
+        assert_eq!(payloads.len(), 1);
+        assert!(deletes.is_empty());
+    }
+
+    #[cfg(feature = "foundationdb")]
+    #[test]
+    fn given_table_renamed_after_read_when_preparing_inline_rows_then_stale_metadata_is_rejected() {
+        use crate::{FakeOrderedCatalogKv, KvBatch, RawSnapshotSequence, SnapshotRow};
+        let catalog = CatalogId(8_410);
+        let mut kv = FakeOrderedCatalogKv::new();
+        let original = table_with_column(CatalogOrderId::uuid_v7(1));
+        let mut current = original.clone();
+        current.name = "renamed".to_owned();
+        current.validity.begin_order = CatalogOrderId::uuid_v7(3);
+        let mut batch = KvBatch::new();
+        crate::store::stage_snapshot(
+            &mut batch,
+            catalog,
+            &SnapshotRow::new(CatalogOrderId::uuid_v7(2), RawSnapshotSequence(2)),
+        );
+        batch.put(
+            crate::keys::table_object_key(
+                catalog,
+                original.table_id,
+                original.validity.begin_order,
+            ),
+            original.encode(),
+        );
+        crate::table_store::stage_current_table_row(&mut batch, catalog, &current);
+        kv.commit(batch).unwrap();
+        let error = super::super::prepare_foundationdb_inline_mutations(
+            &kv,
+            catalog,
+            vec![inline_request(Some(DuckLakeSnapshotId(2)))],
+            Vec::new(),
+            None,
+        )
+        .err()
+        .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("table 7 metadata changed after read snapshot")
+        );
+    }
+
+    #[cfg(feature = "foundationdb")]
+    fn inline_request(
+        read_snapshot: Option<DuckLakeSnapshotId>,
+    ) -> crate::runtime_inline_ops::RuntimeInlineRows {
+        crate::runtime_inline_ops::RuntimeInlineRows {
+            read_snapshot,
+            commit_snapshot: None,
+            commit_metadata: crate::SnapshotCommitMetadata::default(),
+            table_id: TableId(7),
+            schema_version: 1,
+            table_name: "ducklake_inlined_data_7_1".to_owned(),
+            payload: "row\t1\tone\n".to_owned(),
+        }
     }
 
     fn table_with_column(order: CatalogOrderId) -> TableRow {

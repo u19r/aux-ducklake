@@ -163,7 +163,7 @@ pub(crate) fn list_macro_rows_for_snapshot_cache(
     }
 }
 
-fn list_macro_rows_uncached(
+pub(crate) fn list_macro_rows_uncached(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,
 ) -> CatalogResult<Vec<MacroRow>> {

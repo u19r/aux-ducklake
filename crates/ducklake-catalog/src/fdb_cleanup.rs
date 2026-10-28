@@ -3,8 +3,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use foundationdb::{RangeOption, options::TransactionOption};
-use futures::{TryStreamExt, executor::block_on};
+use foundationdb::options::TransactionOption;
+use futures::TryStreamExt;
 
 use crate::{
     CatalogError, CatalogId, CatalogResult, DataFileId, DataFileRow, DeleteFileCleanupRow,
@@ -155,7 +155,9 @@ impl FdbOrderedCatalogKv {
                 stats.data_file_id,
             )));
         }
-        block_on(trx.commit()).map_err(map_fdb_commit_error)?;
+        crate::fdb_runtime::record_transaction_usage(&trx);
+        crate::fdb_runtime::wait_for_fdb("wait.fdb.commit", trx.commit())
+            .map_err(map_fdb_commit_error)?;
         crate::immutable_file_metadata::remove_immutable_data_file_metadata(
             self,
             catalog,
@@ -183,7 +185,9 @@ impl FdbOrderedCatalogKv {
         let key = scheduled_data_file_cleanup_key(catalog, data_file_id);
         let trx = self.create_transaction()?;
         trx.clear(&self.namespaced_key(&key));
-        block_on(trx.commit()).map_err(map_fdb_commit_error)?;
+        crate::fdb_runtime::record_transaction_usage(&trx);
+        crate::fdb_runtime::wait_for_fdb("wait.fdb.commit", trx.commit())
+            .map_err(map_fdb_commit_error)?;
         Ok(())
     }
 
@@ -204,7 +208,9 @@ impl FdbOrderedCatalogKv {
         let key = scheduled_delete_file_cleanup_key(catalog, delete_file_id);
         let trx = self.create_transaction()?;
         trx.clear(&self.namespaced_key(&key));
-        block_on(trx.commit()).map_err(map_fdb_commit_error)?;
+        crate::fdb_runtime::record_transaction_usage(&trx);
+        crate::fdb_runtime::wait_for_fdb("wait.fdb.commit", trx.commit())
+            .map_err(map_fdb_commit_error)?;
         Ok(())
     }
 
@@ -230,7 +236,9 @@ impl FdbOrderedCatalogKv {
                 delete_file.delete_file_id,
             )));
         }
-        block_on(trx.commit()).map_err(map_fdb_commit_error)?;
+        crate::fdb_runtime::record_transaction_usage(&trx);
+        crate::fdb_runtime::wait_for_fdb("wait.fdb.commit", trx.commit())
+            .map_err(map_fdb_commit_error)?;
         Ok(())
     }
 
@@ -269,7 +277,9 @@ impl FdbOrderedCatalogKv {
                 row.id.begin_order,
             )));
         }
-        block_on(trx.commit()).map_err(map_fdb_commit_error)?;
+        crate::fdb_runtime::record_transaction_usage(&trx);
+        crate::fdb_runtime::wait_for_fdb("wait.fdb.commit", trx.commit())
+            .map_err(map_fdb_commit_error)?;
         Ok(true)
     }
 
@@ -287,9 +297,12 @@ impl FdbOrderedCatalogKv {
         key: &[u8],
         expected: &[u8],
     ) -> CatalogResult<bool> {
-        let actual = block_on(trx.get(&self.namespaced_key(key), false))
-            .map_err(map_fdb_error)?
-            .map(|value| value.deref().to_vec());
+        let actual = crate::fdb_runtime::wait_for_fdb(
+            "wait.fdb.get",
+            trx.get(&self.namespaced_key(key), false),
+        )
+        .map_err(map_fdb_error)?
+        .map(|value| value.deref().to_vec());
         Ok(actual.as_deref() == Some(expected))
     }
 }
@@ -732,24 +745,28 @@ fn scan_range_page(
     let trx = kv.create_transaction()?;
     trx.set_option(TransactionOption::Timeout(i64::from(timeout_ms)))
         .map_err(map_fdb_error)?;
-    let mut options =
-        RangeOption::from(kv.namespaced_key(cursor.start())..kv.namespaced_key(cursor.end()));
-    options.limit = Some(page_size);
-    if cursor.direction == RangeDirection::Reverse {
-        options = options.rev();
-    }
-    let values = block_on(
+    let options = kv.create_scan_options(cursor.start(), cursor.end(), cursor.direction, page_size);
+    let values = crate::fdb_runtime::wait_for_fdb(
+        "wait.fdb.range_page",
         trx.get_ranges_keyvalues(options, false)
             .try_collect::<Vec<_>>(),
     )
     .map_err(map_fdb_error)?;
+    crate::fdb_runtime::record_transaction_usage(&trx);
+    crate::runtime_metrics::record_runtime_measurement(
+        "fdb.range.logical_page",
+        values.len() as u64,
+        values
+            .iter()
+            .map(|item| (item.key().len() + item.value().len()) as u64)
+            .sum(),
+    );
     values
         .into_iter()
         .map(|item| {
-            Ok(RangeItem {
-                key: kv.strip_namespace(item.key())?,
-                value: item.value().to_vec(),
-            })
+            let key = kv.strip_namespace(item.key())?;
+            let value = crate::fdb_key_codec::decode_value(&key, item.value())?;
+            Ok(RangeItem { key, value })
         })
         .collect()
 }

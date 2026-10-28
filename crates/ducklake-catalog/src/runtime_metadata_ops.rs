@@ -14,7 +14,7 @@ use crate::{
     },
     runtime_payload::{optional_payload_string_value, payload_string_value, payload_u64_value},
     runtime_protocol::RuntimeCatalogBackend,
-    runtime_snapshots::snapshot_schema_versions_by_order,
+    runtime_snapshots::{SchemaVersionSnapshotScope, snapshot_schema_versions_by_order},
     schema_version_state::load_schema_version_begin_snapshot,
     set_metadata_setting,
 };
@@ -37,8 +37,9 @@ enum MetadataPayloadOperation {
 }
 
 #[cfg(not(test))]
-static METADATA_PAYLOAD_CACHE: OnceLock<BoundedCache<MetadataPayloadCacheKey, Vec<u8>>> =
-    OnceLock::new();
+static METADATA_PAYLOAD_CACHE: OnceLock<
+    BoundedCache<MetadataPayloadCacheKey, std::sync::Arc<Vec<u8>>>,
+> = OnceLock::new();
 
 #[cfg(not(test))]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -50,17 +51,18 @@ struct VersionedFileColumnStatsPayloadCacheKey {
 
 #[cfg(not(test))]
 static FILE_COLUMN_STATS_PAYLOAD_CACHE: OnceLock<
-    BoundedCache<VersionedFileColumnStatsPayloadCacheKey, Vec<u8>>,
+    BoundedCache<VersionedFileColumnStatsPayloadCacheKey, std::sync::Arc<Vec<u8>>>,
 > = OnceLock::new();
 
 #[cfg(not(test))]
-fn metadata_payload_cache() -> &'static BoundedCache<MetadataPayloadCacheKey, Vec<u8>> {
+fn metadata_payload_cache()
+-> &'static BoundedCache<MetadataPayloadCacheKey, std::sync::Arc<Vec<u8>>> {
     static_bounded_cache(&METADATA_PAYLOAD_CACHE, 128)
 }
 
 #[cfg(not(test))]
 fn file_column_stats_payload_cache()
--> &'static BoundedCache<VersionedFileColumnStatsPayloadCacheKey, Vec<u8>> {
+-> &'static BoundedCache<VersionedFileColumnStatsPayloadCacheKey, std::sync::Arc<Vec<u8>>> {
     static_bounded_cache(&FILE_COLUMN_STATS_PAYLOAD_CACHE, 64)
 }
 
@@ -321,11 +323,26 @@ pub(crate) fn lookup_begin_snapshot_for_schema_version(
         "schema_version",
         "GetBeginSnapshotForSchemaVersion missing schema_version",
     )?;
-    let begin_snapshot = {
-        let kv = open_foundationdb_catalog()?;
-        begin_snapshot_for_schema_version(&kv, catalog, table_id, schema_version)?
-    };
-    Ok(format!("begin_snapshot_id={begin_snapshot}\n").into_bytes())
+    let kv = open_foundationdb_catalog()?;
+    render_schema_begin_descriptor(&kv, catalog, table_id, schema_version)
+}
+
+fn render_schema_begin_descriptor(
+    kv: &impl OrderedCatalogKv,
+    catalog: CatalogId,
+    table_id: TableId,
+    schema_version: u64,
+) -> CatalogResult<Vec<u8>> {
+    let stable = load_schema_version_begin_snapshot(kv, catalog, schema_version)?;
+    let begin = stable.map_or_else(
+        || begin_snapshot_for_schema_version(kv, catalog, table_id, schema_version),
+        Ok,
+    )?;
+    Ok(format!(
+        "begin_snapshot_id={begin}\nstable_schema_begin={}\n",
+        stable.is_some()
+    )
+    .into_bytes())
 }
 
 fn begin_snapshot_for_schema_version(
@@ -339,7 +356,8 @@ fn begin_snapshot_for_schema_version(
     }
     let snapshots = list_all_snapshots(kv, catalog)?;
     let table_rows = crate::table_store::list_table_rows_for_table(kv, catalog, table_id)?;
-    let schema_versions = snapshot_schema_versions_by_order(kv, catalog)?;
+    let schema_versions =
+        snapshot_schema_versions_by_order(kv, catalog, SchemaVersionSnapshotScope::All)?;
     for snapshot in &snapshots {
         if schema_versions.get(&snapshot.order).copied() != Some(schema_version) {
             continue;
@@ -378,11 +396,16 @@ fn begin_snapshot_for_schema_version(
 mod current_stats;
 mod data_files;
 mod delete_files;
+mod file_statistics_request;
 mod file_stats;
+pub(crate) use file_statistics_request::list_current_metadata_file_column_stats_rows_for_data_file_ids;
+#[cfg(feature = "foundationdb")]
+mod file_stats_aggregate;
 mod global_stats_merge;
 mod global_stats_model;
 mod global_stats_requests;
 mod metadata_queries;
+mod mirror_refresh;
 mod payload_parser;
 
 use current_stats::*;
@@ -392,11 +415,10 @@ pub(crate) use delete_files::*;
 use file_stats::partition_value_request;
 pub(crate) use file_stats::{
     TableColumnStatsMirrorRow, commit_column_mappings, list_column_mapping_rows,
-    list_current_metadata_file_column_stats_rows,
-    list_current_metadata_file_column_stats_rows_for_data_file_ids, list_file_column_stats_rows,
+    list_current_metadata_file_column_stats_rows, list_file_column_stats_rows,
     list_file_partition_value_rows_for_data_file_ids, list_global_stats_for_snapshot,
     list_global_stats_inputs_for_snapshot, list_snapshot_stats_and_changes_inputs,
-    render_bounded_append_mirror_sql, render_bounded_partition_info_mirror_sql,
+    render_bounded_partition_info_mirror_sql,
 };
 use global_stats_merge::*;
 #[cfg(any(test, feature = "foundationdb"))]
@@ -404,6 +426,7 @@ use global_stats_model::*;
 #[cfg(any(test, feature = "foundationdb"))]
 use global_stats_requests::*;
 use metadata_queries::*;
+pub(crate) use mirror_refresh::*;
 use payload_parser::*;
 
 #[cfg(test)]
