@@ -754,6 +754,22 @@ pub(crate) fn data_mutation_payload_values(payload: &[u8]) -> CatalogResult<Runt
                     )?),
                 ));
             }
+            ["inline_file_deletion_flush", table_id, flush_snapshot] => {
+                mutation
+                    .inline_flushes
+                    .push(InlineTableFlush::file_deletions_only(
+                        TableId(parse_u64_field(
+                            COMMIT_DATA_MUTATION,
+                            table_id,
+                            "inline file deletion flush table id",
+                        )?),
+                        crate::RawSnapshotSequence(parse_u64_field(
+                            COMMIT_DATA_MUTATION,
+                            flush_snapshot,
+                            "inline file deletion flush snapshot id",
+                        )?),
+                    ));
+            }
             ["inline_file_delete", table_id, data_file_id, row_id] => {
                 mutation
                     .inline_file_deletions

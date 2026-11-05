@@ -44,6 +44,7 @@ pub enum KeyFamily {
     CurrentDataFile,
     DataFileBegin,
     EndOrder,
+    InlineFlushWatermark,
     DeleteFile,
     CurrentDeleteFile,
     DeleteFileTimeline,
@@ -83,6 +84,7 @@ impl KeyFamily {
             Self::CurrentDataFile => b'D',
             Self::DataFileBegin => b'b',
             Self::EndOrder => b'E',
+            Self::InlineFlushWatermark => b'W',
             Self::DeleteFile => b'x',
             Self::CurrentDeleteFile => b'X',
             Self::DeleteFileTimeline => b'y',
@@ -121,6 +123,7 @@ impl KeyFamily {
             b'D' => Ok(Self::CurrentDataFile),
             b'b' => Ok(Self::DataFileBegin),
             b'E' => Ok(Self::EndOrder),
+            b'W' => Ok(Self::InlineFlushWatermark),
             b'x' => Ok(Self::DeleteFile),
             b'X' => Ok(Self::CurrentDeleteFile),
             b'y' => Ok(Self::DeleteFileTimeline),
@@ -163,6 +166,7 @@ impl KeyFamily {
             Self::CurrentDataFile => "current-data-file",
             Self::DataFileBegin => "data-file-begin",
             Self::EndOrder => "end-order",
+            Self::InlineFlushWatermark => "inline-flush-watermark",
             Self::DeleteFile => "delete-file",
             Self::CurrentDeleteFile => "current-delete-file",
             Self::DeleteFileTimeline => "delete-file-timeline",
@@ -485,6 +489,30 @@ pub fn inline_table_end_key(
     key.push(b'/');
     key.extend_from_slice(&begin_order.as_bytes());
     key
+}
+
+/// Persisted visibility boundary for one inline table/schema range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InlineFlushWatermarkKey {
+    pub table_id: TableId,
+    pub end_order: CatalogOrderId,
+    pub schema_id: SchemaId,
+    pub max_begin_order: CatalogOrderId,
+}
+
+impl InlineFlushWatermarkKey {
+    #[must_use]
+    pub fn encode(self, catalog: CatalogId) -> Vec<u8> {
+        let mut key = family_prefix(catalog, KeyFamily::InlineFlushWatermark);
+        key.extend_from_slice(&self.table_id.0.to_be_bytes());
+        key.push(b'/');
+        key.extend_from_slice(&self.end_order.as_bytes());
+        key.push(b'/');
+        key.extend_from_slice(&self.schema_id.0.to_be_bytes());
+        key.push(b'/');
+        key.extend_from_slice(&self.max_begin_order.as_bytes());
+        key
+    }
 }
 
 #[must_use]

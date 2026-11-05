@@ -967,12 +967,12 @@ pub(crate) fn runtime_list_foundationdb_known_files_for_cleanup(
 
 #[cfg(not(feature = "foundationdb"))]
 pub(crate) fn runtime_foundationdb_touch_catalog(_catalog: CatalogId) -> CatalogResult<()> {
-    foundationdb_runtime_unit_error()
+    foundationdb_runtime_error()
 }
 
 #[cfg(not(feature = "foundationdb"))]
 pub(crate) fn runtime_foundationdb_metadata_exists(_catalog: CatalogId) -> CatalogResult<bool> {
-    foundationdb_runtime_bool_error()
+    foundationdb_runtime_error()
 }
 
 #[cfg(not(feature = "foundationdb"))]
@@ -980,7 +980,7 @@ pub(crate) fn runtime_foundationdb_initialize_ducklake(
     _catalog: CatalogId,
     _metadata: &[crate::MetadataSettingRow],
 ) -> CatalogResult<crate::CatalogOrderId> {
-    foundationdb_runtime_order_error()
+    foundationdb_runtime_error()
 }
 
 #[cfg(not(feature = "foundationdb"))]
@@ -989,7 +989,7 @@ pub(crate) fn runtime_foundationdb_create_schemas(
     _schemas: Vec<SchemaRow>,
     _commit_raw_snapshot: Option<RawSnapshotSequence>,
 ) -> CatalogResult<Vec<SchemaRow>> {
-    foundationdb_runtime_schema_rows_error()
+    foundationdb_runtime_error()
 }
 
 #[cfg(not(feature = "foundationdb"))]
@@ -997,7 +997,7 @@ pub(crate) fn runtime_foundationdb_drop_schemas(
     _catalog: CatalogId,
     _schema_ids: &[crate::SchemaId],
 ) -> CatalogResult<Vec<SchemaRow>> {
-    foundationdb_runtime_schema_rows_error()
+    foundationdb_runtime_error()
 }
 
 #[cfg(not(feature = "foundationdb"))]
@@ -1006,7 +1006,7 @@ pub(crate) fn runtime_foundationdb_create_tables(
     _tables: Vec<TableRow>,
     _commit_raw_snapshot: Option<RawSnapshotSequence>,
 ) -> CatalogResult<Vec<TableRow>> {
-    foundationdb_runtime_table_rows_error()
+    foundationdb_runtime_error()
 }
 
 #[cfg(not(feature = "foundationdb"))]
@@ -1016,7 +1016,7 @@ pub(crate) fn runtime_foundationdb_replace_tables(
     _tables: Vec<TableRow>,
     _commit_raw_snapshot: Option<RawSnapshotSequence>,
 ) -> CatalogResult<Vec<TableRow>> {
-    foundationdb_runtime_table_rows_error()
+    foundationdb_runtime_error()
 }
 
 #[cfg(not(feature = "foundationdb"))]
@@ -1024,7 +1024,7 @@ pub(crate) fn runtime_foundationdb_commit_data_mutation(
     _catalog: CatalogId,
     _mutation: RuntimeDataMutation,
 ) -> CatalogResult<(crate::DataMutationCommit, Vec<crate::TableId>)> {
-    foundationdb_runtime_data_mutation_error()
+    foundationdb_runtime_error()
 }
 
 #[cfg(not(feature = "foundationdb"))]
@@ -1035,54 +1035,11 @@ pub(crate) fn runtime_foundationdb_commit_data_and_inline_mutation(
     _inline_deletes: Vec<crate::runtime_inline_ops::RuntimeInlineDelete>,
     _commit_snapshot: Option<crate::DuckLakeSnapshotId>,
 ) -> CatalogResult<(crate::DataMutationCommit, Vec<crate::TableId>)> {
-    foundationdb_runtime_data_mutation_error()
+    foundationdb_runtime_error()
 }
 
 #[cfg(not(feature = "foundationdb"))]
-fn foundationdb_runtime_error() -> CatalogResult<Vec<u8>> {
-    Err(crate::CatalogError::Backend(
-        "foundationdb runtime requires ducklake-catalog --features foundationdb".to_owned(),
-    ))
-}
-
-#[cfg(not(feature = "foundationdb"))]
-fn foundationdb_runtime_unit_error() -> CatalogResult<()> {
-    Err(crate::CatalogError::Backend(
-        "foundationdb runtime requires ducklake-catalog --features foundationdb".to_owned(),
-    ))
-}
-
-#[cfg(not(feature = "foundationdb"))]
-fn foundationdb_runtime_bool_error() -> CatalogResult<bool> {
-    Err(crate::CatalogError::Backend(
-        "foundationdb runtime requires ducklake-catalog --features foundationdb".to_owned(),
-    ))
-}
-
-#[cfg(not(feature = "foundationdb"))]
-fn foundationdb_runtime_order_error() -> CatalogResult<crate::CatalogOrderId> {
-    Err(crate::CatalogError::Backend(
-        "foundationdb runtime requires ducklake-catalog --features foundationdb".to_owned(),
-    ))
-}
-
-#[cfg(not(feature = "foundationdb"))]
-fn foundationdb_runtime_schema_rows_error() -> CatalogResult<Vec<SchemaRow>> {
-    Err(crate::CatalogError::Backend(
-        "foundationdb runtime requires ducklake-catalog --features foundationdb".to_owned(),
-    ))
-}
-
-#[cfg(not(feature = "foundationdb"))]
-fn foundationdb_runtime_table_rows_error() -> CatalogResult<Vec<TableRow>> {
-    Err(crate::CatalogError::Backend(
-        "foundationdb runtime requires ducklake-catalog --features foundationdb".to_owned(),
-    ))
-}
-
-#[cfg(not(feature = "foundationdb"))]
-fn foundationdb_runtime_data_mutation_error()
--> CatalogResult<(crate::DataMutationCommit, Vec<crate::TableId>)> {
+fn foundationdb_runtime_error<T>() -> CatalogResult<T> {
     Err(crate::CatalogError::Backend(
         "foundationdb runtime requires ducklake-catalog --features foundationdb".to_owned(),
     ))

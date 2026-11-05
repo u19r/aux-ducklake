@@ -183,10 +183,13 @@ fn given_flushed_inline_file_compacted_when_historical_snapshot_is_read_then_one
         ],
     )
     .unwrap();
+    let current = latest_snapshot(&kv, catalog).unwrap().unwrap();
+    let source_files = list_data_files_at(&kv, catalog, table_id, current.order).unwrap();
+    assert_eq!(source_files.len(), 2);
     kv.commit_merge_adjacent_data_files_versionstamped(
         catalog,
         MergeAdjacentCompaction {
-            source_file_ids: vec![DataFileId(850), DataFileId(851)],
+            source_file_ids: source_files.iter().map(|file| file.data_file_id).collect(),
             new_files: vec![
                 DataFileRow::new(
                     DataFileId(852),
@@ -206,13 +209,8 @@ fn given_flushed_inline_file_compacted_when_historical_snapshot_is_read_then_one
 
     let files = list_data_files_at(&kv, catalog, table_id, inline_snapshot.order).unwrap();
 
-    assert_eq!(
-        files
-            .iter()
-            .map(|file| file.data_file_id)
-            .collect::<Vec<_>>(),
-        vec![DataFileId(852)]
-    );
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].path, "replacement.parquet");
 }
 
 #[test]
@@ -293,7 +291,10 @@ fn given_versionstamped_inline_file_materialized_when_listing_insertions_then_in
         ),
     )
     .unwrap();
-    let _flush_snapshot = latest_snapshot(&kv, catalog).unwrap().unwrap();
+    let flush_snapshot = latest_snapshot(&kv, catalog).unwrap().unwrap();
+    let materialized = list_data_files_at(&kv, catalog, table_id, flush_snapshot.order).unwrap();
+    assert_eq!(materialized.len(), 1);
+    assert_eq!(materialized[0].path, "inline-flush-cdf-suppression.parquet");
     kv.register_inline_table_payload_with_table_versionstamped(
         catalog,
         attached,
@@ -323,7 +324,7 @@ fn given_versionstamped_inline_file_materialized_when_listing_insertions_then_in
     .unwrap();
 
     assert_eq!(changes.len(), 1);
-    assert_eq!(changes[0].data_file_id, DataFileId(860));
+    assert_eq!(changes[0].data_file_id, materialized[0].data_file_id);
     assert_eq!(inline_insertions.len(), 1);
     assert_eq!(inline_insertions[0].change.row_id, 1);
 }

@@ -2567,10 +2567,10 @@ index 00000000..59706e23
 +} // namespace duckdb
 diff --git a/src/include/metadata_manager/aux_catalog_metadata_manager.hpp b/src/include/metadata_manager/aux_catalog_metadata_manager.hpp
 new file mode 100644
-index 00000000..9a5802ec
+index 00000000..f8b2e890
 --- /dev/null
 +++ b/src/include/metadata_manager/aux_catalog_metadata_manager.hpp
-@@ -0,0 +1,255 @@
+@@ -0,0 +1,260 @@
 +//===----------------------------------------------------------------------===//
 +//                         DuckDB
 +//
@@ -2736,6 +2736,10 @@ index 00000000..9a5802ec
 +		string table_name;
 +		idx_t flush_snapshot_id;
 +		};
++	struct PendingInlineFileDeletionFlush {
++		idx_t table_id;
++		idx_t flush_snapshot_id;
++	};
 +		struct MirrorRefreshPlan {
 +			string partition_table_ids_payload;
 +			string append_partition_values_payload;
@@ -2784,6 +2788,7 @@ index 00000000..9a5802ec
 +	unordered_map<idx_t, idx_t> created_table_id_remaps;
 +	mutable std::mutex pending_inline_flushes_lock;
 +	vector<PendingInlineFlush> pending_inline_flushes;
++	vector<PendingInlineFileDeletionFlush> pending_inline_file_deletion_flushes;
 +	uint64_t runtime_catalog_id = 0;
 +	uint64_t runtime_read_context_id = 0;
 +
@@ -2826,7 +2831,6 @@ index 00000000..9a5802ec
 +};
 +
 +} // namespace duckdb
-
 diff --git a/src/include/metadata_manager/aux_catalog_runtime_bridge.hpp b/src/include/metadata_manager/aux_catalog_runtime_bridge.hpp
 new file mode 100644
 index 00000000..8772fc4e
@@ -5487,10 +5491,10 @@ index 00000000..dfaaf781
 +} // namespace duckdb
 diff --git a/src/metadata_manager/aux_catalog_inline.cpp b/src/metadata_manager/aux_catalog_inline.cpp
 new file mode 100644
-index 00000000..3703510c
+index 00000000..641ce82a
 --- /dev/null
 +++ b/src/metadata_manager/aux_catalog_inline.cpp
-@@ -0,0 +1,488 @@
+@@ -0,0 +1,494 @@
 +#include "metadata_manager/aux_catalog_metadata_manager.hpp"
 +#include "metadata_manager/aux_catalog_tabular_payload.hpp"
 +#include "metadata_manager/aux_catalog_runtime_bridge.hpp"
@@ -5974,6 +5978,12 @@ index 00000000..3703510c
 +		}
 +		RejectRuntimeField(table.inlined_table.table_name, "inlined table name");
 +		pending_inline_flushes.push_back({table.inlined_table.table_name, table.flush_snapshot_id});
++	}
++	// Inline file deletions become regular delete files even when no inlined
++	// data was written. They must be ended in the catalog too, otherwise the
++	// reader applies both the delete file and the still-visible inline rows.
++	for (auto &entry : file_deletions) {
++		pending_inline_file_deletion_flushes.push_back({entry.first.index, entry.second});
 +	}
 +	return string();
 +}
@@ -7073,10 +7083,10 @@ index 00000000..9124f424
 +} // namespace duckdb
 diff --git a/src/metadata_manager/aux_catalog_metadata_manager.cpp b/src/metadata_manager/aux_catalog_metadata_manager.cpp
 new file mode 100644
-index 00000000..e8861b26
+index 00000000..7acc18ef
 --- /dev/null
 +++ b/src/metadata_manager/aux_catalog_metadata_manager.cpp
-@@ -0,0 +1,1323 @@
+@@ -0,0 +1,1329 @@
 +#include "metadata_manager/aux_catalog_metadata_manager.hpp"
 +#include "metadata_manager/ducklake_metadata_manager_v1_1.hpp"
 +#include "metadata_manager/aux_catalog_tabular_payload.hpp"
@@ -7340,6 +7350,10 @@ index 00000000..e8861b26
 +	std::lock_guard<std::mutex> guard(pending_inline_flushes_lock);
 +	for (auto &flush : pending_inline_flushes) {
 +		payload += StringUtil::Format("inline_table\t%s\t%d\n", flush.table_name, flush.flush_snapshot_id);
++	}
++	for (auto &flush : pending_inline_file_deletion_flushes) {
++		payload += StringUtil::Format("inline_file_deletion_flush\t%d\t%d\n", flush.table_id,
++		                              flush.flush_snapshot_id);
 +	}
 +	return payload;
 +}
@@ -7914,6 +7928,7 @@ index 00000000..e8861b26
 +	{
 +		std::lock_guard<std::mutex> guard(pending_inline_flushes_lock);
 +		pending_inline_flushes.clear();
++		pending_inline_file_deletion_flushes.clear();
 +	}
 +	pending_metadata_batch = true;
 +	return true;
@@ -8362,6 +8377,7 @@ index 00000000..e8861b26
 +	{
 +		std::lock_guard<std::mutex> guard(pending_inline_flushes_lock);
 +		pending_inline_flushes.clear();
++		pending_inline_file_deletion_flushes.clear();
 +	}
 +}
 +
@@ -8400,7 +8416,6 @@ index 00000000..e8861b26
 +}
 +
 +} // namespace duckdb
-
 diff --git a/src/metadata_manager/aux_catalog_metadata_options.cpp b/src/metadata_manager/aux_catalog_metadata_options.cpp
 new file mode 100644
 index 00000000..a2710728

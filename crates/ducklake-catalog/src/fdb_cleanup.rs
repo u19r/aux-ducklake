@@ -14,13 +14,16 @@ use crate::{
     fdb_runtime::{map_fdb_commit_error, map_fdb_error},
     file_partitions::remove_cached_file_partition_values,
     file_stats::remove_cached_file_column_stats_for_data_file,
-    inline_data::{decode_inline_table_item, inline_table_payload_prefix},
+    inline_data::{
+        decode_inline_flush_watermark, decode_inline_table_item, inline_table_payload_prefix,
+        inline_table_prefix,
+    },
     keys::{
-        KeyFamily, current_data_file_key, data_file_begin_key, data_file_end_key, data_file_key,
-        delete_file_end_key, delete_file_key, delete_file_timeline_key, family_prefix,
-        file_column_stats_lookup_key, file_partition_value_prefix, inline_table_end_key,
-        partition_value_lookup_key, prefix_end, scheduled_data_file_cleanup_key,
-        scheduled_delete_file_cleanup_key,
+        InlineFlushWatermarkKey, KeyFamily, current_data_file_key, data_file_begin_key,
+        data_file_end_key, data_file_key, delete_file_end_key, delete_file_key,
+        delete_file_timeline_key, family_prefix, file_column_stats_lookup_key,
+        file_partition_value_prefix, inline_table_end_key, partition_value_lookup_key, prefix_end,
+        scheduled_data_file_cleanup_key, scheduled_delete_file_cleanup_key,
     },
     kv::{OrderedCatalogKv, RangeItem},
     maintenance::{
@@ -100,7 +103,58 @@ impl FdbOrderedCatalogKv {
                 removed.push(row);
             }
         }
+        self.remove_empty_inline_flush_watermarks(catalog)?;
         Ok(removed)
+    }
+
+    /// Remove a watermark once every inline chunk it covers is gone. The
+    /// watermark is the only visibility marker for a flushed range, so it must
+    /// stay until the range is empty.
+    fn remove_empty_inline_flush_watermarks(&self, catalog: CatalogId) -> CatalogResult<()> {
+        let prefix = family_prefix(catalog, KeyFamily::InlineFlushWatermark);
+        let order_kind = crate::CatalogOrderId::uuid_v7(0);
+        let mut empty = Vec::new();
+        for item in self.scan_prefix(&prefix, RangeDirection::Forward, usize::MAX)? {
+            let Some((table_id, end_order, schema_id, max_begin_order)) =
+                decode_inline_flush_watermark(&prefix, &item.key, order_kind)?
+            else {
+                continue;
+            };
+            let mut covered = false;
+            for chunk in self.scan_prefix(
+                &inline_table_prefix(catalog, table_id, schema_id),
+                RangeDirection::Forward,
+                usize::MAX,
+            )? {
+                let row = decode_inline_table_item(catalog, &chunk.key, &chunk.value)?;
+                if row.validity.begin_order <= max_begin_order {
+                    covered = true;
+                    break;
+                }
+            }
+            if !covered {
+                empty.push(
+                    InlineFlushWatermarkKey {
+                        table_id,
+                        end_order,
+                        schema_id,
+                        max_begin_order,
+                    }
+                    .encode(catalog),
+                );
+            }
+        }
+        if empty.is_empty() {
+            return Ok(());
+        }
+        let trx = self.create_transaction()?;
+        for key in empty {
+            trx.clear(&self.namespaced_key(&key));
+        }
+        crate::fdb_runtime::record_transaction_usage(&trx);
+        crate::fdb_runtime::wait_for_fdb("wait.fdb.commit", trx.commit())
+            .map_err(map_fdb_commit_error)?;
+        Ok(())
     }
 
     fn remove_data_file_metadata(

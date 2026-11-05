@@ -14,7 +14,7 @@ dependencies = [
 [[package]]
 name = "alloc-counter"
 version = "0.1.0"
-source = "git+https://github.com/u19r/aux-common?rev=662da2358c5c2bebecc85dd892c45deb825eabc6#662da2358c5c2bebecc85dd892c45deb825eabc6"
+source = "git+https://github.com/u19r/aux-common?rev=6d6a27ab346ede89700034e6f5f3ac3be318ba89#6d6a27ab346ede89700034e6f5f3ac3be318ba89"
 dependencies = [
  "alloc-counter-macros",
  "serde",
@@ -24,7 +24,7 @@ dependencies = [
 [[package]]
 name = "alloc-counter-macros"
 version = "0.1.0"
-source = "git+https://github.com/u19r/aux-common?rev=662da2358c5c2bebecc85dd892c45deb825eabc6#662da2358c5c2bebecc85dd892c45deb825eabc6"
+source = "git+https://github.com/u19r/aux-common?rev=6d6a27ab346ede89700034e6f5f3ac3be318ba89#6d6a27ab346ede89700034e6f5f3ac3be318ba89"
 dependencies = [
  "quote",
  "syn",

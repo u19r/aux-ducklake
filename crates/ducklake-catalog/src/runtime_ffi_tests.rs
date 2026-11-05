@@ -1,6 +1,5 @@
 #![cfg_attr(not(feature = "foundationdb"), allow(unused_imports))]
 
-#[cfg(feature = "foundationdb")]
 use crate::runtime_protocol::RuntimeRequest;
 use std::time::{SystemTime, UNIX_EPOCH};
 

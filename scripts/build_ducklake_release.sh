@@ -75,7 +75,7 @@ Linux) duckdb_shared_target="libduckdb.so" ;;
     exit 1
     ;;
 esac
-cmake --build "$release_dir" --config Release --target \
+cmake --build "$release_dir" --config Release "$@" --target \
     duckdb \
     shell \
     postgres_scanner.duckdb_extension \

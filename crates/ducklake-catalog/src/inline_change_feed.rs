@@ -373,7 +373,7 @@ fn load_inline_payload_chunks(
     table_id: TableId,
     schema_id: SchemaId,
     feed_end_order: CatalogOrderId,
-    end_orders: &std::collections::BTreeMap<CatalogOrderId, CatalogOrderId>,
+    end_orders: &crate::inline_data::InlineTableEndOrders,
 ) -> CatalogResult<Vec<InlinePayloadChunks>> {
     let mut payloads_by_begin =
         std::collections::BTreeMap::<CatalogOrderId, Vec<InlineTableChunkRow>>::new();
@@ -387,7 +387,7 @@ fn load_inline_payload_chunks(
         let end_order = row
             .validity
             .end_order
-            .or_else(|| end_orders.get(&row.validity.begin_order).copied());
+            .or_else(|| end_orders.end_order_for(row.validity.begin_order));
         if row.validity.begin_order <= feed_end_order {
             end_order_by_begin.insert(row.validity.begin_order, end_order);
             payloads_by_begin

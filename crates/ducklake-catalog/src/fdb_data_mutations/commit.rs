@@ -21,7 +21,7 @@ use crate::{
         stage_snapshot_operation, stage_table_file_stats_version,
     },
     fdb_data_mutations::*,
-    fdb_inline_flushes::{prepare_inline_flushes, stage_prepared_inline_flush_versionstamped},
+    fdb_inline_flushes::{prepare_inline_flushes, stage_prepared_inline_flushes},
     fdb_inline_tables::{prepare_inline_table_mutation, stage_prepared_inline_mutation},
     fdb_runtime::{classify_fdb_error, map_fdb_error},
     fdb_versionstamp::{committed_order, incomplete_order, versionstamped_value},
@@ -252,23 +252,16 @@ impl FdbOrderedCatalogKv {
         }
         stage.finish(true);
         let stage = RuntimeSpan::enter("method.fdb_data_mutation.StageTransaction");
-        let mut staged_inline_flush_items = 0usize;
-        for flush in &prepared_inline_flushes {
-            match stage_prepared_inline_flush_versionstamped(self, &trx, catalog, flush) {
-                Ok(staged) => {
-                    staged_inline_flush_items =
-                        staged_inline_flush_items.saturating_add(staged.staged_item_count());
+        let staged_inline_flush_items =
+            match stage_prepared_inline_flushes(self, &trx, catalog, &prepared_inline_flushes) {
+                Ok(staged) => staged,
+                Err(CatalogError::ConflictFenceChanged { .. })
+                    if read_context.snapshot_fence.is_none() =>
+                {
+                    return Ok(MutationCommitAttempt::Done(DataMutationCommit::default()));
                 }
-                Err(error) => {
-                    if read_context.snapshot_fence.is_none()
-                        && matches!(error, CatalogError::ConflictFenceChanged { .. })
-                    {
-                        return Ok(MutationCommitAttempt::Done(DataMutationCommit::default()));
-                    }
-                    return Err(error);
-                }
-            }
-        }
+                Err(error) => return Err(error),
+            };
         if !inline_flushes.is_empty() && staged_inline_flush_items == 0 {
             if read_context.snapshot_fence.is_some() {
                 return Err(CatalogError::InvalidMutation(

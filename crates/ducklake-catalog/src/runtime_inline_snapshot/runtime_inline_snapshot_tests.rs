@@ -794,3 +794,132 @@ fn given_live_cleanup_during_historical_capture_when_first_read_runs_then_rows_r
     let database = crate::fdb_runtime::shared_foundationdb_database(None).unwrap();
     crate::clear_foundationdb_prefix(&database, kv.key_prefix()).unwrap();
 }
+
+struct BoundedWatermarkReads {
+    inner: FakeOrderedCatalogKv,
+    watermark_prefix: Vec<u8>,
+}
+
+impl crate::OrderedCatalogKv for BoundedWatermarkReads {
+    fn get(&self, key: &[u8]) -> crate::CatalogResult<Option<Vec<u8>>> {
+        crate::OrderedCatalogKv::get(&self.inner, key)
+    }
+
+    fn scan_prefix(
+        &self,
+        prefix: &[u8],
+        direction: crate::RangeDirection,
+        limit: usize,
+    ) -> crate::CatalogResult<Vec<crate::RangeItem>> {
+        if prefix.starts_with(&self.watermark_prefix) && limit > 256 {
+            return Err(CatalogError::Backend(
+                "watermark reads must use finite pages".to_owned(),
+            ));
+        }
+        crate::OrderedCatalogKv::scan_prefix(&self.inner, prefix, direction, limit)
+    }
+
+    fn scan_range(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        direction: crate::RangeDirection,
+        limit: usize,
+    ) -> crate::CatalogResult<Vec<crate::RangeItem>> {
+        if start.starts_with(&self.watermark_prefix) && limit > 256 {
+            return Err(CatalogError::Backend(
+                "watermark reads must use finite pages".to_owned(),
+            ));
+        }
+        crate::OrderedCatalogKv::scan_range(&self.inner, start, end, direction, limit)
+    }
+
+    fn read_conflict_fence(&self, key: &[u8]) -> crate::CatalogResult<Option<Vec<u8>>> {
+        crate::OrderedCatalogKv::read_conflict_fence(&self.inner, key)
+    }
+}
+
+#[test]
+fn given_many_watermarks_when_history_is_reconstructed_then_reads_and_memory_remain_bounded() {
+    let catalog = CatalogId(99);
+    let table = TableId(1);
+    let schema = SchemaId(1);
+    let snapshot = CatalogOrderId::uuid_v7(5_000);
+    let mut kv = FakeOrderedCatalogKv::new();
+    let mut batch = KvBatch::new();
+    for index in 1..=2_000 {
+        batch.put(
+            crate::keys::InlineFlushWatermarkKey {
+                table_id: table,
+                end_order: CatalogOrderId::uuid_v7(2_000 + index),
+                schema_id: schema,
+                max_begin_order: CatalogOrderId::uuid_v7(index),
+            }
+            .encode(catalog),
+            Vec::new(),
+        );
+    }
+    for (begin, row_id) in [(1, 0), (4_500, 1)] {
+        let order = CatalogOrderId::uuid_v7(begin);
+        let chunk = InlineTableChunkRow::new(
+            table,
+            schema,
+            ValidityWindow::new(order, None),
+            0,
+            1,
+            format!("row\t{row_id}\ti:42\n").into_bytes(),
+        );
+        batch.put(
+            inline_table_chunk_key(catalog, table, schema, order, 0),
+            chunk.encode(),
+        );
+    }
+    batch.put(
+        crate::keys::InlineFlushWatermarkKey {
+            table_id: table,
+            end_order: snapshot,
+            schema_id: SchemaId(2),
+            max_begin_order: snapshot,
+        }
+        .encode(catalog),
+        Vec::new(),
+    );
+    batch.put(
+        crate::keys::InlineFlushWatermarkKey {
+            table_id: table,
+            end_order: CatalogOrderId::uuid_v7(6_000),
+            schema_id: schema,
+            max_begin_order: snapshot,
+        }
+        .encode(catalog),
+        Vec::new(),
+    );
+    kv.commit(batch).unwrap();
+    let bounded = BoundedWatermarkReads {
+        inner: kv,
+        watermark_prefix: crate::keys::family_prefix(
+            catalog,
+            crate::keys::KeyFamily::InlineFlushWatermark,
+        ),
+    };
+    let captured = reconstruct_inline_current_rows_streaming(
+        |accumulator| {
+            InlineHistoryRequest {
+                catalog,
+                table,
+                schema,
+                snapshot,
+            }
+            .stream(&bounded, accumulator)
+        },
+        snapshot,
+        &BTreeMap::from([(CatalogOrderId::uuid_v7(4_500), 42)]),
+        &BTreeMap::new(),
+        1,
+        1_024,
+        256,
+    )
+    .expect("watermark count must not produce an unbounded scan or retained vector");
+    assert_eq!(captured.rows.len(), 1);
+    assert_eq!(captured.rows[0].0, 1);
+}

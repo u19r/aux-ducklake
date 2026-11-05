@@ -149,10 +149,10 @@ Docker container so local workstation libraries do not shape the Linux artifact:
 
 ```sh
 just ducklake-release
-just ducklake-build-release-local
+just release
 just ducklake-package-release
-just ducklake-build-linux-amd64
-just ducklake-build-linux-arm64
+just docker-build-linux-x86
+just docker-build-linux
 ```
 
 `just ducklake-release` is the local/CI entrypoint. It delegates to

@@ -8,8 +8,8 @@ use crate::{
     CatalogError, CatalogId, CatalogOrderId, CatalogResult, SchemaId, TableId,
     inline_change_feed::{InlineRowChange, InlineRowChangeKind},
     inline_data::{
-        InlineTableChunkRow, decode_inline_end_marker, decode_inline_table_item,
-        inline_table_prefix,
+        InlineTableChunkRow, decode_inline_end_marker, decode_inline_flush_watermark,
+        decode_inline_table_item, inline_table_prefix,
     },
     keys::{KeyFamily, family_prefix, prefix_end, table_schema_kind_inline_row_change_prefix},
 };
@@ -83,6 +83,21 @@ struct InlineEndMarker {
     end_order: CatalogOrderId,
     schema_id: SchemaId,
     begin_order: CatalogOrderId,
+}
+
+#[derive(Default)]
+struct InlineEndedGroups {
+    ended: BTreeSet<CatalogOrderId>,
+    max_flushed_begin: Option<CatalogOrderId>,
+}
+
+impl InlineEndedGroups {
+    fn is_ended(&self, begin_order: CatalogOrderId) -> bool {
+        self.ended.contains(&begin_order)
+            || self
+                .max_flushed_begin
+                .is_some_and(|max_begin| begin_order <= max_begin)
+    }
 }
 
 fn next_inline_payload_chunk(
@@ -167,7 +182,7 @@ impl InlineHistoryRequest {
         &self,
         kv: &impl crate::OrderedCatalogKv,
         max_bytes: usize,
-    ) -> CatalogResult<BTreeSet<CatalogOrderId>> {
+    ) -> CatalogResult<InlineEndedGroups> {
         let mut prefix = family_prefix(self.catalog, KeyFamily::EndOrder);
         prefix.extend_from_slice(&self.table.0.to_be_bytes());
         prefix.push(b'/');
@@ -175,13 +190,13 @@ impl InlineHistoryRequest {
         let mut through_snapshot = prefix.clone();
         through_snapshot.extend_from_slice(&self.snapshot.as_bytes());
         cursor.end = prefix_end(&through_snapshot);
-        let mut ended = BTreeSet::new();
+        let mut result = InlineEndedGroups::default();
         let mut bytes = 0usize;
         while let Some(marker) = next_inline_end_marker(&mut cursor, &prefix, self.snapshot)? {
             if marker.end_order > self.snapshot {
                 break;
             }
-            if marker.schema_id != self.schema || !ended.insert(marker.begin_order) {
+            if marker.schema_id != self.schema || !result.ended.insert(marker.begin_order) {
                 continue;
             }
             bytes = bytes
@@ -197,7 +212,37 @@ impl InlineHistoryRequest {
                 )));
             }
         }
-        Ok(ended)
+
+        result.max_flushed_begin = self.load_watermark_frontier(kv)?;
+        Ok(result)
+    }
+
+    fn load_watermark_frontier(
+        &self,
+        kv: &impl crate::OrderedCatalogKv,
+    ) -> CatalogResult<Option<CatalogOrderId>> {
+        let family = family_prefix(self.catalog, KeyFamily::InlineFlushWatermark);
+        let mut prefix = family.clone();
+        prefix.extend_from_slice(&self.table.0.to_be_bytes());
+        prefix.push(b'/');
+        let mut cursor = InlineHistoryRangeCursor::new(kv, prefix.clone());
+        prefix.extend_from_slice(&self.snapshot.as_bytes());
+        cursor.end = prefix_end(&prefix);
+        // Applicable watermarks hide nested begin-order prefixes. Their union
+        // is one maximum frontier; retaining every watermark is unnecessary.
+        let mut frontier = None;
+        while let Some(item) = cursor.next()? {
+            let Some((table, end, schema, begin)) =
+                decode_inline_flush_watermark(&family, &item.key, self.snapshot)?
+            else {
+                continue;
+            };
+            if table == self.table && schema == self.schema && end <= self.snapshot {
+                frontier =
+                    Some(frontier.map_or(begin, |previous: CatalogOrderId| previous.max(begin)));
+            }
+        }
+        Ok(frontier)
     }
 
     fn next_deletion(
@@ -222,7 +267,7 @@ impl InlineHistoryRequest {
         &self,
         payload_cursor: &mut InlineHistoryRangeCursor<'_>,
         deletion_cursor: &mut InlineHistoryRangeCursor<'_>,
-        mut ended: BTreeSet<CatalogOrderId>,
+        ended: InlineEndedGroups,
         accumulator: &mut InlineCurrentAccumulator,
     ) -> CatalogResult<()> {
         let mut payload = next_inline_payload_chunk(payload_cursor, self.catalog)?;
@@ -250,8 +295,7 @@ impl InlineHistoryRequest {
                 let first = payload.take().ok_or_else(|| {
                     CatalogError::Backend("inline payload cursor lost its item".to_owned())
                 })?;
-                payload =
-                    self.consume_payload_group(first, payload_cursor, &mut ended, accumulator)?;
+                payload = self.consume_payload_group(first, payload_cursor, &ended, accumulator)?;
             }
         }
         Ok(())
@@ -261,11 +305,11 @@ impl InlineHistoryRequest {
         &self,
         first: InlineTableChunkRow,
         cursor: &mut InlineHistoryRangeCursor<'_>,
-        ended: &mut BTreeSet<CatalogOrderId>,
+        ended: &InlineEndedGroups,
         accumulator: &mut InlineCurrentAccumulator,
     ) -> CatalogResult<Option<InlineTableChunkRow>> {
         let mut group = InlinePayloadGroup::new(&first, self.snapshot)?;
-        if ended.remove(&group.begin_order) {
+        if ended.is_ended(group.begin_order) {
             group.visible = false;
         }
         group.push(first, accumulator)?;

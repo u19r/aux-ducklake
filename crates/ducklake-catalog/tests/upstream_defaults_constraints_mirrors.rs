@@ -3,7 +3,7 @@ use ducklake_catalog::{
     FakeOrderedCatalogKv, FileColumnStatsRow, InlineRowChangeKind, InlineTableFlush,
     OrderedCatalogKv, SchemaId, TableColumnRow, TableId, TableRow, commit_append_table_columns,
     commit_change_table_column_defaults, commit_create_table_row, commit_data_mutation,
-    commit_data_mutation_with_details, initialize_catalog_if_absent, keys::inline_table_end_key,
+    commit_data_mutation_with_details, initialize_catalog_if_absent, keys::InlineFlushWatermarkKey,
     latest_snapshot, list_file_column_stats_for_table_column, list_inline_row_changes,
     load_table_at, register_inline_table_payload_with_table,
 };
@@ -101,17 +101,17 @@ fn mirrors_data_inlining_flush_test_flush_ends_payload_but_preserves_insert_chan
             .collect::<Vec<_>>(),
         (0..10).collect::<Vec<_>>()
     );
-    for begin_order in insert_orders {
-        assert!(
-            OrderedCatalogKv::get(
-                &kv,
-                &inline_table_end_key(catalog, table, flush.order, schema, begin_order)
-            )
-            .unwrap()
-            .is_some(),
-            "flush snapshot must end inline payload beginning at {begin_order:?}"
-        );
+    let watermark = InlineFlushWatermarkKey {
+        table_id: table,
+        end_order: flush.order,
+        schema_id: schema,
+        max_begin_order: *insert_orders.last().expect("at least one inline insert"),
     }
+    .encode(catalog);
+    assert!(
+        OrderedCatalogKv::get(&kv, &watermark).unwrap().is_some(),
+        "flush snapshot must write one range watermark"
+    );
 }
 
 #[test]

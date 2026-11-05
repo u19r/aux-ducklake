@@ -8,16 +8,19 @@ use crate::{
         delete_partition_values_for_data_file, list_file_partition_values_for_data_files,
     },
     file_stats::remove_cached_file_column_stats_for_data_file,
-    inline_data::{InlineTableChunkRow, decode_inline_table_item, inline_table_payload_prefix},
+    inline_data::{
+        InlineTableChunkRow, decode_inline_flush_watermark, decode_inline_table_item,
+        inline_table_payload_prefix, inline_table_prefix,
+    },
     keys::{
-        KeyFamily, current_data_file_key, current_table_row_key, data_file_begin_key,
-        data_file_end_key, data_file_key, delete_file_end_key, delete_file_key,
-        delete_file_timeline_key, delete_file_timeline_order_from_key, delete_file_timeline_prefix,
-        family_prefix, file_column_stats_lookup_key, inline_table_end_key,
-        order_delete_file_change_key, prefix_end, scheduled_data_file_cleanup_key,
-        scheduled_data_file_cleanup_prefix, scheduled_delete_file_cleanup_key,
-        scheduled_delete_file_cleanup_prefix, table_delete_file_change_key, table_object_prefix,
-        table_visibility_key,
+        InlineFlushWatermarkKey, KeyFamily, current_data_file_key, current_table_row_key,
+        data_file_begin_key, data_file_end_key, data_file_key, delete_file_end_key,
+        delete_file_key, delete_file_timeline_key, delete_file_timeline_order_from_key,
+        delete_file_timeline_prefix, family_prefix, file_column_stats_lookup_key,
+        inline_table_end_key, order_delete_file_change_key, prefix_end,
+        scheduled_data_file_cleanup_key, scheduled_data_file_cleanup_prefix,
+        scheduled_delete_file_cleanup_key, scheduled_delete_file_cleanup_prefix,
+        table_delete_file_change_key, table_object_prefix, table_visibility_key,
     },
     rows::current_timestamp_micros,
     store::{invalidate_runtime_read_context, list_snapshots},
@@ -199,6 +202,55 @@ pub fn list_old_inline_table_payloads_for_cleanup(
             });
         }
     }
+
+    let order_kind = snapshots
+        .last()
+        .map_or_else(|| CatalogOrderId::uuid_v7(0), |snapshot| snapshot.order);
+    let watermark_prefix = family_prefix(catalog, KeyFamily::InlineFlushWatermark);
+    for item in kv.scan_prefix(&watermark_prefix, RangeDirection::Forward, usize::MAX)? {
+        let Some((table_id, end_order, schema_id, max_begin_order)) =
+            decode_inline_flush_watermark(&watermark_prefix, &item.key, order_kind)?
+        else {
+            continue;
+        };
+        let mut chunk_counts = std::collections::BTreeMap::new();
+        for chunk in kv.scan_prefix(
+            &inline_table_prefix(catalog, table_id, schema_id),
+            RangeDirection::Forward,
+            usize::MAX,
+        )? {
+            let row = decode_inline_table_item(catalog, &chunk.key, &chunk.value)?;
+            if row.validity.begin_order <= max_begin_order {
+                *chunk_counts
+                    .entry(row.validity.begin_order)
+                    .or_insert(0_usize) += 1;
+            }
+        }
+        let Some((&min_begin_order, _)) = chunk_counts.first_key_value() else {
+            continue;
+        };
+        let synthetic = InlineTableChunkRow {
+            table_id,
+            schema_id,
+            validity: crate::ValidityWindow::new(min_begin_order, Some(end_order)),
+            chunk_index: 0,
+            chunk_count: 1,
+            payload: Vec::new(),
+        };
+        if !inline_chunks_are_unreachable(&[synthetic], &snapshots) {
+            continue;
+        }
+        for (begin_order, chunk_count) in chunk_counts {
+            let id = InlineTableCleanupId {
+                table_id,
+                schema_id,
+                begin_order,
+            };
+            if seen.insert(id) {
+                rows.push(InlineTableCleanupRow { id, chunk_count });
+            }
+        }
+    }
     Ok(rows)
 }
 
@@ -291,6 +343,46 @@ pub fn remove_old_inline_table_payloads(
     let mut batch = KvBatch::new();
     for row in &rows {
         stage_remove_inline_table_payload(kv, &mut batch, catalog, row.id)?;
+    }
+    let removed_ids: BTreeSet<_> = rows.iter().map(|row| row.id).collect();
+    let watermark_prefix = family_prefix(catalog, KeyFamily::InlineFlushWatermark);
+    for item in kv.scan_prefix(&watermark_prefix, RangeDirection::Forward, usize::MAX)? {
+        let Some((table_id, end_order, schema_id, max_begin_order)) =
+            decode_inline_flush_watermark(
+                &watermark_prefix,
+                &item.key,
+                rows.first()
+                    .map_or_else(|| CatalogOrderId::uuid_v7(0), |row| row.id.begin_order),
+            )?
+        else {
+            continue;
+        };
+        let mut covered = BTreeSet::new();
+        for chunk in kv.scan_prefix(
+            &inline_table_prefix(catalog, table_id, schema_id),
+            RangeDirection::Forward,
+            usize::MAX,
+        )? {
+            let row = decode_inline_table_item(catalog, &chunk.key, &chunk.value)?;
+            if row.validity.begin_order <= max_begin_order {
+                covered.insert(InlineTableCleanupId {
+                    table_id,
+                    schema_id,
+                    begin_order: row.validity.begin_order,
+                });
+            }
+        }
+        if !covered.is_empty() && covered.is_subset(&removed_ids) {
+            batch.delete(
+                InlineFlushWatermarkKey {
+                    table_id,
+                    end_order,
+                    schema_id,
+                    max_begin_order,
+                }
+                .encode(catalog),
+            );
+        }
     }
     kv.commit(batch)?;
     invalidate_runtime_read_context(catalog);

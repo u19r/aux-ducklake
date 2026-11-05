@@ -32,7 +32,7 @@ libc = { workspace = true, optional = true }
 sha2 = { workspace = true }
 
 [dev-dependencies]
-alloc-counter = { git = "https://github.com/u19r/aux-common", package = "alloc-counter", rev = "662da2358c5c2bebecc85dd892c45deb825eabc6" }
+alloc-counter = { git = "https://github.com/u19r/aux-common", package = "alloc-counter", rev = "6d6a27ab346ede89700034e6f5f3ac3be318ba89" }
 tempfile = { workspace = true }
 
 [features]
