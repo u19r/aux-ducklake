@@ -6,5 +6,5 @@ docs/evidence
 duckdb_unittest_tempdir
 run-artifacts
 target
-third_party/ducklake/build
-third_party/ducklake/.cache
+# The release Dockerfile fetches and verifies this source from canonical pins.
+third_party/ducklake

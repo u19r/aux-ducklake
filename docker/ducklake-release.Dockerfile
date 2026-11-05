@@ -116,6 +116,11 @@ RUN set -eux; \
     rm -rf /tmp/curl.tar.xz "/tmp/curl-${CURL_VERSION}" /tmp/curl-build
 
 WORKDIR /workspace
+# Fetch pinned upstream source in a reusable layer. Host clone metadata is
+# excluded from the context so a fresh checkout cannot invalidate compilation.
+COPY scripts/fetch_ducklake.sh scripts/ducklake-upstream-pins.sh scripts/ducklake_patch_state.sh ./scripts/
+COPY patches/ducklake/0001-add-aux-catalog-metadata-manager.patch ./patches/ducklake/
+RUN ./scripts/fetch_ducklake.sh
 COPY . .
 
 ENV AUX_DUCKLAKE_SKIP_FETCH=1
