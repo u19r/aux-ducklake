@@ -1,4 +1,10 @@
-use super::inline_group_orders::assemble_inline_payload;
+use super::{
+    inline_end_orders::{
+        InlineTableEndOrders, inline_chunk_visible_at, inline_table_all_end_orders,
+        inline_table_end_orders, inline_table_end_orders_at,
+    },
+    inline_group_orders::assemble_inline_payload,
+};
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(not(test))]
 use std::sync::OnceLock;
@@ -20,7 +26,7 @@ use crate::{
         INLINE_CHUNK_BYTES, chunk_bounds, chunk_count, decode_inline_end_order,
         encode_inline_end_order, validate_inline_table_rows_fit_fdb,
     },
-    keys::{KeyFamily, family_prefix, inline_table_end_key, table_object_key},
+    keys::{InlineFlushWatermarkKey, KeyFamily, family_prefix, table_object_key},
     rows::{STORED_ORDER_LEN, decode_stored_order, encode_stored_order},
     store::{
         invalidate_runtime_read_context, latest_snapshot, snapshot_by_raw_sequence,
@@ -30,13 +36,13 @@ use crate::{
 };
 
 #[cfg(feature = "runtime-metrics")]
-fn record_inline_tables_stage(operation: &'static str, started: RuntimeMetricStage) {
+pub(super) fn record_inline_tables_stage(operation: &'static str, started: RuntimeMetricStage) {
     record_runtime_method_elapsed(operation, started.elapsed_micros());
 }
 
 #[cfg(not(feature = "runtime-metrics"))]
 #[inline]
-fn record_inline_tables_stage(_operation: &'static str, _started: RuntimeMetricStage) {}
+pub(super) fn record_inline_tables_stage(_operation: &'static str, _started: RuntimeMetricStage) {}
 
 fn incomplete_order() -> CatalogOrderId {
     incomplete_fdb_order()
@@ -65,6 +71,12 @@ pub struct InlineTableFlush {
     pub table_id: TableId,
     pub schema_id: SchemaId,
     pub flush_snapshot_sequence: RawSnapshotSequence,
+    /// Whether this flush also materializes and hides inlined data rows.
+    ///
+    /// A file-deletion flush only ends the inlined file-deletion rows that
+    /// were written as delete files. It must not hide inlined data that no
+    /// file materialized.
+    pub flush_inline_data: bool,
 }
 
 impl InlineTableFlush {
@@ -78,6 +90,20 @@ impl InlineTableFlush {
             table_id,
             schema_id,
             flush_snapshot_sequence,
+            flush_inline_data: true,
+        }
+    }
+
+    #[must_use]
+    pub const fn file_deletions_only(
+        table_id: TableId,
+        flush_snapshot_sequence: RawSnapshotSequence,
+    ) -> Self {
+        Self {
+            table_id,
+            schema_id: SchemaId(0),
+            flush_snapshot_sequence,
+            flush_inline_data: false,
         }
     }
 }
@@ -392,6 +418,9 @@ pub(crate) fn stage_flush_inline_table_payloads(
     end_order: CatalogOrderId,
 ) -> CatalogResult<()> {
     crate::inline_data::stage_flush_inline_file_deletions(kv, batch, catalog, flush, end_order)?;
+    if !flush.flush_inline_data {
+        return Ok(());
+    }
     crate::snapshot_operations::stage_snapshot_operation(
         batch,
         catalog,
@@ -399,19 +428,18 @@ pub(crate) fn stage_flush_inline_table_payloads(
         crate::snapshot_operations::SnapshotOperationKind::InlineFlush,
         flush.table_id,
     );
-    for row in flush_inline_table_payload_rows(kv, catalog, flush, end_order)? {
-        if row.chunk_index == 0 {
-            batch.put(
-                inline_table_end_key(
-                    catalog,
-                    flush.table_id,
-                    end_order,
-                    flush.schema_id,
-                    row.validity.begin_order,
-                ),
-                row.validity.begin_order.as_bytes().to_vec(),
-            );
-        }
+    let flushed = flush_inline_table_payload_rows(kv, catalog, flush, end_order)?;
+    if let Some(max_begin_order) = flushed.iter().map(|row| row.validity.begin_order).max() {
+        batch.put(
+            InlineFlushWatermarkKey {
+                table_id: flush.table_id,
+                end_order,
+                schema_id: flush.schema_id,
+                max_begin_order,
+            }
+            .encode(catalog),
+            Vec::new(),
+        );
     }
     stage_max_file_id_watermark(kv, batch, catalog, flush.flush_snapshot_sequence.0)?;
     Ok(())
@@ -471,7 +499,7 @@ pub(crate) fn flush_inline_table_payload_rows_at_snapshot_order(
         if let Some(existing_end) = row
             .validity
             .end_order
-            .or_else(|| end_orders.get(&row.validity.begin_order).copied())
+            .or_else(|| end_orders.end_order_for(row.validity.begin_order))
         {
             if existing_end > flush_snapshot_order {
                 return Err(CatalogError::InvalidMutation(format!(
@@ -578,6 +606,18 @@ fn list_inline_table_payloads_for_visibility(
     snapshot_order: CatalogOrderId,
     visibility: InlineTablePayloadVisibility,
 ) -> CatalogResult<Vec<InlineTablePayloadRow>> {
+    // Unflushed membership changes when another process materializes this
+    // snapshot. Cache only historical visibility bounded by the snapshot.
+    if !visibility.only_ended_at_or_before_snapshot() {
+        return list_inline_table_payloads_for_visibility_uncached(
+            kv,
+            catalog,
+            table_id,
+            schema_id,
+            snapshot_order,
+            visibility,
+        );
+    }
     #[cfg(test)]
     {
         list_inline_table_payloads_for_visibility_uncached(
@@ -597,7 +637,6 @@ fn list_inline_table_payloads_for_visibility(
             table_id,
             schema_id,
             snapshot_order,
-            visibility,
         };
         let cache = inline_table_payload_cache();
         if let Some(rows) = cache.get(key) {
@@ -648,7 +687,7 @@ fn list_inline_table_payloads_for_visibility_from_end_orders(
     table_id: TableId,
     schema_id: SchemaId,
     snapshot_order: CatalogOrderId,
-    end_orders: &BTreeMap<CatalogOrderId, CatalogOrderId>,
+    end_orders: &InlineTableEndOrders,
 ) -> CatalogResult<Vec<InlineTablePayloadRow>> {
     let mut visible = BTreeMap::<CatalogOrderId, Vec<InlineTableChunkRow>>::new();
     for item in kv.scan_prefix(
@@ -698,7 +737,6 @@ struct InlineTablePayloadCacheKey {
     table_id: TableId,
     schema_id: SchemaId,
     snapshot_order: CatalogOrderId,
-    visibility: InlineTablePayloadVisibility,
 }
 
 #[cfg(not(test))]
@@ -717,186 +755,12 @@ pub(crate) fn invalidate_inline_table_payload_read_context(catalog: CatalogId) {
     if let Some(cache) = INLINE_TABLE_PAYLOAD_CACHE.get() {
         cache.retain(|key, _| key.catalog != catalog);
     }
-    if let Some(cache) = INLINE_TABLE_END_ORDERS_CACHE.get() {
-        cache.retain(|key, _| key.catalog != catalog);
-    }
+    super::inline_end_orders::invalidate_inline_end_orders(catalog);
 }
 
 #[cfg(test)]
 #[allow(dead_code)]
 pub(crate) fn invalidate_inline_table_payload_read_context(_catalog: CatalogId) {}
-
-#[cfg(not(test))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct InlineTableEndOrdersCacheKey {
-    namespace: CatalogCacheNamespace,
-    catalog: CatalogId,
-    table_id: TableId,
-    schema_id: SchemaId,
-    snapshot_order: CatalogOrderId,
-    only_ended_at_or_before_snapshot: bool,
-}
-
-#[cfg(not(test))]
-static INLINE_TABLE_END_ORDERS_CACHE: OnceLock<
-    BoundedCache<InlineTableEndOrdersCacheKey, BTreeMap<CatalogOrderId, CatalogOrderId>>,
-> = OnceLock::new();
-
-#[cfg(not(test))]
-fn inline_table_end_orders_cache()
--> &'static BoundedCache<InlineTableEndOrdersCacheKey, BTreeMap<CatalogOrderId, CatalogOrderId>> {
-    static_bounded_cache(&INLINE_TABLE_END_ORDERS_CACHE, 256)
-}
-
-pub(crate) fn inline_table_end_orders_at(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    table_id: TableId,
-    schema_id: SchemaId,
-    snapshot_order: CatalogOrderId,
-) -> CatalogResult<BTreeMap<CatalogOrderId, CatalogOrderId>> {
-    inline_table_end_orders(kv, catalog, table_id, schema_id, snapshot_order, true)
-}
-
-pub(crate) fn inline_table_all_end_orders(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    table_id: TableId,
-    schema_id: SchemaId,
-    order_kind_source: CatalogOrderId,
-) -> CatalogResult<BTreeMap<CatalogOrderId, CatalogOrderId>> {
-    inline_table_end_orders(kv, catalog, table_id, schema_id, order_kind_source, false)
-}
-
-fn inline_table_end_orders(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    table_id: TableId,
-    schema_id: SchemaId,
-    snapshot_order: CatalogOrderId,
-    only_ended_at_or_before_snapshot: bool,
-) -> CatalogResult<BTreeMap<CatalogOrderId, CatalogOrderId>> {
-    #[cfg(test)]
-    {
-        inline_table_end_orders_uncached(
-            kv,
-            catalog,
-            table_id,
-            schema_id,
-            snapshot_order,
-            only_ended_at_or_before_snapshot,
-        )
-    }
-    #[cfg(not(test))]
-    {
-        let key = InlineTableEndOrdersCacheKey {
-            namespace: kv.catalog_cache_namespace(),
-            catalog,
-            table_id,
-            schema_id,
-            snapshot_order,
-            only_ended_at_or_before_snapshot,
-        };
-        let cache = inline_table_end_orders_cache();
-        if let Some(end_orders) = cache.get(key) {
-            return Ok(end_orders);
-        }
-        let end_orders = inline_table_end_orders_uncached(
-            kv,
-            catalog,
-            table_id,
-            schema_id,
-            snapshot_order,
-            only_ended_at_or_before_snapshot,
-        )?;
-        cache.insert(key, end_orders.clone());
-        Ok(end_orders)
-    }
-}
-
-fn inline_table_end_orders_uncached(
-    kv: &impl OrderedCatalogKv,
-    catalog: CatalogId,
-    table_id: TableId,
-    schema_id: SchemaId,
-    snapshot_order: CatalogOrderId,
-    only_ended_at_or_before_snapshot: bool,
-) -> CatalogResult<BTreeMap<CatalogOrderId, CatalogOrderId>> {
-    let started = RuntimeMetricStage::start();
-    let mut prefix = family_prefix(catalog, KeyFamily::EndOrder);
-    prefix.extend_from_slice(&table_id.0.to_be_bytes());
-    prefix.push(b'/');
-    let mut end_orders = BTreeMap::new();
-    for item in kv.scan_prefix(&prefix, RangeDirection::Forward, usize::MAX)? {
-        let Some((end_order, marker_schema_id, begin_order)) =
-            decode_inline_end_marker(&prefix, &item.key, snapshot_order)?
-        else {
-            continue;
-        };
-        if marker_schema_id == schema_id
-            && (!only_ended_at_or_before_snapshot || end_order <= snapshot_order)
-        {
-            end_orders.insert(begin_order, end_order);
-        }
-    }
-    record_inline_tables_stage("method.inline_tables.inline_table_end_orders", started);
-    Ok(end_orders)
-}
-
-pub(crate) fn inline_chunk_visible_at(
-    row: &InlineTableChunkRow,
-    end_orders: &BTreeMap<CatalogOrderId, CatalogOrderId>,
-    snapshot_order: CatalogOrderId,
-) -> bool {
-    let end_order = row
-        .validity
-        .end_order
-        .or_else(|| end_orders.get(&row.validity.begin_order).copied());
-    row.validity.begin_order <= snapshot_order
-        && end_order.is_none_or(|end_order| snapshot_order < end_order)
-}
-
-pub(crate) fn decode_inline_end_marker(
-    prefix: &[u8],
-    key: &[u8],
-    snapshot_order: CatalogOrderId,
-) -> CatalogResult<Option<(CatalogOrderId, SchemaId, CatalogOrderId)>> {
-    let Some(tail) = key.strip_prefix(prefix) else {
-        return Ok(None);
-    };
-    let expected_len = CatalogOrderId::LEN + 1 + 2 + 8 + 1 + CatalogOrderId::LEN;
-    if tail.len() != expected_len {
-        return Ok(None);
-    }
-    let object_start = CatalogOrderId::LEN + 1;
-    if tail[CatalogOrderId::LEN] != b'/'
-        || tail[object_start] != b'i'
-        || tail[object_start + 1] != b'/'
-        || tail[object_start + 10] != b'/'
-    {
-        return Ok(None);
-    }
-    let end_order = CatalogOrderId::from_bytes(
-        snapshot_order.kind(),
-        tail[..CatalogOrderId::LEN]
-            .try_into()
-            .map_err(|_| CatalogError::InvalidKey("inline end order is truncated".to_owned()))?,
-    );
-    let schema_start = object_start + 2;
-    let begin_start = schema_start + 8 + 1;
-    let schema_id = SchemaId(u64::from_be_bytes(
-        tail[schema_start..schema_start + 8]
-            .try_into()
-            .map_err(|_| CatalogError::InvalidKey("inline end schema is truncated".to_owned()))?,
-    ));
-    let begin_order = CatalogOrderId::from_bytes(
-        snapshot_order.kind(),
-        tail[begin_start..]
-            .try_into()
-            .map_err(|_| CatalogError::InvalidKey("inline begin order is truncated".to_owned()))?,
-    );
-    Ok(Some((end_order, schema_id, begin_order)))
-}
 
 pub(crate) fn inline_table_chunks(
     table_id: TableId,

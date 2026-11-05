@@ -58,7 +58,7 @@ Use the repository commands rather than invoking upstream build tools directly:
 just style-check
 just ducklake-catalog-check
 just ducklake-catalog-test
-just ducklake-build
+just build
 just ducklake-runtime-cpp-ffi-smoke
 ```
 
@@ -91,7 +91,7 @@ The upstream checkout is generated from the DuckLake and DuckDB pins plus the au
 
    ```sh
    just ducklake-fetch
-   just ducklake-build
+   just build
    just ducklake-runtime-cpp-ffi-smoke
    just ducklake-upstream-disabled-diff
    just ducklake-upstream-postgres-full

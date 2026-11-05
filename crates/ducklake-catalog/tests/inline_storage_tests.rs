@@ -1,9 +1,11 @@
 use ducklake_catalog::{
     CatalogId, CatalogOrderId, DataFileId, FakeOrderedCatalogKv, INLINE_PAYLOAD_LIMIT_BYTES,
-    InlineDeletionChunkRow, InlineTableChunkRow, RangeDirection, SchemaId, TableId,
+    InlineDeletionChunkRow, InlineFileDeletionRow, InlineTableChunkRow, InlineTableFlush,
+    RangeDirection, SchemaId, TableId, commit_append_data_files_with_inline_flushes,
+    commit_inline_file_deletions, initialize_catalog_if_absent,
     keys::{KeyFamily, family_prefix},
-    latest_snapshot, list_inline_deletion_debug_chunks, list_inline_table_debug_chunks,
-    load_inline_deletion_payload_at, load_inline_table_payload_at,
+    latest_snapshot, list_inline_deletion_debug_chunks, list_inline_file_deletions_at,
+    list_inline_table_debug_chunks, load_inline_deletion_payload_at, load_inline_table_payload_at,
     register_inline_deletion_payload, register_inline_table_payload,
 };
 
@@ -292,6 +294,43 @@ fn given_inline_chunks_when_debug_exported_then_rows_are_decoded_and_bounded() {
     assert_eq!(exported_tables[0].payload, table_payload);
     assert_eq!(exported_deletions, deletion_rows);
     assert_eq!(exported_deletions[0].payload, deletion_payload);
+}
+
+#[test]
+fn given_file_deletion_only_flush_when_committed_then_deletions_end_but_inline_data_stays_visible()
+{
+    let catalog = CatalogId(31);
+    let table = TableId(41);
+    let schema = SchemaId(7);
+    let mut kv = FakeOrderedCatalogKv::new();
+    initialize_catalog_if_absent(&mut kv, catalog).unwrap();
+    let payload = small_inline_rows_payload(64);
+    register_inline_table_payload(&mut kv, catalog, table, schema, payload.clone()).unwrap();
+
+    let deletion = InlineFileDeletionRow::new(table, DataFileId(5), 7, CatalogOrderId::uuid_v7(0));
+    commit_inline_file_deletions(&mut kv, catalog, vec![deletion]).unwrap();
+    let flush_snapshot = latest_snapshot(&kv, catalog).unwrap().unwrap().sequence;
+
+    commit_append_data_files_with_inline_flushes(
+        &mut kv,
+        catalog,
+        Vec::new(),
+        &[InlineTableFlush::file_deletions_only(table, flush_snapshot)],
+    )
+    .unwrap();
+    let end_order = latest_snapshot(&kv, catalog).unwrap().unwrap().order;
+
+    assert!(
+        list_inline_file_deletions_at(&kv, catalog, table, end_order)
+            .unwrap()
+            .is_empty(),
+        "the flushed delete file must replace its inline deletion rows"
+    );
+    assert_eq!(
+        load_inline_table_payload_at(&kv, catalog, table, schema, end_order).unwrap(),
+        Some(payload),
+        "a file-deletion flush must not hide inlined data that no file materialized"
+    );
 }
 
 fn first_begin(rows: &[InlineTableChunkRow]) -> CatalogOrderId {

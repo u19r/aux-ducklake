@@ -14,7 +14,7 @@ pub(crate) struct InlineGroupOrderRequest<'a> {
     pub(crate) table: TableId,
     pub(crate) schema: SchemaId,
     pub(crate) snapshot: CatalogOrderId,
-    pub(crate) end_orders: &'a BTreeMap<CatalogOrderId, CatalogOrderId>,
+    pub(crate) end_orders: &'a crate::inline_data::InlineTableEndOrders,
 }
 
 impl InlineGroupOrderRequest<'_> {
@@ -34,7 +34,7 @@ impl InlineGroupOrderRequest<'_> {
         for (order, mut rows) in visible {
             rows.sort_by_key(|row| row.chunk_index);
             validate_payload_chunks(&rows)?;
-            if !self.end_orders.contains_key(&order) {
+            if self.end_orders.end_order_for(order).is_none() {
                 orders.push(order);
             }
         }

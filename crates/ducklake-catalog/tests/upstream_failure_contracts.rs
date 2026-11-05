@@ -11,7 +11,7 @@ use ducklake_catalog::{
     commit_data_mutation_with_file_partitions, commit_delete_inline_table_rows,
     commit_inline_file_deletions, commit_merge_adjacent_data_files, commit_register_delete_files,
     commit_rewrite_delete_data_files, expire_snapshots, initialize_catalog_if_absent,
-    insertion_files, keys::inline_table_end_key, latest_snapshot, list_catalog_debug_rows,
+    insertion_files, keys::InlineFlushWatermarkKey, latest_snapshot, list_catalog_debug_rows,
     list_current_data_files, list_current_data_files_by_partition_value, list_data_file_changes,
     list_data_files_at, list_file_column_stats_for_table_column, list_file_partition_values,
     list_inline_row_payload_changes, list_macros_at, list_old_data_files_for_cleanup,
@@ -1072,7 +1072,13 @@ fn given_unrelated_commit_between_inline_insert_and_flush_when_reading_table_the
     assert!(
         OrderedCatalogKv::get(
             &kv,
-            &inline_table_end_key(catalog, table, flush_order, schema, inline_order)
+            &InlineFlushWatermarkKey {
+                table_id: table,
+                end_order: flush_order,
+                schema_id: schema,
+                max_begin_order: inline_order
+            }
+            .encode(catalog)
         )
         .unwrap()
         .is_some(),

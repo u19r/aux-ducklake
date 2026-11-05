@@ -24,7 +24,10 @@ use ducklake_catalog::{
     commit_rename_tables, commit_rename_tables_with_conflict_check, commit_rename_views,
     commit_rewrite_delete_data_files, commit_rewrite_delete_data_files_with_conflict_check,
     expire_snapshots, initialize_catalog_if_absent, insertion_files,
-    keys::{snapshot_key, snapshot_timestamp_key, table_delete_file_change_key},
+    keys::{
+        KeyFamily, family_prefix, snapshot_key, snapshot_timestamp_key,
+        table_delete_file_change_key,
+    },
     latest_snapshot, list_catalog_debug_rows, list_current_data_files,
     list_current_data_files_by_partition_value, list_data_file_changes, list_data_files_at,
     list_file_column_stats_for_table_column, list_inline_file_deletions_at,
@@ -3488,4 +3491,214 @@ fn given_multiple_inline_payloads_flushed_then_cleanup_waits_until_all_visible_s
             .unwrap()
             .is_empty()
     );
+}
+
+fn commit_inline_flush(
+    kv: &mut FakeOrderedCatalogKv,
+    catalog: CatalogId,
+    table: TableId,
+    schema: SchemaId,
+    file_id: u64,
+    flush_sequence: RawSnapshotSequence,
+) -> ducklake_catalog::SnapshotRow {
+    commit_append_data_files_with_inline_flushes(
+        kv,
+        catalog,
+        vec![DataFileRow::new(
+            DataFileId(file_id),
+            table,
+            format!("main/inline/file-{file_id:04}.parquet"),
+            1,
+            1024,
+            CatalogOrderId::uuid_v7(0),
+        )],
+        &[InlineTableFlush::new(table, schema, flush_sequence)],
+    )
+    .unwrap();
+    latest_snapshot(kv, catalog).unwrap().unwrap()
+}
+
+#[test]
+fn given_flush_watermark_when_reading_before_at_and_after_then_visibility_follows_end_order() {
+    let mut kv = FakeOrderedCatalogKv::new();
+    let catalog = CatalogId(1);
+    let table = TableId(10);
+    let schema = SchemaId(0);
+    initialize_catalog_if_absent(&mut kv, catalog).unwrap();
+    register_inline_table_payload(&mut kv, catalog, table, schema, b"row\t1\tone\n".to_vec())
+        .unwrap();
+    let inline_snapshot = latest_snapshot(&kv, catalog).unwrap().unwrap();
+    let flush_snapshot = commit_inline_flush(
+        &mut kv,
+        catalog,
+        table,
+        schema,
+        20,
+        inline_snapshot.sequence,
+    );
+
+    assert_eq!(
+        list_inline_table_payloads_at(&kv, catalog, table, schema, inline_snapshot.order)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        list_inline_table_payloads_at(&kv, catalog, table, schema, flush_snapshot.order)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        list_inline_table_payloads_at(&kv, catalog, table, schema, CatalogOrderId::uuid_v7(9))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn given_flush_watermark_when_newer_chunk_exists_then_only_covered_chunks_are_hidden() {
+    let mut kv = FakeOrderedCatalogKv::new();
+    let catalog = CatalogId(1);
+    let table = TableId(10);
+    let schema = SchemaId(0);
+    initialize_catalog_if_absent(&mut kv, catalog).unwrap();
+    register_inline_table_payload(&mut kv, catalog, table, schema, b"row\t1\tone\n".to_vec())
+        .unwrap();
+    let inline_snapshot = latest_snapshot(&kv, catalog).unwrap().unwrap();
+    commit_inline_flush(
+        &mut kv,
+        catalog,
+        table,
+        schema,
+        20,
+        inline_snapshot.sequence,
+    );
+    register_inline_table_payload(&mut kv, catalog, table, schema, b"row\t2\ttwo\n".to_vec())
+        .unwrap();
+    let latest = latest_snapshot(&kv, catalog).unwrap().unwrap();
+    let payloads =
+        list_inline_table_payloads_at(&kv, catalog, table, schema, latest.order).unwrap();
+    assert_eq!(payloads.len(), 1);
+    assert_eq!(payloads[0].payload, b"row\t2\ttwo\n");
+}
+
+#[test]
+fn given_flush_watermark_when_schema_differs_then_other_schema_stays_visible() {
+    let mut kv = FakeOrderedCatalogKv::new();
+    let catalog = CatalogId(1);
+    let table = TableId(10);
+    initialize_catalog_if_absent(&mut kv, catalog).unwrap();
+    register_inline_table_payload(
+        &mut kv,
+        catalog,
+        table,
+        SchemaId(0),
+        b"row\t1\tone\n".to_vec(),
+    )
+    .unwrap();
+    register_inline_table_payload(
+        &mut kv,
+        catalog,
+        table,
+        SchemaId(1),
+        b"row\t2\ttwo\n".to_vec(),
+    )
+    .unwrap();
+    let inline_snapshot = latest_snapshot(&kv, catalog).unwrap().unwrap();
+    commit_inline_flush(
+        &mut kv,
+        catalog,
+        table,
+        SchemaId(0),
+        20,
+        inline_snapshot.sequence,
+    );
+    let latest = latest_snapshot(&kv, catalog).unwrap().unwrap();
+    assert!(
+        list_inline_table_payloads_at(&kv, catalog, table, SchemaId(0), latest.order)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        list_inline_table_payloads_at(&kv, catalog, table, SchemaId(1), latest.order)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn given_large_inline_set_when_flushed_then_one_watermark_covers_the_range() {
+    let mut kv = FakeOrderedCatalogKv::new();
+    let catalog = CatalogId(1);
+    let table = TableId(10);
+    let schema = SchemaId(0);
+    initialize_catalog_if_absent(&mut kv, catalog).unwrap();
+    for index in 0..200_u32 {
+        register_inline_table_payload(
+            &mut kv,
+            catalog,
+            table,
+            schema,
+            format!("row\t{index}\tvalue\n").into_bytes(),
+        )
+        .unwrap();
+    }
+    let inline_snapshot = latest_snapshot(&kv, catalog).unwrap().unwrap();
+    commit_inline_flush(
+        &mut kv,
+        catalog,
+        table,
+        schema,
+        20,
+        inline_snapshot.sequence,
+    );
+
+    let prefix = family_prefix(catalog, KeyFamily::InlineFlushWatermark);
+    let watermarks = kv.scan_prefix(
+        &prefix,
+        ducklake_catalog::RangeDirection::Forward,
+        usize::MAX,
+    );
+    assert_eq!(watermarks.len(), 1, "one watermark must cover the range");
+    let latest = latest_snapshot(&kv, catalog).unwrap().unwrap();
+    assert!(
+        list_inline_table_payloads_at(&kv, catalog, table, schema, latest.order)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn given_watermark_covers_a_later_chunk_when_an_older_snapshot_is_retained_then_cleanup_waits() {
+    let mut kv = FakeOrderedCatalogKv::new();
+    let catalog = CatalogId(1);
+    let table = TableId(10);
+    let schema = SchemaId(0);
+    initialize_catalog_if_absent(&mut kv, catalog).unwrap();
+    register_inline_table_payload(&mut kv, catalog, table, schema, b"row\t1\tone\n".to_vec())
+        .unwrap();
+    let first = latest_snapshot(&kv, catalog).unwrap().unwrap();
+    register_inline_table_payload(&mut kv, catalog, table, schema, b"row\t2\ttwo\n".to_vec())
+        .unwrap();
+    let retained = latest_snapshot(&kv, catalog).unwrap().unwrap();
+    register_inline_table_payload(&mut kv, catalog, table, schema, b"row\t3\tthree\n".to_vec())
+        .unwrap();
+    let last = latest_snapshot(&kv, catalog).unwrap().unwrap();
+    let flush = commit_inline_flush(&mut kv, catalog, table, schema, 20, last.sequence);
+    assert!(flush.order > last.order);
+
+    // The retained snapshot sees the first two chunks but not the last chunk.
+    // The watermark's maximum begin order belongs to the last chunk, so using
+    // it for cleanup would incorrectly treat the range as unreachable.
+    expire_snapshots(&mut kv, catalog, &[first.sequence, last.sequence]).unwrap();
+    assert!(
+        list_old_inline_table_payloads_for_cleanup(&kv, catalog)
+            .unwrap()
+            .is_empty()
+    );
+
+    expire_snapshots(&mut kv, catalog, &[retained.sequence]).unwrap();
+    let cleanup = list_old_inline_table_payloads_for_cleanup(&kv, catalog).unwrap();
+    assert_eq!(cleanup.len(), 3);
 }

@@ -1,3 +1,4 @@
+#[cfg(feature = "foundationdb")]
 use crate::runtime_protocol::RuntimePayload;
 #[cfg(feature = "foundationdb")]
 use std::cmp::Ordering;

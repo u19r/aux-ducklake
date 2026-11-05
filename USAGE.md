@@ -95,8 +95,8 @@ the [Cargo target-slot guide](../aux-infra/docs/cargo-target-slots.md).
 | --- | --- |
 | `just ducklake-release` | Default release archives under `artifacts/` |
 | `just ducklake-release linux-arm64` | One platform archive; also supports `linux-amd64` and `macos-arm64` |
-| `just ducklake-build-release` | Local release shell and shared library under `third_party/ducklake/build/release/` |
-| `just ducklake-fetch` then `just ducklake-build` | Matching debug shell and standalone extension |
+| `just release` | Local release shell and shared library under `third_party/ducklake/build/release/` |
+| `just ducklake-fetch` then `just build` | Matching debug shell and standalone extension |
 
 For standalone-extension development, also build the FoundationDB runtime:
 

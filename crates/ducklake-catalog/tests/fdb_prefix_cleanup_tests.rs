@@ -100,7 +100,9 @@ fn put_entries(db: &Database, entries: &[(String, &[u8])]) {
     let trx = db.create_trx().unwrap();
     trx.set_option(TransactionOption::Timeout(5_000)).unwrap();
     for (key, value) in entries {
-        trx.set(key.as_bytes(), value);
+        // Namespace cleanup operates on the catalog's tuple-encoded physical keys.
+        let physical = foundationdb::tuple::pack(&(key.as_bytes(), b"payload".as_slice()));
+        trx.set(&physical, value);
     }
     block_on(trx.commit()).unwrap();
 }
@@ -108,7 +110,8 @@ fn put_entries(db: &Database, entries: &[(String, &[u8])]) {
 fn get_entry(db: &Database, key: &str) -> Option<Vec<u8>> {
     let trx = db.create_trx().unwrap();
     trx.set_option(TransactionOption::Timeout(5_000)).unwrap();
-    block_on(trx.get(key.as_bytes(), false))
+    let physical = foundationdb::tuple::pack(&(key.as_bytes(), b"payload".as_slice()));
+    block_on(trx.get(&physical, false))
         .unwrap()
         .map(|value| value.to_vec())
 }

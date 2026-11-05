@@ -1527,6 +1527,7 @@ mod tests {
                 table_id,
                 schema_id,
                 flush_snapshot_sequence: RawSnapshotSequence(3),
+                flush_inline_data: true,
             }],
         )
         .unwrap();
@@ -1661,6 +1662,7 @@ mod tests {
                     table_id: main.table_id,
                     schema_id: main.schema_id,
                     flush_snapshot_sequence: flush_snapshot.sequence,
+                    flush_inline_data: true,
                 }],
                 Vec::new(),
                 Vec::new(),
@@ -1781,6 +1783,7 @@ mod tests {
                     table_id,
                     schema_id,
                     flush_snapshot_sequence: delete_snapshot.sequence,
+                    flush_inline_data: true,
                 }],
                 Vec::new(),
                 Vec::new(),

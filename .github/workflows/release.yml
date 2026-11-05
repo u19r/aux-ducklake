@@ -46,6 +46,8 @@ jobs:
     timeout-minutes: 240
     permissions:
       contents: read
+    env:
+      BUILDX_BUILDER: aux-runner-cache
     steps:
       - name: Print workflow dispatch inputs
         if: ${{ github.event_name == 'workflow_dispatch' }}

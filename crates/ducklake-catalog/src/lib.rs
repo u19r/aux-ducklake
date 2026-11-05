@@ -41,6 +41,8 @@ mod fdb_data_mutations;
 mod fdb_file_ids;
 #[cfg(feature = "foundationdb")]
 mod fdb_inline_flushes;
+#[cfg(all(test, feature = "foundationdb"))]
+mod fdb_inline_flushes_tests;
 #[cfg(feature = "foundationdb")]
 mod fdb_inline_tables;
 #[cfg(feature = "foundationdb")]

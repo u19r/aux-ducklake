@@ -1,16 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "$#" -gt 1 ]]; then
-    echo "usage: $0 [linux-amd64|linux-arm64]" >&2
-    exit 1
-fi
-
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DUCKLAKE_DIR="$ROOT_DIR/third_party/ducklake"
 . "$ROOT_DIR/scripts/ducklake_build_common.sh"
 
 platform="${1:-linux-amd64}"
+if (( $# > 0 )); then shift; fi
 
 case "$platform" in
 linux-amd64)
@@ -39,7 +35,7 @@ release_version="$(ducklake_release_version "$DUCKLAKE_DIR")"
 rm -rf "$output_dir"
 mkdir -p "$output_dir" "$ROOT_DIR/artifacts"
 
-docker buildx build \
+docker buildx build "$@" \
     --platform "$docker_platform" \
     --build-arg "DUCKDB_PLATFORM=$duckdb_platform" \
     --build-arg "AUX_DUCKLAKE_PACKAGE_PLATFORM=$platform" \
