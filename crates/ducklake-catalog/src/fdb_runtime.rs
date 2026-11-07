@@ -1,0 +1,151 @@
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, OnceLock},
+};
+
+use foundationdb::Database;
+
+use crate::{CatalogError, CatalogResult, FoundationDbErrorClass};
+
+static FDB_NETWORK: OnceLock<
+    Result<Mutex<Option<foundationdb::api::NetworkAutoStop>>, foundationdb::FdbError>,
+> = OnceLock::new();
+static FDB_DATABASES: OnceLock<Mutex<HashMap<Option<String>, Arc<Database>>>> = OnceLock::new();
+
+pub(crate) fn shared_foundationdb_database(
+    cluster_file: Option<&str>,
+) -> CatalogResult<Arc<Database>> {
+    boot_foundationdb_once()?;
+    let key = cluster_file.map(ToOwned::to_owned);
+    let databases = FDB_DATABASES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut databases = databases.lock().map_err(|_| {
+        CatalogError::Backend("foundationdb database cache lock is poisoned".to_owned())
+    })?;
+    if let Some(database) = databases.get(&key) {
+        return Ok(Arc::clone(database));
+    }
+    let database = Arc::new(Database::new(cluster_file).map_err(map_fdb_error)?);
+    databases.insert(key, Arc::clone(&database));
+    Ok(database)
+}
+
+pub(crate) fn decode_fence_version(bytes: &[u8]) -> CatalogResult<u64> {
+    let array: [u8; 8] = bytes
+        .try_into()
+        .map_err(|_| CatalogError::Decode("foundationdb fence value is not 8 bytes".to_owned()))?;
+    Ok(u64::from_be_bytes(array))
+}
+
+pub(crate) fn map_fdb_error(error: foundationdb::FdbError) -> CatalogError {
+    CatalogError::FoundationDb {
+        code: error.code(),
+        message: error.message().to_owned(),
+        class: classify_fdb_error(error),
+    }
+}
+
+pub(crate) fn map_fdb_commit_error(error: foundationdb::TransactionCommitError) -> CatalogError {
+    map_fdb_error(*error)
+}
+
+pub(crate) fn classify_fdb_error(error: foundationdb::FdbError) -> FoundationDbErrorClass {
+    if is_retryable_not_committed_code(error.code()) {
+        return FoundationDbErrorClass::RetryableNotCommitted;
+    }
+    if error.is_maybe_committed() {
+        return FoundationDbErrorClass::MaybeCommitted;
+    }
+    if error.is_retryable_not_committed() {
+        return FoundationDbErrorClass::RetryableNotCommitted;
+    }
+    if error.is_retryable() {
+        return FoundationDbErrorClass::Retryable;
+    }
+    FoundationDbErrorClass::NonRetryable
+}
+
+fn is_retryable_not_committed_code(code: i32) -> bool {
+    matches!(code, 1007 | 1031)
+}
+
+fn boot_foundationdb_once() -> CatalogResult<()> {
+    FDB_NETWORK
+        .get_or_init(|| foundationdb::boot().map(|network| Mutex::new(Some(network))))
+        .as_ref()
+        .map(|_| ())
+        .map_err(|error| map_fdb_error(*error))
+}
+
+pub fn shutdown_foundationdb_if_booted() {
+    clear_foundationdb_database_cache();
+    if let Some(Ok(network)) = FDB_NETWORK.get()
+        && let Ok(mut guard) = network.lock()
+    {
+        guard.take();
+    }
+}
+
+pub(crate) fn abandon_foundationdb_for_process_shutdown() {
+    // FDB Database destruction can run client cleanup on the network thread.
+    // During process teardown the safer boundary is to let the OS reclaim both
+    // database handles and the network runner instead of running libfdb
+    // destructors after DuckDB has started global shutdown.
+    if let Some(Ok(network)) = FDB_NETWORK.get()
+        && let Ok(mut guard) = network.lock()
+        && let Some(network) = guard.take()
+    {
+        std::mem::forget(network);
+    }
+}
+
+fn clear_foundationdb_database_cache() {
+    if let Some(databases) = FDB_DATABASES.get()
+        && let Ok(mut databases) = databases.lock()
+    {
+        databases.clear();
+    }
+}
+
+/// Measure synchronous FDB waits without changing polling, retries or errors.
+pub(crate) fn wait_for_fdb<T, E>(
+    operation: &str,
+    future: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<T, E> {
+    let span = crate::runtime_trace::RuntimeSpan::enter(operation);
+    let result = futures::executor::block_on(future);
+    span.finish(result.is_ok());
+    result
+}
+
+/// Sample each covered read attempt once, or each write attempt before commit.
+/// Binding counters include native range batches, not just logical scan pages.
+pub(crate) fn record_transaction_usage(transaction: &foundationdb::Transaction) {
+    #[cfg(feature = "runtime-metrics")]
+    {
+        let usage = transaction.attempt_usage();
+        for (operation, items, bytes) in [
+            ("fdb.usage.sampled_attempt", 1, 0),
+            ("fdb.usage.get", usage.call_get, 0),
+            ("fdb.usage.range_batch", usage.call_get_range, 0),
+            (
+                "fdb.usage.fetched",
+                usage.keys_values_fetched,
+                usage.bytes_read,
+            ),
+            ("fdb.usage.set", usage.call_set, usage.bytes_written),
+            ("fdb.usage.clear", usage.call_clear, 0),
+            ("fdb.usage.clear_range", usage.call_clear_range, 0),
+            ("fdb.usage.atomic", usage.call_atomic_op, 0),
+        ] {
+            if items != 0 || bytes != 0 {
+                crate::runtime_metrics::record_runtime_measurement(operation, items, bytes);
+            }
+        }
+    }
+    #[cfg(not(feature = "runtime-metrics"))]
+    let _ = transaction;
+}
+
+#[cfg(test)]
+#[path = "fdb_runtime_tests.rs"]
+mod fdb_runtime_tests;

@@ -1,0 +1,5 @@
+# Versions: software-versions.snapshot.json; details in software-version-consumers.md.
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
+components = ["clippy", "rustfmt"]

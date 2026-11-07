@@ -1,0 +1,44 @@
+[package]
+name = "ducklake-catalog"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "ducklake-fdb-benchmark"
+path = "src/bin/ducklake-fdb-benchmark.rs"
+
+[[bin]]
+name = "ducklake-fdb-prefix-copy"
+path = "src/bin/ducklake-fdb-prefix-copy.rs"
+
+[[bin]]
+name = "ducklake-fdb-prefix-clear"
+path = "src/bin/ducklake-fdb-prefix-clear.rs"
+
+[dependencies]
+chrono = { workspace = true }
+foundationdb = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+libc = { workspace = true, optional = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+alloc-counter = {  package = "alloc-counter",  git = "https://github.com/u19r/aux-common",rev = "d5d2bd38f8fb1419de8bb6758934da2557731b79"}
+tempfile = { workspace = true }
+
+[features]
+default = []
+foundationdb = ["dep:foundationdb", "dep:futures"]
+runtime-metrics = ["dep:libc"]
+
+[lints]
+workspace = true
