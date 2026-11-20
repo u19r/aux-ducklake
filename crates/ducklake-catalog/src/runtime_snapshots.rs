@@ -1,8 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
-use std::sync::OnceLock;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::{Arc, OnceLock},
+};
 
-use crate::bounded_cache::{BoundedCache, static_bounded_cache};
 #[cfg(not(test))]
 use crate::runtime_metrics::RuntimeMetricStage;
 #[cfg(not(test))]
@@ -11,6 +11,7 @@ use crate::{
     CatalogId, CatalogOrderId, CatalogOrderKind, CatalogResult, DataFileChangeKind,
     DuckLakeSnapshotId, InlineRowChangeKind, MacroRow, OrderedCatalogKv, RangeDirection,
     RawSnapshotSequence, SchemaRow, SnapshotRow, TableRow, ViewRow,
+    bounded_cache::{BoundedCache, static_bounded_cache},
     inline_data::inline_file_deletion_changed_table_ids_at,
     keys::{
         inline_table_change_prefix, order_delete_file_change_prefix,

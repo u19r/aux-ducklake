@@ -38,7 +38,8 @@ pub(crate) fn read_foundationdb_inline_rows_payload(
     catalog: CatalogId,
     payload: ReadInlineRowsPayload,
 ) -> CatalogResult<Vec<u8>> {
-    // Capture construction pins its own view. A completed capture needs no new GRV.
+    // Capture construction pins its own view. A completed capture needs no new
+    // GRV.
     if let Some(output) = read_current_inline_rows_payload(kv, catalog, &payload)? {
         return Ok(output);
     }
@@ -82,7 +83,8 @@ fn read_current_inline_rows_payload(
         ))
     })?;
     for (row_id, row) in &current_rows.rows {
-        // Capture preparation already validated the row and accumulated its statistics.
+        // Capture preparation already validated the row and accumulated its
+        // statistics.
         let values = std::str::from_utf8(&row.payload)
             .map_err(|error| {
                 crate::CatalogError::Decode(format!(

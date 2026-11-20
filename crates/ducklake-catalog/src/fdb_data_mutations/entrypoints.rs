@@ -1,9 +1,7 @@
 use crate::{
-    CatalogResult, CommitAttemptId, DataMutationCommit, FdbOrderedCatalogKv,
+    CatalogResult, CommitAttemptId, DataMutationCommit, FdbOrderedCatalogKv, fdb_data_mutations::*,
     maintenance::ScheduledDataFileCleanupKind, snapshot_operations::SnapshotOperationKind,
 };
-
-use crate::fdb_data_mutations::*;
 impl FdbOrderedCatalogKv {
     pub fn commit_data_mutation_versionstamped(
         &self,

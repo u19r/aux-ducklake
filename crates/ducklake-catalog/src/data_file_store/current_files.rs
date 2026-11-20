@@ -1,11 +1,13 @@
-use std::collections::BTreeSet;
-use std::sync::{Arc, OnceLock};
+use std::{
+    collections::BTreeSet,
+    sync::{Arc, OnceLock},
+};
 
-use crate::bounded_cache::{BoundedCache, static_bounded_cache};
-use crate::data_file_store::*;
 use crate::{
     AttachedDataFile, CatalogCacheNamespace, CatalogId, CatalogResult, DataFileRow,
     OrderedCatalogKv, RangeDirection, TableId,
+    bounded_cache::{BoundedCache, static_bounded_cache},
+    data_file_store::*,
     ids::CatalogOrderId,
     keys::{
         KeyFamily, current_data_file_prefix, current_delete_file_key, data_file_begin_prefix,

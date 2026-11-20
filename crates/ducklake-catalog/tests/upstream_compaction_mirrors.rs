@@ -17,11 +17,12 @@ use ducklake_catalog::{
 
 #[test]
 fn mirrors_cleanup_old_files_global_option_test_expired_dropped_table_file_enters_cleanup_queue() {
-    // Mirrors: third_party/ducklake/test/sql/compaction/cleanup_old_files_global_option.test
+    // Mirrors: third_party/ducklake/test/sql/compaction/
+    // cleanup_old_files_global_option.test
     //
     // Storage contract:
-    // - DuckLake inserts a file, drops the table, expires old snapshots, and then asks storage for
-    //   old files eligible for cleanup.
+    // - DuckLake inserts a file, drops the table, expires old snapshots, and
+    //   then asks storage for old files eligible for cleanup.
     // - Storage must keep the old file discoverable until cleanup removes it.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
@@ -54,13 +55,17 @@ fn mirrors_cleanup_old_files_global_option_test_expired_dropped_table_file_enter
 
 #[test]
 fn mirrors_compaction_alter_table_test_merge_groups_follow_schema_boundaries() {
-    // Mirrors: third_party/ducklake/test/sql/compaction/compaction_alter_table.test
+    // Mirrors: third_party/ducklake/test/sql/compaction/compaction_alter_table.
+    // test
     //
     // Storage contract:
-    // - DuckLake groups merge-adjacent requests by compatible schema boundaries.
-    // - Replacement files must cover the historical visibility windows of their source files.
-    // - Current reads return the three replacement files, while time-travel reads before each
-    //   schema change still resolve the relevant replacement group.
+    // - DuckLake groups merge-adjacent requests by compatible schema
+    //   boundaries.
+    // - Replacement files must cover the historical visibility windows of their
+    //   source files.
+    // - Current reads return the three replacement files, while time-travel
+    //   reads before each schema change still resolve the relevant replacement
+    //   group.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -117,10 +122,12 @@ fn mirrors_compaction_alter_table_test_merge_groups_follow_schema_boundaries() {
 
 #[test]
 fn mirrors_compaction_cleanup_global_test_old_file_queue_survives_until_cleanup() {
-    // Mirrors: third_party/ducklake/test/sql/compaction/compaction_cleanup_global.test
+    // Mirrors: third_party/ducklake/test/sql/compaction/
+    // compaction_cleanup_global.test
     //
     // Storage contract:
-    // - Deleted and dropped table files remain in the cleanup queue after snapshot expiration.
+    // - Deleted and dropped table files remain in the cleanup queue after
+    //   snapshot expiration.
     // - Cleanup removes queued old data files and delete files together.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
@@ -180,12 +187,14 @@ fn mirrors_compaction_cleanup_global_test_old_file_queue_survives_until_cleanup(
 
 #[test]
 fn mirrors_compaction_delete_conflict_test_stale_merge_rewrite_is_rejected() {
-    // Mirrors: third_party/ducklake/test/sql/compaction/compaction_delete_conflict.test
+    // Mirrors: third_party/ducklake/test/sql/compaction/
+    // compaction_delete_conflict.test
     //
     // Storage contract:
-    // - A compaction planned at an older base snapshot must fail when a delete/rewrite conflict is
-    //   committed before the compaction commit.
-    // - Inserts alone should not conflict with a compaction planned over existing source files.
+    // - A compaction planned at an older base snapshot must fail when a
+    //   delete/rewrite conflict is committed before the compaction commit.
+    // - Inserts alone should not conflict with a compaction planned over
+    //   existing source files.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -264,12 +273,14 @@ fn mirrors_compaction_delete_conflict_test_stale_merge_rewrite_is_rejected() {
 
 #[test]
 fn mirrors_compaction_partitioned_table_test_replacement_files_keep_partition_values() {
-    // Mirrors: third_party/ducklake/test/sql/compaction/compaction_partitioned_table.test
+    // Mirrors: third_party/ducklake/test/sql/compaction/
+    // compaction_partitioned_table.test
     //
     // Storage contract:
-    // - DuckLake compacts files within each partition and supplies partition values for each
-    //   replacement file.
-    // - Current partition scans should return exactly the replacement file for that partition.
+    // - DuckLake compacts files within each partition and supplies partition
+    //   values for each replacement file.
+    // - Current partition scans should return exactly the replacement file for
+    //   that partition.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -316,12 +327,14 @@ fn mirrors_compaction_partitioned_table_test_replacement_files_keep_partition_va
 #[test]
 fn mirrors_compaction_partitioned_non_adjacent_test_same_partition_files_merge_across_insert_order()
 {
-    // Mirrors: third_party/ducklake/test/sql/compaction/compaction_partitioned_non_adjacent.test
+    // Mirrors: third_party/ducklake/test/sql/compaction/
+    // compaction_partitioned_non_adjacent.test
     //
     // Storage contract:
-    // - DuckLake may send non-adjacent file ids from the same partition as one merge group.
-    // - Replacement partition metadata must still point at the partition value, not the original
-    //   insertion order.
+    // - DuckLake may send non-adjacent file ids from the same partition as one
+    //   merge group.
+    // - Replacement partition metadata must still point at the partition value,
+    //   not the original insertion order.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -365,12 +378,14 @@ fn mirrors_compaction_partitioned_non_adjacent_test_same_partition_files_merge_a
 
 #[test]
 fn mirrors_compaction_per_thread_output_test_merge_then_rewrite_keeps_current_replacement() {
-    // Mirrors: third_party/ducklake/test/sql/compaction/compaction_per_thread_output.test
+    // Mirrors: third_party/ducklake/test/sql/compaction/
+    // compaction_per_thread_output.test
     //
     // Storage contract:
-    // - Per-thread output changes how DuckLake writes files, but storage receives ordinary merge
-    //   and rewrite requests.
-    // - After merge and delete rewrite, current reads should expose only the final replacement.
+    // - Per-thread output changes how DuckLake writes files, but storage
+    //   receives ordinary merge and rewrite requests.
+    // - After merge and delete rewrite, current reads should expose only the
+    //   final replacement.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -426,11 +441,13 @@ fn mirrors_compaction_per_thread_output_test_merge_then_rewrite_keeps_current_re
 
 #[test]
 fn mirrors_merge_adjacent_file_size_filter_test_only_selected_sources_are_replaced() {
-    // Mirrors: third_party/ducklake/test/sql/compaction/merge_adjacent_file_size_filter.test
+    // Mirrors: third_party/ducklake/test/sql/compaction/
+    // merge_adjacent_file_size_filter.test
     //
     // Storage contract:
     // - DuckLake applies min/max size filters before calling storage.
-    // - Storage replaces only the source file ids it is given and leaves non-selected files current.
+    // - Storage replaces only the source file ids it is given and leaves
+    //   non-selected files current.
     let catalog = CatalogId(1);
     let table = TableId(1);
     let mut kv = create_file_size_filter_table(catalog, table);
@@ -457,12 +474,13 @@ fn mirrors_merge_adjacent_file_size_filter_test_only_selected_sources_are_replac
 
 #[test]
 fn mirrors_merge_adjacent_options_test_table_selection_compacts_only_requested_table_ids() {
-    // Mirrors: third_party/ducklake/test/sql/compaction/merge_adjacent_options.test
+    // Mirrors: third_party/ducklake/test/sql/compaction/merge_adjacent_options.
+    // test
     //
     // Storage contract:
     // - DuckLake resolves table/schema options before storage is called.
-    // - A merge for one table id should not expire files for similarly named tables in another
-    //   schema.
+    // - A merge for one table id should not expire files for similarly named
+    //   tables in another schema.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     initialize_catalog_if_absent(&mut kv, catalog).unwrap();
@@ -501,7 +519,8 @@ fn mirrors_merge_adjacent_options_test_table_selection_compacts_only_requested_t
 
 #[test]
 fn mirrors_merge_files_expired_snapshots_test_current_files_can_merge_after_old_snapshots_expire() {
-    // Mirrors: third_party/ducklake/test/sql/compaction/merge_files_expired_snapshots.test
+    // Mirrors: third_party/ducklake/test/sql/compaction/
+    // merge_files_expired_snapshots.test
     //
     // Storage contract:
     // - Expiring old snapshots must not hide files that are still current.
@@ -539,11 +558,12 @@ fn mirrors_merge_files_expired_snapshots_test_current_files_can_merge_after_old_
 
 #[test]
 fn mirrors_expire_snapshots_drop_table_test_cleanup_removes_table_scoped_file_metadata() {
-    // Mirrors: third_party/ducklake/test/sql/compaction/expire_snapshots_drop_table.test
+    // Mirrors: third_party/ducklake/test/sql/compaction/
+    // expire_snapshots_drop_table.test
     //
     // Storage contract:
-    // - After a table is dropped and its historical snapshots are expired, cleanup should remove
-    //   table-scoped data-file and delete-file metadata.
+    // - After a table is dropped and its historical snapshots are expired,
+    //   cleanup should remove table-scoped data-file and delete-file metadata.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -613,11 +633,12 @@ fn mirrors_expire_snapshots_drop_table_test_cleanup_removes_table_scoped_file_me
 #[test]
 fn mirrors_expire_snapshots_metadata_cleanup_test_table_debug_rows_are_removed_after_drop_cleanup()
 {
-    // Mirrors: third_party/ducklake/test/sql/compaction/expire_snapshots_metadata_cleanup.test
+    // Mirrors: third_party/ducklake/test/sql/compaction/
+    // expire_snapshots_metadata_cleanup.test
     //
     // Storage contract:
-    // - Dropping a table and expiring its history should remove table-scoped debug metadata,
-    //   including columns and file rows.
+    // - Dropping a table and expiring its history should remove table-scoped
+    //   debug metadata, including columns and file rows.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -665,13 +686,14 @@ fn mirrors_expire_snapshots_metadata_cleanup_test_table_debug_rows_are_removed_a
 #[test]
 fn mirrors_merge_adjacent_after_add_files_schema_evolution_test_replacements_do_not_duplicate_external_rows()
  {
-    // Mirrors: third_party/ducklake/test/sql/compaction/merge_adjacent_after_add_files_schema_evolution.test
+    // Mirrors: third_party/ducklake/test/sql/compaction/
+    // merge_adjacent_after_add_files_schema_evolution.test
     //
     // Storage contract:
-    // - Externally added files, rewritten files, later inserts, and schema changes all become
-    //   ordinary data-file metadata.
-    // - A merge-adjacent replacement should expire only its source files and leave one current
-    //   representation of each row-id span.
+    // - Externally added files, rewritten files, later inserts, and schema
+    //   changes all become ordinary data-file metadata.
+    // - A merge-adjacent replacement should expire only its source files and
+    //   leave one current representation of each row-id span.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -740,10 +762,12 @@ fn mirrors_merge_adjacent_after_add_files_schema_evolution_test_replacements_do_
 #[test]
 fn mirrors_compaction_schema_version_per_table_test_other_table_schema_changes_do_not_block_merge()
 {
-    // Mirrors: third_party/ducklake/test/sql/compaction/compaction_schema_version_per_table.test
+    // Mirrors: third_party/ducklake/test/sql/compaction/
+    // compaction_schema_version_per_table.test
     //
     // Storage contract:
-    // - Schema changes on one table must not prevent merge-adjacent compaction for another table.
+    // - Schema changes on one table must not prevent merge-adjacent compaction
+    //   for another table.
     // - Each table id owns its data-file visibility independently.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
@@ -797,12 +821,14 @@ fn mirrors_compaction_schema_version_per_table_test_other_table_schema_changes_d
 #[test]
 fn mirrors_merge_adjacent_cross_schema_isolation_test_incompatible_boundaries_keep_files_separate()
 {
-    // Mirrors: third_party/ducklake/test/sql/compaction/merge_adjacent_cross_schema_isolation.test
+    // Mirrors: third_party/ducklake/test/sql/compaction/
+    // merge_adjacent_cross_schema_isolation.test
     //
     // Storage contract:
-    // - DuckLake must only send merge groups that are compatible across schema/partition
-    //   boundaries.
-    // - Storage then expires exactly those source files and leaves incompatible files current.
+    // - DuckLake must only send merge groups that are compatible across
+    //   schema/partition boundaries.
+    // - Storage then expires exactly those source files and leaves incompatible
+    //   files current.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let rename_table = TableId(1);
@@ -913,12 +939,14 @@ fn mirrors_merge_adjacent_cross_schema_isolation_test_incompatible_boundaries_ke
 #[test]
 fn mirrors_merge_adjacent_external_hive_paths_test_replacement_path_and_null_partition_are_stored()
 {
-    // Mirrors: third_party/ducklake/test/sql/compaction/merge_adjacent_external_hive_paths.test
+    // Mirrors: third_party/ducklake/test/sql/compaction/
+    // merge_adjacent_external_hive_paths.test
     //
     // Storage contract:
-    // - External files can be compacted into a replacement under the table's canonical
-    //   hive-partitioned path.
-    // - The replacement file keeps the partition value metadata, including the null hive marker.
+    // - External files can be compacted into a replacement under the table's
+    //   canonical hive-partitioned path.
+    // - The replacement file keeps the partition value metadata, including the
+    //   null hive marker.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -1000,7 +1028,8 @@ fn mirrors_merge_adjacent_external_hive_paths_test_replacement_path_and_null_par
 
 #[test]
 fn mirrors_merge_adjacent_max_files_test_storage_accepts_prefiltered_limited_merge_batches() {
-    // Mirrors: third_party/ducklake/test/sql/compaction/merge_adjacent_max_files.test
+    // Mirrors: third_party/ducklake/test/sql/compaction/
+    // merge_adjacent_max_files.test
     //
     // Storage contract:
     // - DuckLake enforces max_compacted_files before issuing storage writes.
@@ -1035,11 +1064,14 @@ fn mirrors_merge_adjacent_max_files_test_storage_accepts_prefiltered_limited_mer
 
 #[test]
 fn mirrors_merge_adjacent_max_files_partitioned_test_global_limit_compacts_one_partition_group() {
-    // Mirrors: third_party/ducklake/test/sql/compaction/merge_adjacent_max_files_partitioned.test
+    // Mirrors: third_party/ducklake/test/sql/compaction/
+    // merge_adjacent_max_files_partitioned.test
     //
     // Storage contract:
-    // - With a global max operation limit, DuckLake sends only one partition group to storage.
-    // - Storage compacts that group and leaves the other partition group current.
+    // - With a global max operation limit, DuckLake sends only one partition
+    //   group to storage.
+    // - Storage compacts that group and leaves the other partition group
+    //   current.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -1069,12 +1101,14 @@ fn mirrors_merge_adjacent_max_files_partitioned_test_global_limit_compacts_one_p
 
 #[test]
 fn mirrors_merge_rewrite_partial_file_info_test_partial_max_survives_merge_then_rewrite() {
-    // Mirrors: third_party/ducklake/test/sql/compaction/merge_rewrite_partial_file_info.test
+    // Mirrors: third_party/ducklake/test/sql/compaction/
+    // merge_rewrite_partial_file_info.test
     //
     // Storage contract:
-    // - Merge replacements that cover only a partial snapshot range carry max_partial_order.
-    // - Later rewrite-delete and merge operations must keep current visibility correct for both
-    //   partial and non-partial files.
+    // - Merge replacements that cover only a partial snapshot range carry
+    //   max_partial_order.
+    // - Later rewrite-delete and merge operations must keep current visibility
+    //   correct for both partial and non-partial files.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -1127,11 +1161,14 @@ fn mirrors_merge_rewrite_partial_file_info_test_partial_max_survives_merge_then_
 
 #[test]
 fn mirrors_mix_large_small_insertions_test_only_small_insert_files_are_merged() {
-    // Mirrors: third_party/ducklake/test/sql/compaction/mix_large_small_insertions.test
+    // Mirrors: third_party/ducklake/test/sql/compaction/
+    // mix_large_small_insertions.test
     //
     // Storage contract:
-    // - DuckLake may merge only the small inserted files and leave large files separate.
-    // - The merged small-file replacement keeps the row-id range supplied by DuckLake.
+    // - DuckLake may merge only the small inserted files and leave large files
+    //   separate.
+    // - The merged small-file replacement keeps the row-id range supplied by
+    //   DuckLake.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -1171,11 +1208,13 @@ fn mirrors_mix_large_small_insertions_test_only_small_insert_files_are_merged() 
 #[test]
 fn mirrors_repro_merge_adjacent_zero_output_test_empty_source_files_can_be_expired_without_replacement()
  {
-    // Mirrors: third_party/ducklake/test/sql/compaction/repro_merge_adjacent_zero_output.test
+    // Mirrors: third_party/ducklake/test/sql/compaction/
+    // repro_merge_adjacent_zero_output.test
     //
     // Storage contract:
     // - DuckLake may compact several empty files into zero output files.
-    // - Storage should be able to expire the source files without requiring a replacement file.
+    // - Storage should be able to expire the source files without requiring a
+    //   replacement file.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -1213,12 +1252,14 @@ fn mirrors_repro_merge_adjacent_zero_output_test_empty_source_files_can_be_expir
 #[test]
 fn mirrors_rewrite_deletes_full_file_delete_after_flush_test_full_delete_rewrite_can_create_no_files()
  {
-    // Mirrors: third_party/ducklake/test/sql/compaction/rewrite_deletes_full_file_delete_after_flush.test
+    // Mirrors: third_party/ducklake/test/sql/compaction/
+    // rewrite_deletes_full_file_delete_after_flush.test
     //
     // Storage contract:
-    // - Flush can materialize a fully deleted inline insertion as one data file plus one delete
-    //   file covering every row.
-    // - Rewrite-delete compaction may replace that pair with no current data file.
+    // - Flush can materialize a fully deleted inline insertion as one data file
+    //   plus one delete file covering every row.
+    // - Rewrite-delete compaction may replace that pair with no current data
+    //   file.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -1258,12 +1299,14 @@ fn mirrors_rewrite_deletes_full_file_delete_after_flush_test_full_delete_rewrite
 
 #[test]
 fn mirrors_small_insert_compaction_test_unrelated_table_insert_does_not_break_time_travel() {
-    // Mirrors: third_party/ducklake/test/sql/compaction/small_insert_compaction.test
+    // Mirrors: third_party/ducklake/test/sql/compaction/
+    // small_insert_compaction.test
     //
     // Storage contract:
-    // - Compaction of one table's small inserts should ignore unrelated table writes between those
-    //   inserts.
-    // - Historical reads for snapshots before compaction resolve through the replacement file.
+    // - Compaction of one table's small inserts should ignore unrelated table
+    //   writes between those inserts.
+    // - Historical reads for snapshots before compaction resolve through the
+    //   replacement file.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let test = TableId(1);

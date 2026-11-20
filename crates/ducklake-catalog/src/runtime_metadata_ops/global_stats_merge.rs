@@ -1,10 +1,8 @@
-use std::collections::BTreeSet;
-use std::fmt::Write as _;
-
-use crate::{CatalogResult, DataFileId, TableId, runtime_payload::optional_payload_str_value};
+use std::{collections::BTreeSet, fmt::Write as _};
 
 #[cfg(feature = "foundationdb")]
 use crate::runtime_metadata_ops::*;
+use crate::{CatalogResult, DataFileId, TableId, runtime_payload::optional_payload_str_value};
 
 #[cfg(feature = "foundationdb")]
 pub(super) fn can_recompute_exact_inline_stats(
@@ -228,18 +226,18 @@ pub(super) fn append_table_inline_stats(
     for line in payload.lines() {
         let Some(rest) = line.strip_prefix("inline_table_stats\t") else {
             if let Some(rest) = line.strip_prefix("inline_column_stats\t") {
-                write!(out, "table_inline_column_stats\t{}\t{rest}\n", table_id.0)
+                writeln!(out, "table_inline_column_stats\t{}\t{rest}", table_id.0)
                     .expect("writing to String cannot fail");
             } else if let Some(rest) = line.strip_prefix("inline_aggregate_stats\t") {
-                write!(out, "table_inline_stats\t{}\t{rest}\n", table_id.0)
+                writeln!(out, "table_inline_stats\t{}\t{rest}", table_id.0)
                     .expect("writing to String cannot fail");
             } else if let Some(rest) = line.strip_prefix("inline_aggregate_column_stats\t") {
-                write!(out, "table_inline_column_stats\t{}\t{rest}\n", table_id.0)
+                writeln!(out, "table_inline_column_stats\t{}\t{rest}", table_id.0)
                     .expect("writing to String cannot fail");
             }
             continue;
         };
-        write!(out, "table_inline_stats\t{}\t{rest}\n", table_id.0)
+        writeln!(out, "table_inline_stats\t{}\t{rest}", table_id.0)
             .expect("writing to String cannot fail");
     }
     Ok(())

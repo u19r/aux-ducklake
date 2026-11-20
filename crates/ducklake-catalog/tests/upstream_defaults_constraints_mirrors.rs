@@ -13,7 +13,8 @@ fn mirrors_not_null_test_column_nullability_is_persisted_in_table_metadata() {
     // Mirrors: third_party/ducklake/test/sql/constraints/not_null.test
     //
     // Storage contract:
-    // - DuckLake stores NOT NULL as `nulls_allowed = false` in table-column metadata.
+    // - DuckLake stores NOT NULL as `nulls_allowed = false` in table-column
+    //   metadata.
     // - A nullable sibling column remains independently nullable.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
@@ -43,12 +44,14 @@ fn mirrors_not_null_test_column_nullability_is_persisted_in_table_metadata() {
 
 #[test]
 fn mirrors_data_inlining_flush_test_flush_ends_payload_but_preserves_insert_change_feed() {
-    // Mirrors: third_party/ducklake/test/sql/data_inlining/data_inlining_flush.test
+    // Mirrors: third_party/ducklake/test/sql/data_inlining/data_inlining_flush.
+    // test
     //
     // Storage contract:
     // - DuckLake saves ten one-row inline payloads across ten snapshots.
     // - Flush writes a data file and ends the inline payloads.
-    // - The inline insertion change feed remains queryable across the original insert snapshots.
+    // - The inline insertion change feed remains queryable across the original
+    //   insert snapshots.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -116,11 +119,14 @@ fn mirrors_data_inlining_flush_test_flush_ends_payload_but_preserves_insert_chan
 
 #[test]
 fn mirrors_add_column_with_default_test_initial_and_current_defaults_are_versioned() {
-    // Mirrors: third_party/ducklake/test/sql/default/add_column_with_default.test
+    // Mirrors: third_party/ducklake/test/sql/default/add_column_with_default.
+    // test
     //
     // Storage contract:
-    // - ADD COLUMN with DEFAULT records both the initial default and current default.
-    // - ALTER SET/DROP DEFAULT creates later column versions without changing the initial default.
+    // - ADD COLUMN with DEFAULT records both the initial default and current
+    //   default.
+    // - ALTER SET/DROP DEFAULT creates later column versions without changing
+    //   the initial default.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -177,10 +183,12 @@ fn mirrors_add_column_with_default_test_initial_and_current_defaults_are_version
 
 #[test]
 fn mirrors_all_types_column_default_stats_test_default_stats_are_saved_for_added_columns() {
-    // Mirrors: third_party/ducklake/test/sql/default/all_types_column_default_stats.test
+    // Mirrors: third_party/ducklake/test/sql/default/
+    // all_types_column_default_stats.test
     //
     // Storage contract:
-    // - DuckLake calculates min/max/null stats for added default columns and sends them to storage.
+    // - DuckLake calculates min/max/null stats for added default columns and
+    //   sends them to storage.
     // - Storage must persist those stats verbatim for every column id.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
@@ -235,7 +243,8 @@ fn mirrors_default_expressions_test_literal_and_expression_defaults_keep_type_me
     // Mirrors: third_party/ducklake/test/sql/default/default_expressions.test
     //
     // Storage contract:
-    // - Default expressions and literal strings are distinguished by default_value_type.
+    // - Default expressions and literal strings are distinguished by
+    //   default_value_type.
     // - The raw default text is stored exactly as DuckLake passes it.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
@@ -273,7 +282,8 @@ fn mirrors_struct_field_default_test_nested_default_metadata_is_attached_to_chil
     // Mirrors: third_party/ducklake/test/sql/default/struct_field_default.test
     //
     // Storage contract:
-    // - Adding a nested struct field with a default stores the child column under the parent id.
+    // - Adding a nested struct field with a default stores the child column
+    //   under the parent id.
     // - The child keeps its initial default metadata.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);

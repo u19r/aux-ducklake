@@ -14,11 +14,13 @@ fn mirrors_add_files_test_time_travel_after_added_file_and_schema_change() {
     // Mirrors: third_party/ducklake/test/sql/add_files/add_files.test
     //
     // Storage contract:
-    // - DuckLake saves the initial flushed file, two externally added files, an ADD COLUMN, and a
-    //   third externally added file.
-    // - It later asks for the snapshot captured immediately after that third external add.
-    // - Storage must return all four files and the schema that still contains col2 and col3, even
-    //   after later DROP/ADD COLUMN work changes the current schema.
+    // - DuckLake saves the initial flushed file, two externally added files, an
+    //   ADD COLUMN, and a third externally added file.
+    // - It later asks for the snapshot captured immediately after that third
+    //   external add.
+    // - Storage must return all four files and the schema that still contains
+    //   col2 and col3, even after later DROP/ADD COLUMN work changes the
+    //   current schema.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -89,15 +91,18 @@ fn mirrors_add_files_test_time_travel_after_added_file_and_schema_change() {
 
 #[test]
 fn mirrors_add_files_compaction_test_time_travel_cleanup_and_insertions() {
-    // Mirrors: third_party/ducklake/test/sql/add_files/add_files_compaction.test
+    // Mirrors: third_party/ducklake/test/sql/add_files/add_files_compaction.
+    // test
     //
     // Storage contract:
-    // - DuckLake saves a user insert into `test`, an unrelated insert into `test2`, an inline
-    //   flush for `test`, four manually added files, and then a merge-adjacent compaction.
-    // - Cleanup may remove scheduled physical files, but must not remove metadata needed for
-    //   time travel or insertion feeds.
-    // - Public snapshot ids for s1/s_test2/s2/s3 must resolve back to storage snapshots that see
-    //   the compacted replacement as the representation of the historical rows.
+    // - DuckLake saves a user insert into `test`, an unrelated insert into
+    //   `test2`, an inline flush for `test`, four manually added files, and
+    //   then a merge-adjacent compaction.
+    // - Cleanup may remove scheduled physical files, but must not remove
+    //   metadata needed for time travel or insertion feeds.
+    // - Public snapshot ids for s1/s_test2/s2/s3 must resolve back to storage
+    //   snapshots that see the compacted replacement as the representation of
+    //   the historical rows.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let test = TableId(1);

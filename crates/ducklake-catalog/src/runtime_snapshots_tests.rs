@@ -1,11 +1,16 @@
 #[cfg(test)]
 mod tests {
-    use super::decode_test_text;
     use std::{
         cell::{Cell, RefCell},
         rc::Rc,
     };
 
+    use super::super::{
+        ListSnapshotsPayload, SchemaVersionSnapshotScope, SnapshotMetadataChangeIndex,
+        SnapshotReadContext, catalog_schema_change_orders, list_snapshots_payload,
+        snapshot_by_ducklake_sequence, snapshot_by_public_sequence, snapshot_changes_after_payload,
+        snapshot_changes_made, snapshot_schema_version, snapshot_schema_versions_by_order,
+    };
     use crate::{
         CatalogId, CatalogOrderId, ColumnDrop, ColumnId, DataFileId, DataFileRow, DeleteFileId,
         DeleteFileRow, DuckLakeSnapshotId, FakeOrderedCatalogKv, InlineFileDeletionRow,
@@ -37,13 +42,6 @@ mod tests {
             SnapshotOperationKind, snapshot_operation_prefix, stage_snapshot_operation,
         },
         store::stage_snapshot,
-    };
-
-    use super::super::{
-        ListSnapshotsPayload, SchemaVersionSnapshotScope, SnapshotMetadataChangeIndex,
-        SnapshotReadContext, catalog_schema_change_orders, list_snapshots_payload,
-        snapshot_by_ducklake_sequence, snapshot_by_public_sequence, snapshot_changes_after_payload,
-        snapshot_changes_made, snapshot_schema_version, snapshot_schema_versions_by_order,
     };
 
     #[test]
@@ -2132,8 +2130,8 @@ mod tests {
                 None
             })
     }
-}
 
-fn decode_test_text(payload: impl AsRef<[u8]>) -> Result<String, std::str::Utf8Error> {
-    std::str::from_utf8(payload.as_ref()).map(str::to_owned)
+    fn decode_test_text(payload: impl AsRef<[u8]>) -> Result<String, std::str::Utf8Error> {
+        std::str::from_utf8(payload.as_ref()).map(str::to_owned)
+    }
 }

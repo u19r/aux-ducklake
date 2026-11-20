@@ -45,16 +45,18 @@ fn given_inline_file_deletes_when_file_is_expired_then_full_scan_retains_earlier
 #[test]
 fn mirrors_deletion_from_file_and_inserted_inlining_test_file_and_inline_row_delete_share_snapshot()
 {
-    // Mirrors: third_party/ducklake/test/sql/deletion_inlining/test_deletion_from_file_and_inserted_inlining.test
+    // Mirrors: third_party/ducklake/test/sql/deletion_inlining/
+    // test_deletion_from_file_and_inserted_inlining.test
     //
     // Storage contract:
     // - DuckLake saves one physical data file for rows 0..9.
     // - It saves three newly inserted rows inline with row ids 10, 11, 12.
-    // - One DELETE statement removes physical row id 5 and inline row id 11 in the same snapshot.
-    // - Before flush, the physical delete is an inline file-deletion row and the inserted inline
-    //   row is represented by an inline row deletion.
-    // - Flush must turn those two deletes into delete-file metadata that begins at the DELETE
-    //   snapshot, not at the later flush snapshot.
+    // - One DELETE statement removes physical row id 5 and inline row id 11 in
+    //   the same snapshot.
+    // - Before flush, the physical delete is an inline file-deletion row and
+    //   the inserted inline row is represented by an inline row deletion.
+    // - Flush must turn those two deletes into delete-file metadata that begins
+    //   at the DELETE snapshot, not at the later flush snapshot.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -115,12 +117,16 @@ fn mirrors_deletion_from_file_and_inserted_inlining_test_file_and_inline_row_del
 
 #[test]
 fn mirrors_deletion_from_file_and_inserted_inlining_non_sequential_test_preserves_row_id_mapping() {
-    // Mirrors: third_party/ducklake/test/sql/deletion_inlining/test_deletion_from_file_and_inserted_inlining_non_sequential.test
+    // Mirrors: third_party/ducklake/test/sql/deletion_inlining/
+    // test_deletion_from_file_and_inserted_inlining_non_sequential.test
     //
     // Storage contract:
-    // - Physical values are non-sequential, but row-id mapping is still positional.
-    // - DELETE a=71 maps to physical row id 5 and DELETE a=500 maps to inline row id 11.
-    // - Storage must save and return those row ids, independent of the SQL values.
+    // - Physical values are non-sequential, but row-id mapping is still
+    //   positional.
+    // - DELETE a=71 maps to physical row id 5 and DELETE a=500 maps to inline
+    //   row id 11.
+    // - Storage must save and return those row ids, independent of the SQL
+    //   values.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -175,14 +181,16 @@ fn mirrors_deletion_from_file_and_inserted_inlining_non_sequential_test_preserve
 #[test]
 fn mirrors_deletion_from_inlined_insertion_test_flush_delete_file_begins_at_inline_delete_snapshot()
 {
-    // Mirrors: third_party/ducklake/test/sql/deletion_inlining/test_deletion_from_inlined_insertion.test
+    // Mirrors: third_party/ducklake/test/sql/deletion_inlining/
+    // test_deletion_from_inlined_insertion.test
     //
     // Storage contract:
     // - DuckLake saves three inserted rows inline.
     // - DELETE a=2 marks inline row id 1 deleted at snapshot 3.
-    // - Time travel to the insertion snapshot must still return the original inline payload.
-    // - Flush creates a physical data file plus a delete file whose begin snapshot remains the
-    //   inline delete snapshot.
+    // - Time travel to the insertion snapshot must still return the original
+    //   inline payload.
+    // - Flush creates a physical data file plus a delete file whose begin
+    //   snapshot remains the inline delete snapshot.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -231,13 +239,15 @@ fn mirrors_deletion_from_inlined_insertion_test_flush_delete_file_begins_at_inli
 
 #[test]
 fn mirrors_deletion_from_inlined_multiple_snapshots_test_flush_preserves_first_delete_snapshot() {
-    // Mirrors: third_party/ducklake/test/sql/deletion_inlining/test_deletion_from_inlined_multiple_snapshots.test
+    // Mirrors: third_party/ducklake/test/sql/deletion_inlining/
+    // test_deletion_from_inlined_multiple_snapshots.test
     //
     // Storage contract:
     // - DuckLake saves eight inline rows.
     // - Four DELETE statements remove row ids 1/4, then 0/3, then 6, then 7.
     // - Flush writes one delete file for the physicalized inline data.
-    // - That delete file contains all six deleted rows and begins at the first DELETE snapshot.
+    // - That delete file contains all six deleted rows and begins at the first
+    //   DELETE snapshot.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -298,15 +308,19 @@ fn mirrors_deletion_from_inlined_multiple_snapshots_test_flush_preserves_first_d
 
 #[test]
 fn mirrors_deletion_inlining_test_repeated_inline_deletes_flush_and_later_cross_source_delete() {
-    // Mirrors: third_party/ducklake/test/sql/deletion_inlining/test_deletion_inlining.test
+    // Mirrors: third_party/ducklake/test/sql/deletion_inlining/
+    // test_deletion_inlining.test
     //
     // Storage contract:
-    // - Small physical-file deletes are accumulated as inline file deletions over snapshots.
-    // - Flush materializes them as a cumulative delete file beginning at the first delete.
-    // - Later inline deletes are added after the flush and the next flush replaces the delete file
-    //   while preserving the first delete snapshot.
-    // - A later DELETE spanning old physical data, newly inserted inline data, and a newer
-    //   physical file must keep all three deletion sources separately attributable.
+    // - Small physical-file deletes are accumulated as inline file deletions
+    //   over snapshots.
+    // - Flush materializes them as a cumulative delete file beginning at the
+    //   first delete.
+    // - Later inline deletes are added after the flush and the next flush
+    //   replaces the delete file while preserving the first delete snapshot.
+    // - A later DELETE spanning old physical data, newly inserted inline data,
+    //   and a newer physical file must keep all three deletion sources
+    //   separately attributable.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -457,13 +471,15 @@ fn mirrors_deletion_inlining_test_repeated_inline_deletes_flush_and_later_cross_
 
 #[test]
 fn mirrors_deletion_inlining_alter_test_schema_changes_do_not_lose_pending_inline_deletes() {
-    // Mirrors: third_party/ducklake/test/sql/deletion_inlining/test_deletion_inlining_alter.test
+    // Mirrors: third_party/ducklake/test/sql/deletion_inlining/
+    // test_deletion_inlining_alter.test
     //
     // Storage contract:
-    // - Inline file deletions created before ADD/DROP/ALTER COLUMN remain attached to the same
-    //   data file.
-    // - Inline row deletes for short-lived inserted inline payloads are flushed into delete files
-    //   even when the table schema changes before and after those inserts.
+    // - Inline file deletions created before ADD/DROP/ALTER COLUMN remain
+    //   attached to the same data file.
+    // - Inline row deletes for short-lived inserted inline payloads are flushed
+    //   into delete files even when the table schema changes before and after
+    //   those inserts.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -566,12 +582,15 @@ fn mirrors_deletion_inlining_alter_test_schema_changes_do_not_lose_pending_inlin
 
 #[test]
 fn mirrors_deletion_inlining_compaction_test_merge_rewrite_and_time_travel_metadata() {
-    // Mirrors: third_party/ducklake/test/sql/deletion_inlining/test_deletion_inlining_compaction.test
+    // Mirrors: third_party/ducklake/test/sql/deletion_inlining/
+    // test_deletion_inlining_compaction.test
     //
     // Storage contract:
-    // - A merge-adjacent compaction must not merge a file with active inline deletions.
-    // - After the inline delete is flushed, rewrite-delete compaction replaces the source file but
-    //   old snapshots still resolve to their original data-file visibility.
+    // - A merge-adjacent compaction must not merge a file with active inline
+    //   deletions.
+    // - After the inline delete is flushed, rewrite-delete compaction replaces
+    //   the source file but old snapshots still resolve to their original
+    //   data-file visibility.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -640,13 +659,16 @@ fn mirrors_deletion_inlining_compaction_test_merge_rewrite_and_time_travel_metad
 
 #[test]
 fn mirrors_deletion_inlining_large_test_many_inline_deletes_flush_to_one_cumulative_delete_file() {
-    // Mirrors: third_party/ducklake/test/sql/deletion_inlining/test_deletion_inlining_large.test
+    // Mirrors: third_party/ducklake/test/sql/deletion_inlining/
+    // test_deletion_inlining_large.test
     //
     // Storage contract:
-    // - A large number of inline file-deletion rows across several snapshots remains queryable
-    //   until flush.
-    // - Flush replaces them with one cumulative delete file beginning at the first delete.
-    // - A later large delete replaces that delete file while keeping the original begin snapshot.
+    // - A large number of inline file-deletion rows across several snapshots
+    //   remains queryable until flush.
+    // - Flush replaces them with one cumulative delete file beginning at the
+    //   first delete.
+    // - A later large delete replaces that delete file while keeping the
+    //   original begin snapshot.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -682,12 +704,14 @@ fn mirrors_deletion_inlining_large_test_many_inline_deletes_flush_to_one_cumulat
 
 #[test]
 fn mirrors_deletion_inlining_partitions_test_inline_deletes_stay_partition_scoped_after_flush() {
-    // Mirrors: third_party/ducklake/test/sql/deletion_inlining/test_deletion_inlining_partitions.test
+    // Mirrors: third_party/ducklake/test/sql/deletion_inlining/
+    // test_deletion_inlining_partitions.test
     //
     // Storage contract:
-    // - Three partition files receive small inline deletions in separate snapshots.
-    // - Partition scans should return the same partitioned files with attached delete metadata
-    //   after flush.
+    // - Three partition files receive small inline deletions in separate
+    //   snapshots.
+    // - Partition scans should return the same partitioned files with attached
+    //   delete metadata after flush.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -752,12 +776,15 @@ fn mirrors_deletion_inlining_partitions_test_inline_deletes_stay_partition_scope
 
 #[test]
 fn mirrors_deletion_inlining_stats_test_repeated_flush_keeps_delete_count_cumulative() {
-    // Mirrors: third_party/ducklake/test/sql/deletion_inlining/test_deletion_inlining_stats.test
+    // Mirrors: third_party/ducklake/test/sql/deletion_inlining/
+    // test_deletion_inlining_stats.test
     //
     // Storage contract:
     // - The first flush writes a delete file for rows 0..4.
-    // - A later inline delete for rows 45..49 replaces it with a cumulative delete file.
-    // - The replacement keeps the first delete snapshot and reports the cumulative delete count.
+    // - A later inline delete for rows 45..49 replaces it with a cumulative
+    //   delete file.
+    // - The replacement keeps the first delete snapshot and reports the
+    //   cumulative delete count.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -784,12 +811,13 @@ fn mirrors_deletion_inlining_stats_test_repeated_flush_keeps_delete_count_cumula
 
 #[test]
 fn mirrors_deletion_inlining_table_deletes_test_change_feed_returns_inline_deletes_by_snapshot() {
-    // Mirrors: third_party/ducklake/test/sql/deletion_inlining/test_deletion_inlining_table_deletes.test
+    // Mirrors: third_party/ducklake/test/sql/deletion_inlining/
+    // test_deletion_inlining_table_deletes.test
     //
     // Storage contract:
     // - Inline file deletions are the source of `ducklake_table_deletions`.
-    // - Range scans over the deletion feed must return the file row ids grouped under the snapshot
-    //   where each DELETE statement committed.
+    // - Range scans over the deletion feed must return the file row ids grouped
+    //   under the snapshot where each DELETE statement committed.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -866,14 +894,15 @@ fn mirrors_deletion_inlining_table_deletes_test_change_feed_returns_inline_delet
 
 #[test]
 fn mirrors_deletion_inlining_transaction_test_committed_multi_delete_uses_one_begin_snapshot() {
-    // Mirrors: third_party/ducklake/test/sql/deletion_inlining/test_deletion_inlining_transaction.test
+    // Mirrors: third_party/ducklake/test/sql/deletion_inlining/
+    // test_deletion_inlining_transaction.test
     //
     // Storage contract:
     // - Rolled-back SQL transactions do not become storage writes.
-    // - The committed transaction with three DELETE statements asks storage to save row ids 0..14
-    //   as one committed metadata version.
-    // - Flush removes those active inline deletes and materializes one delete file beginning at
-    //   the committed transaction snapshot.
+    // - The committed transaction with three DELETE statements asks storage to
+    //   save row ids 0..14 as one committed metadata version.
+    // - Flush removes those active inline deletes and materializes one delete
+    //   file beginning at the committed transaction snapshot.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -905,13 +934,14 @@ fn mirrors_deletion_inlining_transaction_test_committed_multi_delete_uses_one_be
 
 #[test]
 fn mirrors_deletion_multiple_tables_test_flush_keeps_table_delete_snapshots_isolated() {
-    // Mirrors: third_party/ducklake/test/sql/deletion_inlining/test_deletion_multiple_tables.test
+    // Mirrors: third_party/ducklake/test/sql/deletion_inlining/
+    // test_deletion_multiple_tables.test
     //
     // Storage contract:
     // - Two tables each have inline inserts and multiple inline deletes.
     // - Flush writes one delete file per table.
-    // - Each table's delete file begins at that table's first delete snapshot, not at the other
-    //   table's delete snapshot and not at the flush snapshot.
+    // - Each table's delete file begins at that table's first delete snapshot,
+    //   not at the other table's delete snapshot and not at the flush snapshot.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let t1 = TableId(1);

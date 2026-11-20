@@ -25,12 +25,14 @@ fn execute_request(operation: &str, payload: &[u8], context: u64) -> RuntimeResp
         ptr: std::ptr::null_mut(),
         len: 0,
     };
-    // SAFETY: The request and output descriptor remain live throughout the call.
+    // SAFETY: The request and output descriptor remain live throughout the
+    // call.
     assert_eq!(
         unsafe { ducklake_catalog_runtime_probe(request.as_ptr(), request.len(), &mut buffer) },
         0
     );
-    // SAFETY: The successful probe returned its owned buffer, freed after decoding.
+    // SAFETY: The successful probe returned its owned buffer, freed after
+    // decoding.
     let response = unsafe {
         RuntimeResponse::decode(std::slice::from_raw_parts(buffer.ptr, buffer.len)).unwrap()
     };
@@ -100,7 +102,8 @@ fn given_failed_ffi_request_when_next_request_runs_then_context_does_not_leak() 
 fn given_cpp_scope_when_runtime_is_called_then_both_layers_share_the_parent_stack() {
     let records = capture_test_records(|| {
         let operation = b"cpp.fixture";
-        // SAFETY: The operation lives through begin; the scope ends once on this thread.
+        // SAFETY: The operation lives through begin; the scope ends once on
+        // this thread.
         let span = unsafe {
             crate::runtime_ffi::ducklake_catalog_runtime_trace_begin(
                 operation.as_ptr(),

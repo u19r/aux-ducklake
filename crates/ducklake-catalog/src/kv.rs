@@ -165,9 +165,7 @@ impl CatalogIndexJoin {
 
 pub trait OrderedCatalogKv {
     fn catalog_cache_namespace(&self) -> CatalogCacheNamespace
-    where
-        Self: Sized,
-    {
+    where Self: Sized {
         CatalogCacheNamespace::process_local(self as *const Self as usize)
     }
 

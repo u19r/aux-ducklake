@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    use super::super::{OldFilesCleanupRequest, old_files_cleanup_payload};
     use crate::{
         CatalogId, CatalogOrderId, DataFileId, DataFileRow, DeleteFileId, DeleteFileRow,
         FakeOrderedCatalogKv, KvBatch, MergeAdjacentCompaction, RawSnapshotSequence, SnapshotRow,
@@ -17,8 +18,6 @@ mod tests {
         remove_old_data_files,
         store::stage_snapshot,
     };
-
-    use super::super::{OldFilesCleanupRequest, old_files_cleanup_payload};
 
     #[test]
     fn given_cleanup_filter_threshold_when_listing_old_files_then_only_older_unreachable_scheduled_files_return()

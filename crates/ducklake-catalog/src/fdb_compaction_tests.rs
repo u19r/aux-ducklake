@@ -5,7 +5,13 @@ mod tests {
         collections::{BTreeMap, BTreeSet},
     };
 
-    use crate::typed_scalar::normalize_catalog_scalar_type;
+    use super::super::{
+        MergeSourceContext, RewriteSourceContext, derive_merge_replacement_stats,
+        list_partition_values_for_source_file_ids, merge_stats_for_replacement,
+        normalize_merge_replacements, normalize_rewrite_replacement_row_ids_from_sources,
+        reject_rewrite_source_delete_conflicts_since_base, reject_source_delete_files,
+        rewrite_source_deletions,
+    };
     use crate::{
         CatalogId, CatalogOrderId, ColumnId, DataFileId, DataFileRow, DeleteFileId, DeleteFileRow,
         FakeOrderedCatalogKv, FileColumnStatsRow, FilePartitionValueRow, InlineFileDeletionRow,
@@ -19,14 +25,7 @@ mod tests {
             order_delete_file_change_prefix,
         },
         latest_snapshot, register_file_column_stats, register_file_partition_value,
-    };
-
-    use super::super::{
-        MergeSourceContext, RewriteSourceContext, derive_merge_replacement_stats,
-        list_partition_values_for_source_file_ids, merge_stats_for_replacement,
-        normalize_merge_replacements, normalize_rewrite_replacement_row_ids_from_sources,
-        reject_rewrite_source_delete_conflicts_since_base, reject_source_delete_files,
-        rewrite_source_deletions,
+        typed_scalar::normalize_catalog_scalar_type,
     };
 
     #[test]

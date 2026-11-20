@@ -1,13 +1,13 @@
 #[cfg(feature = "foundationdb")]
-use crate::runtime_protocol::RuntimePayload;
-#[cfg(feature = "foundationdb")]
 use std::cmp::Ordering;
 #[cfg(feature = "foundationdb")]
 use std::collections::HashMap;
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 #[cfg(not(test))]
 use std::sync::OnceLock;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 #[cfg(feature = "foundationdb")]
 use futures::executor::block_on;
@@ -29,6 +29,8 @@ use crate::list_data_files_with_deletes_at;
 use crate::runtime_inline_snapshot::capture::capture_inline_current_rows_at_read_version;
 #[cfg(feature = "runtime-metrics")]
 use crate::runtime_metrics::record_runtime_method_elapsed;
+#[cfg(feature = "foundationdb")]
+use crate::runtime_protocol::RuntimePayload;
 #[cfg(feature = "foundationdb")]
 use crate::typed_scalar::{compare_typed_scalars, normalize_catalog_scalar_type};
 use crate::{
@@ -638,7 +640,7 @@ fn partition_files_payload(
         catalog,
         snapshot_order,
         &partition_value,
-        &files,
+        files,
     )?;
     Ok(out.into_bytes())
 }
@@ -652,7 +654,7 @@ fn push_partition_files_payload(
     files: &[AttachedDataFile],
 ) -> CatalogResult<()> {
     out.push_str(&format!("partition_value={partition_value}\n"));
-    push_files_payload(out, kv, catalog, snapshot_order, &files)?;
+    push_files_payload(out, kv, catalog, snapshot_order, files)?;
     Ok(())
 }
 
@@ -1224,10 +1226,10 @@ fn push_files_payload(
         return Ok(());
     }
     let inline_file_deletions =
-        list_inline_file_deletions_for_visible_files(kv, catalog, snapshot_order, &files)?;
+        list_inline_file_deletions_for_visible_files(kv, catalog, snapshot_order, files)?;
     record_list_data_files_at_render_stage("InlineFileDeletions", started);
     let started = RuntimeMetricStage::start();
-    let public_snapshot_orders = file_payload_public_snapshot_orders(snapshot_order, &files);
+    let public_snapshot_orders = file_payload_public_snapshot_orders(snapshot_order, files);
     let render_context = FilePayloadRenderContext::fetch(kv, catalog, &public_snapshot_orders)?;
     record_list_data_files_at_render_stage("Context", started);
     let started = RuntimeMetricStage::start();
@@ -1311,7 +1313,7 @@ fn push_files_payload(
             .footer_size
             .map(|value| value.to_string())
             .unwrap_or_default();
-        let schema_version = render_context.schema_version_for_order(file_schema_order(&file))?;
+        let schema_version = render_context.schema_version_for_order(file_schema_order(file))?;
         let row_id_start = if file.row_id_start_known {
             file.row_id_start.to_string()
         } else {

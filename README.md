@@ -25,7 +25,7 @@ upstream DuckLake and is not a valid `META_TYPE 'aux_catalog'` host.
 
 ## Prerequisites
 
-- Rust 1.99.1 or newer.
+- Rust 1.100.0 or newer.
 - FoundationDB client tools and library.
 - `cmake`, `git`, and either `ninja` or `make` to build the patched DuckLake extension.
 

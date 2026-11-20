@@ -1,9 +1,9 @@
+use std::collections::{BTreeSet, VecDeque};
+
 use super::{
     accumulator::{InlineCurrentAccumulator, InlinePayloadGroup},
     capture::CAPTURE_ALLOCATION_OVERHEAD_BYTES,
 };
-use std::collections::{BTreeSet, VecDeque};
-
 use crate::{
     CatalogError, CatalogId, CatalogOrderId, CatalogResult, SchemaId, TableId,
     inline_change_feed::{InlineRowChange, InlineRowChangeKind},

@@ -423,7 +423,7 @@ impl GlobalColumnStats {
         } else if !self.invalid_extrema {
             if let Some(min_value) = row.min_value
                 && (!self.has_min
-                    || compare_typed_scalars(self.scalar_type, &min_value, &self.min_value)
+                    || compare_typed_scalars(self.scalar_type, min_value, &self.min_value)
                         .is_some_and(|ordering| ordering.is_lt()))
             {
                 self.has_min = true;
@@ -431,7 +431,7 @@ impl GlobalColumnStats {
             }
             if let Some(max_value) = row.max_value
                 && (!self.has_max
-                    || compare_typed_scalars(self.scalar_type, &max_value, &self.max_value)
+                    || compare_typed_scalars(self.scalar_type, max_value, &self.max_value)
                         .is_some_and(|ordering| ordering.is_gt()))
             {
                 self.has_max = true;
@@ -441,7 +441,7 @@ impl GlobalColumnStats {
         if let Some(extra_stats) = row.extra_stats
             && !extra_stats.is_empty()
         {
-            self.merge_extra_stats(&extra_stats);
+            self.merge_extra_stats(extra_stats);
         }
     }
 

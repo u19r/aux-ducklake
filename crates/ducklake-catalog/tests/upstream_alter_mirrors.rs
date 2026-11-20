@@ -12,12 +12,14 @@ use ducklake_catalog::{
 
 #[test]
 fn mirrors_add_column_default_stats_test_default_and_explicit_stats_are_saved() {
-    // Mirrors: third_party/ducklake/test/sql/alter/add_column_default_stats.test
+    // Mirrors: third_party/ducklake/test/sql/alter/add_column_default_stats.
+    // test
     //
     // Storage contract:
-    // - When DuckLake adds a column with a default while rows are being written, it asks storage
-    //   to persist column stats for the added column.
-    // - Those stats must reflect default values and later explicit values for the same column.
+    // - When DuckLake adds a column with a default while rows are being
+    //   written, it asks storage to persist column stats for the added column.
+    // - Those stats must reflect default values and later explicit values for
+    //   the same column.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     initialize_catalog_if_absent(&mut kv, catalog).unwrap();
@@ -106,9 +108,10 @@ fn mirrors_add_column_nested_test_nested_columns_are_appended_in_order() {
     // Mirrors: third_party/ducklake/test/sql/alter/add_column_nested.test
     //
     // Storage contract:
-    // - DuckLake asks storage to append top-level nested columns after existing data.
-    // - Current table metadata must return the original struct column followed by both new
-    //   columns in their committed order.
+    // - DuckLake asks storage to append top-level nested columns after existing
+    //   data.
+    // - Current table metadata must return the original struct column followed
+    //   by both new columns in their committed order.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -157,7 +160,8 @@ fn mirrors_drop_column_nested_test_dropped_nested_columns_do_not_reappear_after_
     //
     // Storage contract:
     // - Dropped columns must be absent from current table metadata.
-    // - New columns with similar names are new column ids, not resurrected dropped columns.
+    // - New columns with similar names are new column ids, not resurrected
+    //   dropped columns.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -208,7 +212,8 @@ fn mirrors_expire_snapshot_bug_test_renamed_table_keeps_files_until_final_drop()
     // Mirrors: third_party/ducklake/test/sql/alter/expire_snapshot_bug.test
     //
     // Storage contract:
-    // - Table rename changes table metadata but not table id ownership of data files.
+    // - Table rename changes table metadata but not table id ownership of data
+    //   files.
     // - Data files remain visible through multiple renames.
     // - Dropping the final table expires the current files for that table id.
     let mut kv = FakeOrderedCatalogKv::new();
@@ -256,9 +261,10 @@ fn mirrors_mixed_alter2_test_default_column_drop_keeps_remaining_column_order() 
     // Mirrors: third_party/ducklake/test/sql/alter/mixed_alter2.test
     //
     // Storage contract:
-    // - Consecutive ADD COLUMN operations append nullable/default/nested columns.
-    // - Dropping the default column removes only that column version and leaves the surrounding
-    //   columns in order.
+    // - Consecutive ADD COLUMN operations append nullable/default/nested
+    //   columns.
+    // - Dropping the default column removes only that column version and leaves
+    //   the surrounding columns in order.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -318,13 +324,17 @@ fn mirrors_mixed_alter2_test_default_column_drop_keeps_remaining_column_order() 
 
 #[test]
 fn mirrors_multi_alter_same_column_transaction_test_final_column_identity_is_saved() {
-    // Mirrors: third_party/ducklake/test/sql/alter/multi_alter_same_column_transaction.test
+    // Mirrors: third_party/ducklake/test/sql/alter/
+    // multi_alter_same_column_transaction.test
     //
     // Storage contract:
-    // - Multiple operations on the same column in one SQL transaction arrive as final table
-    //   metadata: default metadata and final column name must both be persisted.
-    // - ADD+RENAME+DROP leaves no trace of the temporary column in current metadata.
-    // - Two added columns renamed in one transaction must keep their final names and ids.
+    // - Multiple operations on the same column in one SQL transaction arrive as
+    //   final table metadata: default metadata and final column name must both
+    //   be persisted.
+    // - ADD+RENAME+DROP leaves no trace of the temporary column in current
+    //   metadata.
+    // - Two added columns renamed in one transaction must keep their final
+    //   names and ids.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     initialize_catalog_if_absent(&mut kv, catalog).unwrap();
@@ -431,13 +441,14 @@ fn mirrors_multi_alter_same_column_transaction_test_final_column_identity_is_sav
 
 #[test]
 fn mirrors_rename_table_dbt_workload_test_swapping_names_in_one_commit_preserves_files() {
-    // Mirrors: third_party/ducklake/test/sql/alter/rename_table_dbt_workload.test
+    // Mirrors: third_party/ducklake/test/sql/alter/rename_table_dbt_workload.
+    // test
     //
     // Storage contract:
-    // - In one transaction DuckLake creates a temp table, renames the original to backup, and
-    //   renames the temp table to the original name.
-    // - Current table listing must contain only the final names, with data files attached to the
-    //   original table ids.
+    // - In one transaction DuckLake creates a temp table, renames the original
+    //   to backup, and renames the temp table to the original name.
+    // - Current table listing must contain only the final names, with data
+    //   files attached to the original table ids.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     initialize_catalog_if_absent(&mut kv, catalog).unwrap();
@@ -494,9 +505,10 @@ fn mirrors_struct_evolution_nested_test_type_changes_preserve_current_nested_sha
     // Mirrors: third_party/ducklake/test/sql/alter/struct_evolution_nested.test
     //
     // Storage contract:
-    // - Repeated SET DATA TYPE operations replace the column type in table metadata.
-    // - Adding a new deeply nested column after the type evolution appends it without changing
-    //   the final evolved type of the original column.
+    // - Repeated SET DATA TYPE operations replace the column type in table
+    //   metadata.
+    // - Adding a new deeply nested column after the type evolution appends it
+    //   without changing the final evolved type of the original column.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -575,13 +587,14 @@ fn mirrors_struct_evolution_nested_test_type_changes_preserve_current_nested_sha
 
 #[test]
 fn mirrors_struct_evolution_nested_alter_test_nested_column_add_drop_updates_leaf_metadata() {
-    // Mirrors: third_party/ducklake/test/sql/alter/struct_evolution_nested_alter.test
+    // Mirrors: third_party/ducklake/test/sql/alter/
+    // struct_evolution_nested_alter.test
     //
     // Storage contract:
     // - Nested ADD COLUMN appends leaf metadata under the correct parent id.
     // - Nested DROP COLUMN removes only the requested leaf/subtree metadata.
-    // - Adding a separate top-level nested column after those changes does not resurrect dropped
-    //   leaf columns under col1.
+    // - Adding a separate top-level nested column after those changes does not
+    //   resurrect dropped leaf columns under col1.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);

@@ -1,4 +1,9 @@
-use std::{borrow::Cow, cmp::Ordering};
+use std::cmp::Ordering;
+
+use jiff::{
+    civil::{Date, DateTime},
+    fmt::strtime::BrokenDownTime,
+};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum CatalogScalarType {
@@ -104,7 +109,7 @@ pub(crate) fn compare_typed_scalars(
 #[derive(Eq, Ord, PartialEq, PartialOrd)]
 enum CatalogTimestamp {
     NegativeInfinity,
-    Finite(chrono::NaiveDateTime),
+    Finite(i64, i32),
     PositiveInfinity,
 }
 
@@ -117,45 +122,66 @@ fn parse_catalog_timestamp(
         "infinity" => return Some(CatalogTimestamp::PositiveInfinity),
         _ => {}
     }
-    parse_finite_timestamp(scalar_type, value).map(CatalogTimestamp::Finite)
-}
-
-fn parse_finite_timestamp(
-    scalar_type: CatalogScalarType,
-    value: &str,
-) -> Option<chrono::NaiveDateTime> {
-    use chrono::Datelike;
-
-    let (value, is_bc) = value
+    let (value, has_bc_suffix) = value
         .strip_suffix(" (BC)")
         .map_or((value, false), |value| (value, true));
-    // DuckDB prints large positive years without chrono's required leading sign.
-    let value = if value.find('-').is_some_and(|index| index > 4) {
-        Cow::Owned(format!("+{value}"))
+    let year_end = value.get(1..)?.find('-')? + 1;
+    let year = i64::from(value[..year_end].parse::<i32>().ok()?);
+    let month_day_and_time = &value[year_end + 1..];
+
+    // Jiff normalizes leap seconds to :59. An unrecognized bound must stay
+    // incomparable so a partition containing it is still scanned.
+    if month_day_and_time
+        .split(':')
+        .nth(2)?
+        .trim_start()
+        .starts_with("60")
+    {
+        return None;
+    }
+    let has_bc_after_date = month_day_and_time.contains(" (BC) ");
+    let format = if has_bc_after_date {
+        "%m-%d (BC) %H:%M:%S%.f"
     } else {
-        Cow::Borrowed(value)
+        "%m-%d %H:%M:%S%.f"
     };
-    let (local, offset_seconds) = match scalar_type {
-        CatalogScalarType::Timestamp => (
-            chrono::NaiveDateTime::parse_from_str(&value, "%Y-%m-%d %H:%M:%S%.f").ok()?,
-            0,
-        ),
-        CatalogScalarType::TimestampTz => {
-            let timestamp =
-                chrono::DateTime::parse_from_str(&value, "%Y-%m-%d %H:%M:%S%.f%#z").ok()?;
-            (
-                timestamp.naive_local(),
-                timestamp.offset().local_minus_utc(),
-            )
-        }
+    let (parsed, consumed) = BrokenDownTime::parse_prefix(format, month_day_and_time).ok()?;
+    let year = if has_bc_after_date || has_bc_suffix {
+        1 - year
+    } else {
+        year
+    };
+    let suffix = &month_day_and_time[consumed..];
+    let offset_seconds = match scalar_type {
+        CatalogScalarType::Timestamp if suffix.is_empty() => 0,
+        CatalogScalarType::TimestampTz => parse_timestamp_offset(suffix)?,
         _ => return None,
     };
-    let local = if is_bc {
-        local.with_year(1 - local.year())?
-    } else {
-        local
-    };
-    local.checked_sub_signed(chrono::Duration::seconds(i64::from(offset_seconds)))
+
+    // DuckDB's years can exceed Jiff's range. Every 400 Gregorian years
+    // repeat the same calendar and contain exactly 146,097 days.
+    let cycle_year = i16::try_from(year.rem_euclid(400)).ok()?;
+    let date = Date::new(cycle_year, parsed.month()?, parsed.day()?).ok()?;
+    let time = parsed.to_time().ok()?;
+    let seconds = year.div_euclid(400) * (146_097 * 86_400)
+        + date
+            .to_datetime(time)
+            .duration_since(DateTime::ZERO)
+            .as_secs()
+        - offset_seconds;
+    Some(CatalogTimestamp::Finite(seconds, time.subsec_nanosecond()))
+}
+
+fn parse_timestamp_offset(suffix: &str) -> Option<i64> {
+    let suffix = suffix.trim_start();
+    if suffix.eq_ignore_ascii_case("Z") {
+        return Some(0);
+    }
+    let offset = BrokenDownTime::parse("%:::z", suffix)
+        .or_else(|_| BrokenDownTime::parse("%z", suffix))
+        .ok()?
+        .offset()?;
+    Some(i64::from(offset.seconds()))
 }
 
 pub(crate) fn typed_extrema_are_invalid(

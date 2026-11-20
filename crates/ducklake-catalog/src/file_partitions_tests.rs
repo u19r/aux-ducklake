@@ -2,18 +2,17 @@
 mod tests {
     use std::{cell::Cell, collections::BTreeSet};
 
-    use crate::{
-        CatalogId, CatalogOrderId, DataFileId, DataFileRow, FakeOrderedCatalogKv, KvBatch,
-        OrderedCatalogKv, PartitionKeyIndex, RangeDirection, RangeItem, TableId,
-        commit_append_data_files, list_current_data_files_by_partition_value,
-        register_file_partition_value,
-    };
-
     use super::super::{
         FilePartitionValueRow, encode_partition_lookup_value,
         list_file_partition_values_for_data_files,
         list_file_partition_values_for_data_files_and_keys, partition_lookup_key,
         stage_file_partition_value,
+    };
+    use crate::{
+        CatalogId, CatalogOrderId, DataFileId, DataFileRow, FakeOrderedCatalogKv, KvBatch,
+        OrderedCatalogKv, PartitionKeyIndex, RangeDirection, RangeItem, TableId,
+        commit_append_data_files, list_current_data_files_by_partition_value,
+        register_file_partition_value,
     };
 
     #[test]

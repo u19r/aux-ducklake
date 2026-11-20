@@ -1,8 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use crate::{CatalogOrderId, ColumnId, RawSnapshotSequence, TableColumnRow, TableId, TableRow};
-
     use super::super::table_metadata_recovery_attempt_id;
+    use crate::{CatalogOrderId, ColumnId, RawSnapshotSequence, TableColumnRow, TableId, TableRow};
 
     #[test]
     fn table_metadata_recovery_attempt_id_ignores_uncommitted_validity() {

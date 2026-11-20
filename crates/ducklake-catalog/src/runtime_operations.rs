@@ -179,24 +179,24 @@ pub(crate) fn payload_for_request(
         "GetCatalogForSnapshot" => {
             get_catalog_for_snapshot(request.backend, request.catalog_id, request.payload)
         }
-        "ListDataFilesAt" => list_data_files_at(request.backend, catalog, &request.payload),
+        "ListDataFilesAt" => list_data_files_at(request.backend, catalog, request.payload),
         "ListCurrentDataFilesForPartitionScan" => {
-            list_current_partition_files(request.backend, catalog, &request.payload)
+            list_current_partition_files(request.backend, catalog, request.payload)
         }
         "ListCurrentDataFilesForPartitionScans" => {
-            list_current_partition_files_batch(request.backend, catalog, &request.payload)
+            list_current_partition_files_batch(request.backend, catalog, request.payload)
         }
         "ListCurrentDataFilesForPartitionPrune" => {
-            list_current_partition_prune_files(request.backend, catalog, &request.payload)
+            list_current_partition_prune_files(request.backend, catalog, request.payload)
         }
         "ListDataFilesForPartitionScanAt" => {
-            list_partition_files_at(request.backend, catalog, &request.payload)
+            list_partition_files_at(request.backend, catalog, request.payload)
         }
         "ListDataFilesForPartitionScansAt" => {
-            list_partition_files_at_batch(request.backend, catalog, &request.payload)
+            list_partition_files_at_batch(request.backend, catalog, request.payload)
         }
         "ListDataFilesForPartitionPruneAt" => {
-            list_partition_prune_files_at(request.backend, catalog, &request.payload)
+            list_partition_prune_files_at(request.backend, catalog, request.payload)
         }
         _ => owned_payload_for_request(request).map(Into::into),
     }
@@ -204,7 +204,7 @@ pub(crate) fn payload_for_request(
 
 fn owned_payload_for_request(request: &RuntimeRequestRef<'_>) -> CatalogResult<Vec<u8>> {
     if request.snapshot_fence.is_some()
-        && runtime_operation_policy(&request.operation).mutates_catalog
+        && runtime_operation_policy(request.operation).mutates_catalog
         && request.operation != "CommitAttempt"
     {
         return Err(crate::CatalogError::InvalidMutation(
@@ -214,104 +214,98 @@ fn owned_payload_for_request(request: &RuntimeRequestRef<'_>) -> CatalogResult<V
     let catalog = request.catalog_id;
     match request.operation {
         "CheckSnapshotFence" => Ok(b"snapshot_fence_version=1\n".to_vec()),
-        "ResolveCatalogId" => resolve_catalog_id(request.backend, catalog, &request.payload),
-        "AttachMetadata" => attach_metadata(request.backend, catalog, &request.payload),
+        "ResolveCatalogId" => resolve_catalog_id(request.backend, catalog, request.payload),
+        "AttachMetadata" => attach_metadata(request.backend, catalog, request.payload),
         "MetadataExists" => metadata_exists(request.backend, catalog),
-        "InitializeDuckLake" => initialize_ducklake(request.backend, catalog, &request.payload),
-        "SetConfigOption" => set_config_option(request.backend, catalog, &request.payload),
+        "InitializeDuckLake" => initialize_ducklake(request.backend, catalog, request.payload),
+        "SetConfigOption" => set_config_option(request.backend, catalog, request.payload),
         "ListConfigOptions" => list_config_options(request.backend, catalog),
-        "CommitColumnMappings" => {
-            commit_column_mappings(request.backend, catalog, &request.payload)
-        }
-        "ListColumnMappings" => {
-            list_column_mapping_rows(request.backend, catalog, &request.payload)
-        }
+        "CommitColumnMappings" => commit_column_mappings(request.backend, catalog, request.payload),
+        "ListColumnMappings" => list_column_mapping_rows(request.backend, catalog, request.payload),
         "ListFilePartitionValuesForDataFileIds" => {
             list_file_partition_value_rows_for_data_file_ids(
                 request.backend,
                 catalog,
-                &request.payload,
+                request.payload,
             )
         }
         "RenderBoundedPartitionInfoMirrorSql" => {
-            render_bounded_partition_info_mirror_sql(request.backend, catalog, &request.payload)
+            render_bounded_partition_info_mirror_sql(request.backend, catalog, request.payload)
         }
         "ListCurrentMetadataFileColumnStatsForDataFileIds" => {
             list_current_metadata_file_column_stats_rows_for_data_file_ids(
                 request.backend,
                 catalog,
-                &request.payload,
+                request.payload,
             )
         }
         "ListGlobalStatsInputsForSnapshot" => {
-            list_global_stats_inputs_for_snapshot(request.backend, catalog, &request.payload)
+            list_global_stats_inputs_for_snapshot(request.backend, catalog, request.payload)
         }
         "ListGlobalStatsForSnapshot" => {
-            list_global_stats_for_snapshot(request.backend, catalog, &request.payload)
+            list_global_stats_for_snapshot(request.backend, catalog, request.payload)
         }
         "ListSnapshotStatsAndChangesInputs" => {
-            list_snapshot_stats_and_changes_inputs(request.backend, catalog, &request.payload)
+            list_snapshot_stats_and_changes_inputs(request.backend, catalog, request.payload)
         }
         "RenderBoundedMutationMirrorSql" => {
-            render_bounded_mutation_mirror_sql(request.backend, catalog, &request.payload)
+            render_bounded_mutation_mirror_sql(request.backend, catalog, request.payload)
         }
         "ListCurrentMetadataDataFilesForDataFileIds" => {
             list_current_metadata_data_file_rows_for_data_file_ids(
                 request.backend,
                 catalog,
-                &request.payload,
+                request.payload,
             )
         }
         "ListDataFiles" => list_data_file_rows(request.backend, catalog),
         "ListDeleteFilesForDeleteFileIds" => {
-            list_delete_file_rows_for_delete_file_ids(request.backend, catalog, &request.payload)
+            list_delete_file_rows_for_delete_file_ids(request.backend, catalog, request.payload)
         }
-        "ListNullOnlyColumns" => list_null_only_columns(catalog, &request.payload),
-        "ListInlinedTables" => list_inlined_tables(catalog, &request.payload),
-        "GetTableSchemaVersions" => get_table_schema_versions(catalog, &request.payload),
+        "ListNullOnlyColumns" => list_null_only_columns(catalog, request.payload),
+        "ListInlinedTables" => list_inlined_tables(catalog, request.payload),
+        "GetTableSchemaVersions" => get_table_schema_versions(catalog, request.payload),
         "GetBeginSnapshotForSchemaVersion" => {
-            lookup_begin_snapshot_for_schema_version(request.backend, catalog, &request.payload)
+            lookup_begin_snapshot_for_schema_version(request.backend, catalog, request.payload)
         }
-        "CreateSchemas" => create_schemas(request.backend, catalog, &request.payload),
-        "DropSchemas" => drop_schemas(request.backend, catalog, &request.payload),
-        "CreateTables" => create_tables(request.backend, catalog, &request.payload),
-        "ReplaceTables" => replace_tables(request.backend, catalog, &request.payload),
-        "DropTables" => drop_tables(request.backend, catalog, &request.payload),
-        "CreateViews" => create_views(request.backend, catalog, &request.payload),
-        "RenameViews" => rename_views(request.backend, catalog, &request.payload),
-        "DropViews" => drop_views(request.backend, catalog, &request.payload),
-        "ChangeViewComment" => change_view_comment(request.backend, catalog, &request.payload),
-        "CreateMacros" => create_macros(request.backend, catalog, &request.payload),
-        "DropMacros" => drop_macros(request.backend, catalog, &request.payload),
-        "AddColumns" => add_columns(request.backend, catalog, &request.payload),
-        "RenameColumns" => rename_columns(request.backend, catalog, &request.payload),
-        "ChangeColumnTypes" => change_column_types(request.backend, catalog, &request.payload),
-        "ChangeColumnDefaults" => {
-            change_column_defaults(request.backend, catalog, &request.payload)
-        }
-        "ChangeComments" => change_comments(request.backend, catalog, &request.payload),
-        "ChangePartitionKeys" => change_partition_keys(request.backend, catalog, &request.payload),
-        "ChangeSortKeys" => change_sort_keys(request.backend, catalog, &request.payload),
-        "DropColumns" => drop_columns(request.backend, catalog, &request.payload),
-        "RenameTables" => rename_tables(request.backend, catalog, &request.payload),
-        "CommitDataMutation" => commit_data_mutation(request.backend, catalog, &request.payload),
+        "CreateSchemas" => create_schemas(request.backend, catalog, request.payload),
+        "DropSchemas" => drop_schemas(request.backend, catalog, request.payload),
+        "CreateTables" => create_tables(request.backend, catalog, request.payload),
+        "ReplaceTables" => replace_tables(request.backend, catalog, request.payload),
+        "DropTables" => drop_tables(request.backend, catalog, request.payload),
+        "CreateViews" => create_views(request.backend, catalog, request.payload),
+        "RenameViews" => rename_views(request.backend, catalog, request.payload),
+        "DropViews" => drop_views(request.backend, catalog, request.payload),
+        "ChangeViewComment" => change_view_comment(request.backend, catalog, request.payload),
+        "CreateMacros" => create_macros(request.backend, catalog, request.payload),
+        "DropMacros" => drop_macros(request.backend, catalog, request.payload),
+        "AddColumns" => add_columns(request.backend, catalog, request.payload),
+        "RenameColumns" => rename_columns(request.backend, catalog, request.payload),
+        "ChangeColumnTypes" => change_column_types(request.backend, catalog, request.payload),
+        "ChangeColumnDefaults" => change_column_defaults(request.backend, catalog, request.payload),
+        "ChangeComments" => change_comments(request.backend, catalog, request.payload),
+        "ChangePartitionKeys" => change_partition_keys(request.backend, catalog, request.payload),
+        "ChangeSortKeys" => change_sort_keys(request.backend, catalog, request.payload),
+        "DropColumns" => drop_columns(request.backend, catalog, request.payload),
+        "RenameTables" => rename_tables(request.backend, catalog, request.payload),
+        "CommitDataMutation" => commit_data_mutation(request.backend, catalog, request.payload),
         "CommitAttempt" => commit_attempt(
             request.backend,
             catalog,
-            &request.payload,
+            request.payload,
             request.snapshot_fence,
         ),
         "GetSnapshot" => get_snapshot(request.backend, catalog),
-        "GetSnapshotAt" => get_snapshot_at(request.backend, catalog, &request.payload),
+        "GetSnapshotAt" => get_snapshot_at(request.backend, catalog, request.payload),
         "GetSnapshotAtTimestamp" => {
-            get_snapshot_at_timestamp(request.backend, catalog, &request.payload)
+            get_snapshot_at_timestamp(request.backend, catalog, request.payload)
         }
-        "ListSnapshots" => list_snapshots(request.backend, catalog, &request.payload),
+        "ListSnapshots" => list_snapshots(request.backend, catalog, request.payload),
         "ListSnapshotChangesAfter" => {
-            list_snapshot_changes_after(request.backend, catalog, &request.payload)
+            list_snapshot_changes_after(request.backend, catalog, request.payload)
         }
         "ListRemovedDataFilesAfter" => {
-            list_removed_data_files_after(request.backend, catalog, &request.payload)
+            list_removed_data_files_after(request.backend, catalog, request.payload)
         }
         "EndRuntimeReadContext" => {
             let read_context_id = request.read_context_id.ok_or_else(|| {
@@ -330,52 +324,50 @@ fn owned_payload_for_request(request: &RuntimeRequestRef<'_>) -> CatalogResult<V
             }
             Ok(format!("runtime_read_context_ended={read_context_id}\n").into_bytes())
         }
-        "ReadInlineRows" => read_inline_rows(request.backend, catalog, &request.payload),
+        "ReadInlineRows" => read_inline_rows(request.backend, catalog, request.payload),
         "ReadInlineRowsForFlush" => {
-            read_inline_rows_for_flush(request.backend, catalog, &request.payload)
+            read_inline_rows_for_flush(request.backend, catalog, request.payload)
         }
         "ReadInlineRowsForGlobalStats" => {
-            read_inline_rows_for_global_stats(request.backend, catalog, &request.payload)
+            read_inline_rows_for_global_stats(request.backend, catalog, request.payload)
         }
         "ReadInlineRowsForAggregateStats" => {
-            read_inline_rows_for_aggregate_stats(request.backend, catalog, &request.payload)
+            read_inline_rows_for_aggregate_stats(request.backend, catalog, request.payload)
         }
         "ReadInlineRowsForGlobalStatsBatch" => {
-            read_inline_rows_for_global_stats_batch(request.backend, catalog, &request.payload)
+            read_inline_rows_for_global_stats_batch(request.backend, catalog, request.payload)
         }
-        "RegisterInlineRows" => register_inline_rows(request.backend, catalog, &request.payload),
-        "RegisterInlineTables" => {
-            register_inline_tables(request.backend, catalog, &request.payload)
-        }
-        "DeleteInlineRows" => delete_inline_rows(request.backend, catalog, &request.payload),
+        "RegisterInlineRows" => register_inline_rows(request.backend, catalog, request.payload),
+        "RegisterInlineTables" => register_inline_tables(request.backend, catalog, request.payload),
+        "DeleteInlineRows" => delete_inline_rows(request.backend, catalog, request.payload),
         "InlineFileDeletionsExist" => {
-            inline_file_deletions_exist(request.backend, catalog, &request.payload)
+            inline_file_deletions_exist(request.backend, catalog, request.payload)
         }
         "ListInlineFileDeletions" => {
-            list_inline_file_deletions(request.backend, catalog, &request.payload)
+            list_inline_file_deletions(request.backend, catalog, request.payload)
         }
         "ListInlineFileDeletionsForFlush" => {
-            list_inline_file_deletions_for_flush(request.backend, catalog, &request.payload)
+            list_inline_file_deletions_for_flush(request.backend, catalog, request.payload)
         }
         "ListInlineRowInsertions" => {
-            list_inline_row_insertions(request.backend, catalog, &request.payload)
+            list_inline_row_insertions(request.backend, catalog, request.payload)
         }
         "ListInlineRowDeletions" => {
-            list_inline_row_deletions(request.backend, catalog, &request.payload)
+            list_inline_row_deletions(request.backend, catalog, request.payload)
         }
-        "ListDataFileChanges" => list_data_file_changes(request.backend, catalog, &request.payload),
-        "ListTableDeletions" => list_table_deletions(request.backend, catalog, &request.payload),
+        "ListDataFileChanges" => list_data_file_changes(request.backend, catalog, request.payload),
+        "ListTableDeletions" => list_table_deletions(request.backend, catalog, request.payload),
         "ListOldFilesForCleanup" => {
-            list_old_files_for_cleanup(request.backend, catalog, &request.payload)
+            list_old_files_for_cleanup(request.backend, catalog, request.payload)
         }
         "ListKnownFilesForCleanup" => list_known_files_for_cleanup(request.backend, catalog),
         "ExpireSnapshots" => {
-            expire_snapshots_for_runtime(request.backend, catalog, &request.payload)
+            expire_snapshots_for_runtime(request.backend, catalog, request.payload)
         }
-        "RemoveCleanupFiles" => remove_cleanup_files(request.backend, catalog, &request.payload),
-        "MergeAdjacentFiles" => merge_adjacent_files(request.backend, catalog, &request.payload),
-        "RewriteDeleteFiles" => rewrite_delete_files(request.backend, catalog, &request.payload),
-        "GetNextColumnId" => get_next_column_id(request.backend, catalog, &request.payload),
+        "RemoveCleanupFiles" => remove_cleanup_files(request.backend, catalog, request.payload),
+        "MergeAdjacentFiles" => merge_adjacent_files(request.backend, catalog, request.payload),
+        "RewriteDeleteFiles" => rewrite_delete_files(request.backend, catalog, request.payload),
+        "GetNextColumnId" => get_next_column_id(request.backend, catalog, request.payload),
         _ => Ok(format!(
             "runtime_ffi=ok\noperation={}\nbackend={}\npayload_bytes={}\n",
             request.operation,

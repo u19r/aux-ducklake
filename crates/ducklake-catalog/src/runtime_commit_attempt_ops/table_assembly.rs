@@ -2,13 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     CatalogError, CatalogId, CatalogResult, OrderedCatalogKv, TableColumnRow, TableId, TableRow,
-    TableVersionReplacement, load_table_at, table_store::list_tables_at,
+    TableVersionReplacement, load_table_at, runtime_commit_attempt_ops::*,
+    table_store::list_tables_at,
 };
-
-use crate::runtime_commit_attempt_ops::*;
 pub(super) struct TableIntentAssembler<'a, K>
-where
-    K: OrderedCatalogKv,
+where K: OrderedCatalogKv
 {
     kv: &'a K,
     catalog: CatalogId,
@@ -19,8 +17,7 @@ where
 }
 
 impl<'a, K> TableIntentAssembler<'a, K>
-where
-    K: OrderedCatalogKv,
+where K: OrderedCatalogKv
 {
     pub(super) fn new(
         kv: &'a K,

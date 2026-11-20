@@ -1,10 +1,9 @@
 mod payload;
 pub(crate) use payload::RuntimePayload;
 mod request;
-pub(crate) use request::RuntimeRequestRef;
-
 use std::fmt::Write;
 
+pub(crate) use request::RuntimeRequestRef;
 use sha2::{Digest, Sha256};
 
 use crate::{CatalogError, CatalogId, CatalogResult};

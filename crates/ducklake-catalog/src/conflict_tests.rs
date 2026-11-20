@@ -2,6 +2,11 @@
 mod tests {
     use std::cell::Cell;
 
+    use super::super::{
+        list_data_conflicts_since_base, reject_conflicts_since_base,
+        reject_table_metadata_conflicts_since_base, table_schema_conflict_since_base,
+        write_data_file_change,
+    };
     use crate::{
         CatalogError, CatalogId, ColumnId, DataCommitIntent, DataFileChangeKind, DataFileId,
         FakeOrderedCatalogKv, InlinedTableRow, KvBatch, MutableCatalogKv, OrderedCatalogKv,
@@ -12,12 +17,6 @@ mod tests {
             snapshot_data_file_change_prefix, table_data_file_change_prefix, table_object_prefix,
         },
         latest_snapshot,
-    };
-
-    use super::super::{
-        list_data_conflicts_since_base, reject_conflicts_since_base,
-        reject_table_metadata_conflicts_since_base, table_schema_conflict_since_base,
-        write_data_file_change,
     };
 
     #[test]

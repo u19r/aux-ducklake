@@ -4,10 +4,9 @@ use crate::{
     CatalogError, CatalogId, CatalogResult, MutableCatalogKv, OrderedCatalogKv,
     RawSnapshotSequence, SchemaId, SchemaRow, SnapshotCommitMetadata, SnapshotRow, TableId,
     TableRow, TableVersionReplacement, ViewCommentChange, ViewRename, ViewRow,
-    runtime_mutable_catalog::RuntimeMutableCatalog, schema_version_state::load_schema_version_at,
+    runtime_commit_attempt_ops::*, runtime_mutable_catalog::RuntimeMutableCatalog,
+    schema_version_state::load_schema_version_at,
 };
-
-use crate::runtime_commit_attempt_ops::*;
 #[cfg(test)]
 use crate::{
     KvBatch, ValidityWindow,

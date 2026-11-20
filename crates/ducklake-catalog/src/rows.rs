@@ -1,10 +1,11 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use crate::{
     CatalogError, CatalogResult,
     ids::{
         CatalogOrderId, CatalogOrderKind, DataFileId, DeleteFileId, RawSnapshotSequence, TableId,
     },
 };
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotRow {

@@ -23,12 +23,13 @@ use ducklake_catalog::{
 
 #[test]
 fn mirrors_sorted_flush_basic_test_sort_metadata_and_flushed_file_are_saved() {
-    // Mirrors: third_party/ducklake/test/sql/sorted_table/data_inlining_flush_sorted_basic.test
+    // Mirrors: third_party/ducklake/test/sql/sorted_table/
+    // data_inlining_flush_sorted_basic.test
     //
     // Storage contract:
     // - DuckLake saves the SET SORTED BY definition as table metadata.
-    // - Flushing inline rows creates a data file while preserving earlier inline insert change
-    //   metadata for table_changes/time travel.
+    // - Flushing inline rows creates a data file while preserving earlier
+    //   inline insert change metadata for table_changes/time travel.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -101,11 +102,13 @@ fn mirrors_sorted_flush_basic_test_sort_metadata_and_flushed_file_are_saved() {
 
 #[test]
 fn mirrors_sorted_flush_expression_test_expression_sort_metadata_is_saved_verbatim() {
-    // Mirrors: third_party/ducklake/test/sql/sorted_table/data_inlining_flush_sorted_basic_expression.test
+    // Mirrors: third_party/ducklake/test/sql/sorted_table/
+    // data_inlining_flush_sorted_basic_expression.test
     //
     // Storage contract:
     // - Expression sort keys are opaque DuckDB expressions to the catalog.
-    // - Storage must round-trip the expression text and sort direction unchanged.
+    // - Storage must round-trip the expression text and sort direction
+    //   unchanged.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -150,12 +153,14 @@ fn mirrors_sorted_flush_expression_test_expression_sort_metadata_is_saved_verbat
 #[test]
 fn mirrors_count_star_optimization_inlined_test_inline_payloads_survive_schema_evolution_and_deletes()
  {
-    // Mirrors: third_party/ducklake/test/sql/stats/count_star_optimization_inlined.test
+    // Mirrors: third_party/ducklake/test/sql/stats/
+    // count_star_optimization_inlined.test
     //
     // Storage contract:
-    // - Inline payloads for successive schema versions are table-scoped and visible together.
-    // - Inline deletes are recorded without corrupting the payload visibility for other schema
-    //   versions.
+    // - Inline payloads for successive schema versions are table-scoped and
+    //   visible together.
+    // - Inline deletes are recorded without corrupting the payload visibility
+    //   for other schema versions.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -218,7 +223,8 @@ fn mirrors_filter_pushdown_test_file_column_stats_are_saved_for_pruning() {
     //
     // Storage contract:
     // - DuckLake supplies min/max/null stats for each file and column.
-    // - Storage must return all stats rows so DuckDB can prune files for filters.
+    // - Storage must return all stats rows so DuckDB can prune files for
+    //   filters.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -280,7 +286,8 @@ fn mirrors_filter_stress_test_many_imported_file_stats_are_indexed_by_table_and_
     //
     // Storage contract:
     // - Imported file stats must be independently addressable for every file.
-    // - Null counts and min/max values must not be dropped for high-file-count tables.
+    // - Null counts and min/max values must not be dropped for high-file-count
+    //   tables.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -381,11 +388,13 @@ fn mirrors_global_stats_test_stats_for_multiple_types_are_persisted() {
 #[test]
 fn mirrors_min_max_nested_leaf_rewrite_corruption_test_unrewritten_nested_leaf_stats_remain_visible()
  {
-    // Mirrors: third_party/ducklake/test/sql/stats/min_max_nested_leaf_rewrite_corruption.test
+    // Mirrors: third_party/ducklake/test/sql/stats/
+    // min_max_nested_leaf_rewrite_corruption.test
     //
     // Storage contract:
     // - Rewriting one file must not delete stats rows for untouched files.
-    // - Nested leaf column ids are ordinary column ids to storage and must round-trip.
+    // - Nested leaf column ids are ordinary column ids to storage and must
+    //   round-trip.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -436,11 +445,12 @@ fn mirrors_min_max_nested_leaf_rewrite_corruption_test_unrewritten_nested_leaf_s
 
 #[test]
 fn mirrors_min_max_optimization_compaction_test_rewrite_can_store_tightened_replacement_stats() {
-    // Mirrors: third_party/ducklake/test/sql/stats/min_max_optimization_compaction.test
+    // Mirrors: third_party/ducklake/test/sql/stats/
+    // min_max_optimization_compaction.test
     //
     // Storage contract:
-    // - After DuckLake rewrites deletes away, replacement file stats represent the tightened row
-    //   range and must be returned to optimizer callers.
+    // - After DuckLake rewrites deletes away, replacement file stats represent
+    //   the tightened row range and must be returned to optimizer callers.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -484,12 +494,13 @@ fn mirrors_min_max_optimization_compaction_test_rewrite_can_store_tightened_repl
 
 #[test]
 fn mirrors_min_max_optimization_deletes_test_delete_file_keeps_original_stats_until_rewrite() {
-    // Mirrors: third_party/ducklake/test/sql/stats/min_max_optimization_deletes.test
+    // Mirrors: third_party/ducklake/test/sql/stats/
+    // min_max_optimization_deletes.test
     //
     // Storage contract:
     // - Delete files do not mutate the source file stats.
-    // - The active delete file is returned with the source so the caller can avoid unsafe min/max
-    //   folding until rewrite removes it.
+    // - The active delete file is returned with the source so the caller can
+    //   avoid unsafe min/max folding until rewrite removes it.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -529,7 +540,8 @@ fn mirrors_topn_file_pruning_test_timestamp_stats_keep_ordered_file_ranges() {
     //
     // Storage contract:
     // - Top-N pruning depends on ordered min/max stats for timestamp columns.
-    // - Storage must return the file ranges without reordering or coalescing them.
+    // - Storage must return the file ranges without reordering or coalescing
+    //   them.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -610,12 +622,14 @@ fn mirrors_topn_file_pruning_test_timestamp_stats_keep_ordered_file_ranges() {
 
 #[test]
 fn mirrors_table_insertions_test_insert_change_feed_survives_merge_and_update() {
-    // Mirrors: third_party/ducklake/test/sql/table_changes/ducklake_table_insertions.test
+    // Mirrors: third_party/ducklake/test/sql/table_changes/
+    // ducklake_table_insertions.test
     //
     // Storage contract:
     // - Insert commits are indexed as added data-file changes.
-    // - Merge-adjacent compaction is reorganization; later update-like mutations add new files and
-    //   preserve earlier insertion changes for change-feed reads.
+    // - Merge-adjacent compaction is reorganization; later update-like
+    //   mutations add new files and preserve earlier insertion changes for
+    //   change-feed reads.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -664,11 +678,13 @@ fn mirrors_table_insertions_test_insert_change_feed_survives_merge_and_update() 
 
 #[test]
 fn mirrors_window_partition_row_loss_test_change_feed_returns_all_insert_and_delete_rows() {
-    // Mirrors: third_party/ducklake/test/sql/table_changes/window_partition_row_loss.test
+    // Mirrors: third_party/ducklake/test/sql/table_changes/
+    // window_partition_row_loss.test
     //
     // Storage contract:
-    // - Change-feed APIs must return every inserted and deleted scan row; consumers may then apply
-    //   SQL window functions without storage dropping duplicates.
+    // - Change-feed APIs must return every inserted and deleted scan row;
+    //   consumers may then apply SQL window functions without storage dropping
+    //   duplicates.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -718,8 +734,8 @@ fn mirrors_time_travel_views_test_view_visibility_tracks_snapshot_order() {
     //
     // Storage contract:
     // - Views are versioned catalog objects.
-    // - Reads at older snapshots should return only views that existed at that snapshot, including
-    //   views in schemas that are later dropped.
+    // - Reads at older snapshots should return only views that existed at that
+    //   snapshot, including views in schemas that are later dropped.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     initialize_catalog_if_absent(&mut kv, catalog).unwrap();
@@ -760,10 +776,12 @@ fn mirrors_time_travel_views_test_view_visibility_tracks_snapshot_order() {
 
 #[test]
 fn mirrors_concurrent_table_creation_test_different_table_ids_and_names_can_commit() {
-    // Mirrors: third_party/ducklake/test/sql/transaction/concurrent_table_creation.test
+    // Mirrors: third_party/ducklake/test/sql/transaction/
+    // concurrent_table_creation.test
     //
     // Storage contract:
-    // - Independent table creations with distinct ids/names are independent metadata writes.
+    // - Independent table creations with distinct ids/names are independent
+    //   metadata writes.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     initialize_catalog_if_absent(&mut kv, catalog).unwrap();
@@ -787,11 +805,12 @@ fn mirrors_concurrent_table_creation_test_different_table_ids_and_names_can_comm
 
 #[test]
 fn mirrors_partition_commit_retry_remap_test_partition_values_reference_committed_partition_ids() {
-    // Mirrors: third_party/ducklake/test/sql/transaction/partition_commit_retry_remap.test
+    // Mirrors: third_party/ducklake/test/sql/transaction/
+    // partition_commit_retry_remap.test
     //
     // Storage contract:
-    // - After a retry, partition metadata must use committed table partition ids, not temporary
-    //   transaction-local ids.
+    // - After a retry, partition metadata must use committed table partition
+    //   ids, not temporary transaction-local ids.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -837,11 +856,13 @@ fn mirrors_partition_commit_retry_remap_test_partition_values_reference_committe
 
 #[test]
 fn mirrors_transaction_conflict_cleanup_test_conflicting_create_does_not_commit_metadata() {
-    // Mirrors: third_party/ducklake/test/sql/transaction/transaction_conflict_cleanup.test
+    // Mirrors: third_party/ducklake/test/sql/transaction/
+    // transaction_conflict_cleanup.test
     //
     // Storage contract:
-    // - If a conflicting transaction is rejected before catalog commit, no table/data-file rows
-    //   for that failed attempt should be visible in storage.
+    // - If a conflicting transaction is rejected before catalog commit, no
+    //   table/data-file rows for that failed attempt should be visible in
+    //   storage.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     initialize_catalog_if_absent(&mut kv, catalog).unwrap();
@@ -866,7 +887,8 @@ fn mirrors_transaction_conflict_cleanup_test_conflicting_create_does_not_commit_
 #[test]
 fn mirrors_transaction_conflicts_test_same_name_table_create_conflicts_but_different_schema_names_do_not()
  {
-    // Mirrors: third_party/ducklake/test/sql/transaction/transaction_conflicts.test
+    // Mirrors: third_party/ducklake/test/sql/transaction/transaction_conflicts.
+    // test
     //
     // Storage contract:
     // - Current table names conflict only within the same schema.
@@ -932,10 +954,12 @@ fn mirrors_transaction_conflicts_test_same_name_table_create_conflicts_but_diffe
 
 #[test]
 fn mirrors_transaction_conflicts_delete_test_delete_conflicts_with_schema_or_drop_changes() {
-    // Mirrors: third_party/ducklake/test/sql/transaction/transaction_conflicts_delete.test
+    // Mirrors: third_party/ducklake/test/sql/transaction/
+    // transaction_conflicts_delete.test
     //
     // Storage contract:
-    // - A delete/rewrite planned before a table schema change or drop must be rejected.
+    // - A delete/rewrite planned before a table schema change or drop must be
+    //   rejected.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -965,7 +989,8 @@ fn mirrors_transaction_conflicts_delete_test_delete_conflicts_with_schema_or_dro
 
 #[test]
 fn mirrors_transaction_conflicts_view_test_view_name_and_comment_conflicts_are_rejected() {
-    // Mirrors: third_party/ducklake/test/sql/transaction/transaction_conflicts_view.test
+    // Mirrors: third_party/ducklake/test/sql/transaction/
+    // transaction_conflicts_view.test
     //
     // Storage contract:
     // - Current views should have unique names within a schema.
@@ -981,11 +1006,12 @@ fn mirrors_transaction_conflicts_view_test_view_name_and_comment_conflicts_are_r
 
 #[test]
 fn mirrors_transaction_insert_update_delete_test_one_commit_can_add_and_delete_metadata() {
-    // Mirrors: third_party/ducklake/test/sql/transaction/transaction_insert_update_delete.test
+    // Mirrors: third_party/ducklake/test/sql/transaction/
+    // transaction_insert_update_delete.test
     //
     // Storage contract:
-    // - A transaction with insert, update, and delete is one metadata mutation containing new data
-    //   files and delete metadata together.
+    // - A transaction with insert, update, and delete is one metadata mutation
+    //   containing new data files and delete metadata together.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -1016,7 +1042,8 @@ fn mirrors_list_type_test_nested_list_column_stats_are_persisted() {
     // Mirrors: third_party/ducklake/test/sql/types/list.test
     //
     // Storage contract:
-    // - List column type names and list-element stats are ordinary table/stat metadata.
+    // - List column type names and list-element stats are ordinary table/stat
+    //   metadata.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -1058,7 +1085,8 @@ fn mirrors_struct_type_test_nested_struct_leaf_stats_are_persisted() {
     // Mirrors: third_party/ducklake/test/sql/types/struct.test
     //
     // Storage contract:
-    // - Struct column type names and leaf stats must survive table metadata round-trips.
+    // - Struct column type names and leaf stats must survive table metadata
+    //   round-trips.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -1097,7 +1125,8 @@ fn mirrors_basic_update_test_update_commit_preserves_previous_snapshot_visibilit
     //
     // Storage contract:
     // - An update saves replacement data and delete metadata.
-    // - Time travel before the update still sees the original file without the later delete.
+    // - Time travel before the update still sees the original file without the
+    //   later delete.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -1137,8 +1166,10 @@ fn mirrors_update_partitioning_test_updated_partition_file_keeps_new_partition_v
     // Mirrors: third_party/ducklake/test/sql/update/update_partitioning.test
     //
     // Storage contract:
-    // - Updating a partition key creates a replacement data file with the new partition value.
-    // - The old partition file remains visible for time travel before the update.
+    // - Updating a partition key creates a replacement data file with the new
+    //   partition value.
+    // - The old partition file remains visible for time travel before the
+    //   update.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -1210,7 +1241,8 @@ fn mirrors_view_schema_test_schema_scoped_views_are_versioned_with_schema_lifecy
     //
     // Storage contract:
     // - Views with the same name in different schemas are distinct objects.
-    // - Dropping schemas/views removes them from current visibility but not from prior snapshots.
+    // - Dropping schemas/views removes them from current visibility but not
+    //   from prior snapshots.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     initialize_catalog_if_absent(&mut kv, catalog).unwrap();

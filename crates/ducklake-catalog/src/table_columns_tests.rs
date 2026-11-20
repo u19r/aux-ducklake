@@ -1,12 +1,11 @@
 #[cfg(test)]
 mod tests {
+    use super::super::{ColumnTypeChange, commit_change_table_column_types};
     use crate::{
         CatalogId, ColumnId, FakeOrderedCatalogKv, SchemaId, TableColumnRow, TableId, TableRow,
         commit_create_table_row, ids::CatalogOrderId, store::latest_snapshot,
         table_store::load_table_at,
     };
-
-    use super::super::{ColumnTypeChange, commit_change_table_column_types};
 
     #[test]
     fn given_type_change_with_composed_default_when_committed_then_replaces_full_column_version() {

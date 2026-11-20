@@ -401,7 +401,8 @@ impl FdbOrderedCatalogKv {
 
         let stage = RuntimeSpan::enter("method.fdb_data_mutation.CommitTransaction");
         let versionstamp = trx.get_versionstamp();
-        // A maybe-committed result must not reuse the preparation's absent receipt.
+        // A maybe-committed result must not reuse the preparation's absent
+        // receipt.
         crate::catalog_request_read_set::invalidate_after_mutation(catalog);
         if let Err(error) = commit_transaction(trx, attempt_id) {
             let error_class = classify_fdb_error(error);

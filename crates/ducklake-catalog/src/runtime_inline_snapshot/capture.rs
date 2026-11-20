@@ -1,13 +1,13 @@
-use super::{
-    accumulator::reconstruct_inline_current_rows_streaming,
-    capture_cache::{ByteBoundedCache, CaptureFlightRegistry},
-    history::InlineHistoryRequest,
-};
 use std::{
     collections::BTreeMap,
     sync::{Arc, OnceLock},
 };
 
+use super::{
+    accumulator::reconstruct_inline_current_rows_streaming,
+    capture_cache::{ByteBoundedCache, CaptureFlightRegistry},
+    history::InlineHistoryRequest,
+};
 use crate::{
     CatalogCacheNamespace, CatalogError, CatalogId, CatalogOrderId, CatalogResult,
     FdbOrderedCatalogKv, SchemaId, TableId, TableRow,
@@ -103,7 +103,8 @@ pub(crate) fn capture_inline_current_rows_at_read_version(
         return Ok(true);
     }
     inline_current_rows_capture_flights().get_or_build(key, || {
-        // Recheck after election: a delayed worker must reuse the completed capture.
+        // Recheck after election: a delayed worker must reuse the completed
+        // capture.
         if let Some(capture) = cache.get(&key) {
             return Ok(capture);
         }
@@ -135,7 +136,8 @@ impl InlineCaptureRequest<'_> {
         if self.table.inlined_data_tables.is_empty() {
             return Ok(None);
         }
-        // Reconstruct the logical snapshot without pinning an old FDB read version.
+        // Reconstruct the logical snapshot without pinning an old FDB read
+        // version.
         if latest_snapshot(self.kv, self.catalog)?
             .is_none_or(|latest| latest.order != self.snapshot_order)
         {
@@ -152,7 +154,8 @@ impl InlineCaptureRequest<'_> {
 
     fn build_capture(&self) -> CatalogResult<CapturedInlineRowsBySchema> {
         // Pin only while building the capture. Check uncached state because the
-        // logical read context can still name a snapshot from before a writer advanced.
+        // logical read context can still name a snapshot from before a writer
+        // advanced.
         let read_kv = self.kv.with_read_version()?;
         let request = InlineCaptureRequest {
             kv: &read_kv,
@@ -272,7 +275,8 @@ impl InlineCaptureRequest<'_> {
                 "inline read snapshot capture has no remaining row budget".to_owned(),
             ));
         }
-        // Current-row metadata supplies canonical sequences absent from the history index.
+        // Current-row metadata supplies canonical sequences absent from the
+        // history index.
         let current = list_inline_current_row_metadata_bounded(
             self.kv,
             self.catalog,

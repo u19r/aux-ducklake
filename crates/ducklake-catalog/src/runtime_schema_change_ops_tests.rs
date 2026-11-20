@@ -1,12 +1,11 @@
 #[cfg(test)]
 mod tests {
+    use super::super::{DdlPayload, ddl_base_snapshot};
     use crate::{
         CatalogId, ColumnId, ColumnRename, DuckLakeSnapshotId, FakeOrderedCatalogKv, SchemaId,
         TableColumnRow, TableId, TableRow, commit_append_table_columns, commit_create_table_row,
         initialize_catalog_if_absent, latest_snapshot, load_table_at,
     };
-
-    use super::super::{DdlPayload, ddl_base_snapshot};
 
     #[test]
     fn given_ddl_commit_snapshot_already_exists_when_loading_base_then_current_public_snapshot_is_used()

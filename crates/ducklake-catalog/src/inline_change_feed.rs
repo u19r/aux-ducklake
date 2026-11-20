@@ -1,4 +1,3 @@
-use crate::runtime_metrics::RuntimeMetricStage;
 #[cfg(feature = "runtime-metrics")]
 use crate::runtime_metrics::record_runtime_method_elapsed;
 use crate::{
@@ -16,6 +15,7 @@ use crate::{
         table_schema_kind_inline_row_change_scan_end,
         table_schema_kind_inline_row_change_scan_start,
     },
+    runtime_metrics::RuntimeMetricStage,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

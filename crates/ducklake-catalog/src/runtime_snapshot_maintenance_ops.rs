@@ -1,14 +1,13 @@
 use std::collections::BTreeSet;
 
+#[cfg(feature = "foundationdb")]
+use crate::expire_snapshots;
 use crate::{
     CatalogId, CatalogResult, DuckLakeSnapshotId, RawSnapshotSequence, SnapshotRow, list_snapshots,
     runtime_payload::payload_string_value, runtime_protocol::RuntimeCatalogBackend,
     runtime_snapshot_ops::parse_ducklake_snapshot_ids,
     runtime_snapshots::public_snapshot_order_span,
 };
-
-#[cfg(feature = "foundationdb")]
-use crate::expire_snapshots;
 
 pub(crate) fn expire_snapshots_for_runtime(
     _backend: RuntimeCatalogBackend,

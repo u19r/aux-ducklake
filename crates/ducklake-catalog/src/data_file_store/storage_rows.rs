@@ -1,7 +1,7 @@
-use crate::data_file_store::*;
 use crate::{
     CatalogId, CatalogResult, DataFileId, DataFileRow, DeleteFileId, DeleteFileRow, KvBatch,
     OrderedCatalogKv, RangeDirection, TableId,
+    data_file_store::*,
     ids::{CatalogOrderId, incomplete_fdb_order},
     keys::{
         current_delete_file_key, data_file_begin_prefix, data_file_key, delete_file_end_key,

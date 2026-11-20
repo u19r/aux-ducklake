@@ -1,6 +1,5 @@
 #[cfg(test)]
 mod tests {
-    use super::decode_test_text;
     use std::{collections::BTreeMap, time::Instant};
 
     use alloc_counter::{AllocationGuard, emit_report};
@@ -1382,9 +1381,9 @@ mod tests {
         )
         .unwrap();
 
-        let inline = decode_test_text(inline.into_owned()).unwrap();
-        let compaction = decode_test_text(compaction.into_owned()).unwrap();
-        let data = decode_test_text(data.into_owned()).unwrap();
+        let inline = decode_test_text(&inline).unwrap();
+        let compaction = decode_test_text(&compaction).unwrap();
+        let data = decode_test_text(&data).unwrap();
         assert!(inline.contains("table\t2\t1\tducklake_inlined_data_2_1"));
         assert!(compaction.contains("source_file\t2\t10"));
         assert!(compaction.contains("file\t0\t2\tmain/test2/rewrite.parquet"));
@@ -2293,8 +2292,8 @@ mod tests {
             std::env::remove_var(key);
         }
     }
-}
 
-fn decode_test_text(payload: impl AsRef<[u8]>) -> Result<String, std::str::Utf8Error> {
-    std::str::from_utf8(payload.as_ref()).map(str::to_owned)
+    fn decode_test_text(payload: impl AsRef<[u8]>) -> Result<String, std::str::Utf8Error> {
+        std::str::from_utf8(payload.as_ref()).map(str::to_owned)
+    }
 }

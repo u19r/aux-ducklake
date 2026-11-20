@@ -1,6 +1,5 @@
 #[cfg(test)]
 mod tests {
-    use super::decode_test_text;
     use std::{
         cell::{Cell, RefCell},
         collections::BTreeMap,
@@ -1285,8 +1284,8 @@ mod tests {
             CatalogOrderId::uuid_v7(0),
         )
     }
-}
 
-fn decode_test_text(payload: impl AsRef<[u8]>) -> Result<String, std::str::Utf8Error> {
-    std::str::from_utf8(payload.as_ref()).map(str::to_owned)
+    fn decode_test_text(payload: impl AsRef<[u8]>) -> Result<String, std::str::Utf8Error> {
+        std::str::from_utf8(payload.as_ref()).map(str::to_owned)
+    }
 }

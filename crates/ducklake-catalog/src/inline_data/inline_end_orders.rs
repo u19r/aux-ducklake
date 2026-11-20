@@ -1,3 +1,7 @@
+use std::collections::BTreeMap;
+#[cfg(not(test))]
+use std::sync::OnceLock;
+
 use super::inline_tables::{InlineTableChunkRow, record_inline_tables_stage};
 #[cfg(not(test))]
 use crate::{
@@ -10,9 +14,6 @@ use crate::{
     keys::{KeyFamily, family_prefix},
     runtime_metrics::RuntimeMetricStage,
 };
-use std::collections::BTreeMap;
-#[cfg(not(test))]
-use std::sync::OnceLock;
 
 #[cfg(not(test))]
 pub(super) fn invalidate_inline_end_orders(catalog: CatalogId) {

@@ -1,6 +1,7 @@
-use crate::runtime_protocol::RuntimePayload;
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write as _;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
+};
 
 #[cfg(not(test))]
 use crate::latest_snapshot;
@@ -9,7 +10,7 @@ use crate::{
     list_snapshots,
     maintenance::{ScheduledDataFileCleanupRow, ScheduledDeleteFileCleanupRow},
     runtime_metadata_ops::*,
-    runtime_protocol::RuntimeCatalogBackend,
+    runtime_protocol::{RuntimeCatalogBackend, RuntimePayload},
 };
 
 pub(crate) fn list_delete_file_rows(
@@ -118,9 +119,9 @@ pub(super) fn delete_file_rows_payload_with_semantic_begin(
             .unwrap_or_default();
         let end_snapshot =
             snapshot_sequence_for_optional_end_order(snapshots, row.validity.end_order);
-        write!(
+        writeln!(
             out,
-            "delete_file\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "delete_file\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             row.delete_file_id.0,
             row.data_file_id.0,
             row.path,
@@ -173,14 +174,14 @@ pub(super) fn append_delete_file_mirror_inserts(
     let Some(select) = render_mirror_select(values) else {
         return;
     };
-    write!(
+    writeln!(
         out,
         "INSERT INTO {{METADATA_CATALOG}}.ducklake_delete_file SELECT delta.* REPLACE \
          (file.table_id AS table_id) FROM ({select}) AS delta(delete_file_id, table_id, \
          begin_snapshot, end_snapshot, data_file_id, path, path_is_relative, format, \
          delete_count, file_size_bytes, footer_size, encryption_key, partial_max, \
          row_group_count) LEFT JOIN {{METADATA_CATALOG}}.ducklake_data_file file USING \
-         (data_file_id);\n"
+         (data_file_id);"
     )
     .expect("writing to String cannot fail");
 }

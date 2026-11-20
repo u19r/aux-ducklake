@@ -1,6 +1,6 @@
-use super::capture::{CapturedInlineRows, ensure_inline_capture_bound};
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::capture::{CapturedInlineRows, ensure_inline_capture_bound};
 use crate::{
     CatalogError, CatalogOrderId, CatalogResult, RawSnapshotSequence,
     inline_data::{INLINE_PAYLOAD_LIMIT_BYTES, InlineCurrentRow, InlineTableChunkRow},

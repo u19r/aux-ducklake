@@ -18,10 +18,12 @@ fn mirrors_catalog_schema_test_schema_create_drop_recreate_and_table_ownership()
     // Mirrors: third_party/ducklake/test/sql/catalog/schema.test
     //
     // Storage contract:
-    // - DuckLake creates schemas, stores tables under those schema ids, drops schemas, and later
-    //   recreates a schema name with a new schema row.
-    // - Listing schemas at the latest snapshot must reflect only currently visible schemas.
-    // - Tables keep their schema id, so dropping one schema must not affect another schema's table.
+    // - DuckLake creates schemas, stores tables under those schema ids, drops
+    //   schemas, and later recreates a schema name with a new schema row.
+    // - Listing schemas at the latest snapshot must reflect only currently
+    //   visible schemas.
+    // - Tables keep their schema id, so dropping one schema must not affect
+    //   another schema's table.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     initialize_catalog_if_absent(&mut kv, catalog).unwrap();
@@ -66,13 +68,15 @@ fn mirrors_catalog_schema_test_schema_create_drop_recreate_and_table_ownership()
 
 #[test]
 fn mirrors_checkpoint_ducklake_test_checkpoint_compaction_keeps_current_files_and_cleanup_queue() {
-    // Mirrors: third_party/ducklake/test/sql/checkpoint/checkpoint_ducklake.test
+    // Mirrors: third_party/ducklake/test/sql/checkpoint/checkpoint_ducklake.
+    // test
     //
     // Storage contract:
-    // - Checkpoint-like work materializes inline rows, rewrites deleted data, and merges adjacent
-    //   files.
-    // - Current listings must return only the replacement files, while old source files are queued
-    //   for cleanup without deleting the active delete file metadata.
+    // - Checkpoint-like work materializes inline rows, rewrites deleted data,
+    //   and merges adjacent files.
+    // - Current listings must return only the replacement files, while old
+    //   source files are queued for cleanup without deleting the active delete
+    //   file metadata.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let t = TableId(1);
@@ -191,13 +195,14 @@ fn mirrors_checkpoint_ducklake_test_checkpoint_compaction_keeps_current_files_an
 #[test]
 fn mirrors_checkpoint_updates_interleaved_test_uncommitted_checkpoint_writes_are_not_storage_writes()
  {
-    // Mirrors: third_party/ducklake/test/sql/checkpoint/checkpoint_updates_interleaved.test
+    // Mirrors: third_party/ducklake/test/sql/checkpoint/
+    // checkpoint_updates_interleaved.test
     //
     // Storage contract:
-    // - A rollback around checkpoint work means DuckLake must not commit those metadata writes to
-    //   storage.
-    // - The committed inserts before and after checkpoint calls should remain visible in storage
-    //   as ordinary append metadata.
+    // - A rollback around checkpoint work means DuckLake must not commit those
+    //   metadata writes to storage.
+    // - The committed inserts before and after checkpoint calls should remain
+    //   visible in storage as ordinary append metadata.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -235,11 +240,13 @@ fn mirrors_checkpoint_updates_interleaved_test_uncommitted_checkpoint_writes_are
 
 #[test]
 fn mirrors_many_inserts_transaction_test_many_files_from_one_transaction_are_all_visible() {
-    // Mirrors: third_party/ducklake/test/sql/checkpoint/many_inserts_transaction.test
+    // Mirrors: third_party/ducklake/test/sql/checkpoint/
+    // many_inserts_transaction.test
     //
     // Storage contract:
     // - DuckLake may commit multiple inserted files from one transaction.
-    // - After checkpoint, the storage layer still returns all current files for the table.
+    // - After checkpoint, the storage layer still returns all current files for
+    //   the table.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -303,9 +310,10 @@ fn mirrors_cleanup_old_files_test_compaction_cleanup_drains_scheduled_files() {
     // Mirrors: third_party/ducklake/test/sql/cleanup/cleanup_old_files.test
     //
     // Storage contract:
-    // - Rewrite and merge compactions schedule replaced data/delete files for cleanup.
-    // - Removing old files should drain those cleanup queues and leave current replacement
-    //   metadata visible.
+    // - Rewrite and merge compactions schedule replaced data/delete files for
+    //   cleanup.
+    // - Removing old files should drain those cleanup queues and leave current
+    //   replacement metadata visible.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -397,7 +405,8 @@ fn mirrors_cleanup_old_files_test_compaction_cleanup_drains_scheduled_files() {
 
 #[test]
 fn mirrors_rename_view_preserves_comment_in_transaction_test_comment_survives_view_rename() {
-    // Mirrors: third_party/ducklake/test/sql/comments/rename_view_preserves_comment_in_transaction.test
+    // Mirrors: third_party/ducklake/test/sql/comments/
+    // rename_view_preserves_comment_in_transaction.test
     //
     // Storage contract:
     // - DuckLake creates a view, changes its comment, and renames it.

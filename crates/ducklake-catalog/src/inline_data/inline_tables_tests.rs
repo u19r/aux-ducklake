@@ -4,14 +4,13 @@ mod tests {
 
     use alloc_counter::{AllocationGuard, emit_report};
 
+    use super::super::{
+        assemble_inline_payload, inline_table_chunks, register_inline_table_payload,
+    };
     use crate::{
         CatalogId, DataFileId, DataFileRow, FakeOrderedCatalogKv, InlineTableFlush,
         RawSnapshotSequence, SchemaId, TableId, commit_data_mutation, initialize_catalog_if_absent,
         latest_snapshot, list_data_files,
-    };
-
-    use super::super::{
-        assemble_inline_payload, inline_table_chunks, register_inline_table_payload,
     };
 
     fn large_inline_payload() -> Vec<u8> {

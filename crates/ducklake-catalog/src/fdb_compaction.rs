@@ -2,10 +2,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[cfg(test)]
 use crate::fdb_cleanup::scan_range_all_with_kv_budget;
-use crate::typed_scalar::{
-    CatalogScalarType, compare_typed_scalars, normalize_catalog_scalar_type,
-    typed_extrema_are_invalid,
-};
 use crate::{
     CatalogError, CatalogId, CatalogOrderId, CatalogOrderKind, CatalogResult, ColumnId,
     DataCommitIntent, DataFileChange, DataFileChangeKind, DataFileId, DataFileRow, DeleteFileId,
@@ -26,6 +22,10 @@ use crate::{
     kv::OrderedCatalogKv,
     store::latest_snapshot,
     table_store::load_current_table_row,
+    typed_scalar::{
+        CatalogScalarType, compare_typed_scalars, normalize_catalog_scalar_type,
+        typed_extrema_are_invalid,
+    },
 };
 
 impl FdbOrderedCatalogKv {

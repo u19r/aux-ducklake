@@ -14,12 +14,14 @@ use ducklake_catalog::{
 
 #[test]
 fn mirrors_insert_delete_loop_test_each_rewrite_replaces_deleted_file_with_live_rows() {
-    // Mirrors: third_party/ducklake/test/sql/rewrite_data_files/insert_delete_loop.test
+    // Mirrors: third_party/ducklake/test/sql/rewrite_data_files/
+    // insert_delete_loop.test
     //
     // Storage contract:
-    // - Every loop appends one file, saves a delete file against it, and rewrites that source file.
-    // - Storage must end the source and delete file, keep one replacement per loop current, and
-    //   never leak a current delete file after rewrite.
+    // - Every loop appends one file, saves a delete file against it, and
+    //   rewrites that source file.
+    // - Storage must end the source and delete file, keep one replacement per
+    //   loop current, and never leak a current delete file after rewrite.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -66,12 +68,16 @@ fn mirrors_insert_delete_loop_test_each_rewrite_replaces_deleted_file_with_live_
 
 #[test]
 fn mirrors_last_snapshot_multiple_inserts_test_rewrite_keeps_historical_visibility_windows() {
-    // Mirrors: third_party/ducklake/test/sql/rewrite_data_files/last_snapshot_multiple_inserts.test
+    // Mirrors: third_party/ducklake/test/sql/rewrite_data_files/
+    // last_snapshot_multiple_inserts.test
     //
     // Storage contract:
-    // - Interleaved inserts and deletes produce several historical visibility windows.
-    // - Rewrite-delete compaction replaces only the deleted source files in the current view.
-    // - Reads at snapshots captured before the rewrite still resolve through the original rows.
+    // - Interleaved inserts and deletes produce several historical visibility
+    //   windows.
+    // - Rewrite-delete compaction replaces only the deleted source files in the
+    //   current view.
+    // - Reads at snapshots captured before the rewrite still resolve through
+    //   the original rows.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -118,13 +124,15 @@ fn mirrors_last_snapshot_multiple_inserts_test_rewrite_keeps_historical_visibili
 
 #[test]
 fn mirrors_rewrite_deletion_vectors_test_rewrite_closes_multi_snapshot_delete_file() {
-    // Mirrors: third_party/ducklake/test/sql/rewrite_data_files/rewrite_deletion_vectors.test
+    // Mirrors: third_party/ducklake/test/sql/rewrite_data_files/
+    // rewrite_deletion_vectors.test
     //
     // Storage contract:
-    // - Replacement delete files may preserve the first delete begin snapshot while accumulating
-    //   later deletes.
-    // - Rewrite-delete compaction must end the active delete file and source data file at the
-    //   rewrite snapshot, while preserving time-travel visibility before that rewrite.
+    // - Replacement delete files may preserve the first delete begin snapshot
+    //   while accumulating later deletes.
+    // - Rewrite-delete compaction must end the active delete file and source
+    //   data file at the rewrite snapshot, while preserving time-travel
+    //   visibility before that rewrite.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -183,13 +191,14 @@ fn mirrors_rewrite_deletion_vectors_test_rewrite_closes_multi_snapshot_delete_fi
 
 #[test]
 fn mirrors_last_snapshot_merge_rewrite_test_merge_and_rewrite_orders_both_preserve_history() {
-    // Mirrors: third_party/ducklake/test/sql/rewrite_data_files/test_last_snapshot_merge_rewrite.test
+    // Mirrors: third_party/ducklake/test/sql/rewrite_data_files/
+    // test_last_snapshot_merge_rewrite.test
     //
     // Storage contract:
-    // - DuckLake may rewrite deletes before merge-adjacent compaction, or merge unrelated files
-    //   before rewriting deleted files.
-    // - Both paths should leave the same current row count and preserve the captured historical
-    //   visibility windows.
+    // - DuckLake may rewrite deletes before merge-adjacent compaction, or merge
+    //   unrelated files before rewriting deleted files.
+    // - Both paths should leave the same current row count and preserve the
+    //   captured historical visibility windows.
     for rewrite_first in [true, false] {
         let mut kv = FakeOrderedCatalogKv::new();
         let catalog = CatalogId(1);
@@ -255,12 +264,14 @@ fn mirrors_last_snapshot_merge_rewrite_test_merge_and_rewrite_orders_both_preser
 
 #[test]
 fn mirrors_last_snapshot_rewrite_test_multiple_rewrites_close_old_metadata_but_keep_snapshots() {
-    // Mirrors: third_party/ducklake/test/sql/rewrite_data_files/test_last_snapshot_rewrite.test
+    // Mirrors: third_party/ducklake/test/sql/rewrite_data_files/
+    // test_last_snapshot_rewrite.test
     //
     // Storage contract:
-    // - Repeated rewrite-delete commits should end exactly the source data/delete file metadata
-    //   for that rewrite.
-    // - Earlier snapshots still see the data files and delete-file windows that existed then.
+    // - Repeated rewrite-delete commits should end exactly the source
+    //   data/delete file metadata for that rewrite.
+    // - Earlier snapshots still see the data files and delete-file windows that
+    //   existed then.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -299,8 +310,9 @@ fn mirrors_last_snapshot_rewrite_test_multiple_rewrites_close_old_metadata_but_k
     assert_visible_count_at(&kv, catalog, table, second_rewrite.order, 3001);
     assert_visible_count_at(&kv, catalog, table, after_delete_5.order, 3000);
     assert_eq!(current_row_count(&kv, catalog, table), 3000);
-    // Each delete file has been superseded by a later cumulative delete or by a rewrite of
-    // its source file, so all five are eligible once the replacement data files are scheduled.
+    // Each delete file has been superseded by a later cumulative delete or by a
+    // rewrite of its source file, so all five are eligible once the replacement
+    // data files are scheduled.
     assert_eq!(
         list_old_delete_files_for_cleanup(&kv, catalog)
             .unwrap()
@@ -318,11 +330,14 @@ fn mirrors_last_snapshot_rewrite_test_multiple_rewrites_close_old_metadata_but_k
 
 #[test]
 fn mirrors_rewrite_concurrency_test_stale_parallel_rewrite_is_rejected() {
-    // Mirrors: third_party/ducklake/test/sql/rewrite_data_files/test_rewrite_concurrency.test
+    // Mirrors: third_party/ducklake/test/sql/rewrite_data_files/
+    // test_rewrite_concurrency.test
     //
     // Storage contract:
-    // - Two concurrent rewrites planned from the same base snapshot target the same deleted file.
-    // - The first commit succeeds; the second must see the rewrite/delete conflict and fail.
+    // - Two concurrent rewrites planned from the same base snapshot target the
+    //   same deleted file.
+    // - The first commit succeeds; the second must see the rewrite/delete
+    //   conflict and fail.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -391,11 +406,13 @@ fn mirrors_rewrite_concurrency_test_stale_parallel_rewrite_is_rejected() {
 
 #[test]
 fn mirrors_rewrite_db_test_database_wide_rewrite_keeps_table_metadata_isolated() {
-    // Mirrors: third_party/ducklake/test/sql/rewrite_data_files/test_rewrite_db.test
+    // Mirrors: third_party/ducklake/test/sql/rewrite_data_files/
+    // test_rewrite_db.test
     //
     // Storage contract:
     // - A database-wide rewrite is a sequence of per-table rewrite commits.
-    // - Rewriting one table must not close or mutate the other table's current data files.
+    // - Rewriting one table must not close or mutate the other table's current
+    //   data files.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table_a = TableId(1);
@@ -436,12 +453,14 @@ fn mirrors_rewrite_db_test_database_wide_rewrite_keeps_table_metadata_isolated()
 
 #[test]
 fn mirrors_rewrite_inlined_file_deletes_test_inline_only_deletions_make_file_rewritable() {
-    // Mirrors: third_party/ducklake/test/sql/rewrite_data_files/test_rewrite_inlined_file_deletes.test
+    // Mirrors: third_party/ducklake/test/sql/rewrite_data_files/
+    // test_rewrite_inlined_file_deletes.test
     //
     // Storage contract:
-    // - A source file with inline file deletions but no physical delete file is still eligible for
-    //   rewrite-delete compaction.
-    // - The replacement starts at the rewrite snapshot and becomes the only current data file.
+    // - A source file with inline file deletions but no physical delete file is
+    //   still eligible for rewrite-delete compaction.
+    // - The replacement starts at the rewrite snapshot and becomes the only
+    //   current data file.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -480,12 +499,13 @@ fn mirrors_rewrite_inlined_file_deletes_test_inline_only_deletions_make_file_rew
 
 #[test]
 fn mirrors_rewrite_inlined_file_deletes_add_files_test_imported_file_with_inline_delete_rewrites() {
-    // Mirrors: third_party/ducklake/test/sql/rewrite_data_files/test_rewrite_inlined_file_deletes_add_files.test
+    // Mirrors: third_party/ducklake/test/sql/rewrite_data_files/
+    // test_rewrite_inlined_file_deletes_add_files.test
     //
     // Storage contract:
     // - Imported files are just data-file metadata once DuckLake saves them.
-    // - Inline-only deletes on imported files should trigger the same rewrite path as ordinary
-    //   table-created files.
+    // - Inline-only deletes on imported files should trigger the same rewrite
+    //   path as ordinary table-created files.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -522,12 +542,13 @@ fn mirrors_rewrite_inlined_file_deletes_add_files_test_imported_file_with_inline
 
 #[test]
 fn mirrors_rewrite_merge_adjacent_test_rewritten_file_can_later_merge_with_clean_files() {
-    // Mirrors: third_party/ducklake/test/sql/rewrite_data_files/test_rewrite_merge_adjacent.test
+    // Mirrors: third_party/ducklake/test/sql/rewrite_data_files/
+    // test_rewrite_merge_adjacent.test
     //
     // Storage contract:
     // - Rewrite-delete compaction applies deletes to one source file.
-    // - The rewritten replacement is then a clean current data file and can participate in a
-    //   merge-adjacent compaction with other current files.
+    // - The rewritten replacement is then a clean current data file and can
+    //   participate in a merge-adjacent compaction with other current files.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -566,14 +587,16 @@ fn mirrors_rewrite_merge_adjacent_test_rewritten_file_can_later_merge_with_clean
 fn given_rewrite_replacement_uses_local_row_ids_when_source_starts_later_then_storage_normalizes_to_global_range()
  {
     // Mirrors the runtime request shape from:
-    // third_party/ducklake/test/sql/rewrite_data_files/test_rewrite_merge_adjacent.test
+    // third_party/ducklake/test/sql/rewrite_data_files/
+    // test_rewrite_merge_adjacent.test
     //
     // Storage contract:
-    // - DuckLake asks metadata storage to replace source file 3, whose global row-id range starts
-    //   at 2.
-    // - If the replacement payload uses file-local row ids starting at 0, storage must save the
-    //   replacement in the same global row-id space as the source, otherwise later compaction sees
-    //   a false overlap with unrelated files.
+    // - DuckLake asks metadata storage to replace source file 3, whose global
+    //   row-id range starts at 2.
+    // - If the replacement payload uses file-local row ids starting at 0,
+    //   storage must save the replacement in the same global row-id space as
+    //   the source, otherwise later compaction sees a false overlap with
+    //   unrelated files.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -622,11 +645,13 @@ fn given_rewrite_replacement_uses_local_row_ids_when_source_starts_later_then_st
 
 #[test]
 fn mirrors_rewrite_partitioning_test_rewrite_preserves_replacement_partition_values() {
-    // Mirrors: third_party/ducklake/test/sql/rewrite_data_files/test_rewrite_partitioning.test
+    // Mirrors: third_party/ducklake/test/sql/rewrite_data_files/
+    // test_rewrite_partitioning.test
     //
     // Storage contract:
     // - DuckLake rewrites deleted files partition group by partition group.
-    // - Replacement data files must keep the partition value rows supplied with the rewrite.
+    // - Replacement data files must keep the partition value rows supplied with
+    //   the rewrite.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -695,12 +720,14 @@ fn mirrors_rewrite_partitioning_test_rewrite_preserves_replacement_partition_val
 
 #[test]
 fn mirrors_rewrite_preserves_row_id_test_replacements_keep_original_row_id_ranges() {
-    // Mirrors: third_party/ducklake/test/sql/rewrite_data_files/test_rewrite_preserves_row_id.test
+    // Mirrors: third_party/ducklake/test/sql/rewrite_data_files/
+    // test_rewrite_preserves_row_id.test
     //
     // Storage contract:
-    // - Rewriting a data file with deletes must keep row-id lineage in the replacement file.
-    // - Later inserts use row-id ranges after the existing maximum, not after the compacted row
-    //   count.
+    // - Rewriting a data file with deletes must keep row-id lineage in the
+    //   replacement file.
+    // - Later inserts use row-id ranges after the existing maximum, not after
+    //   the compacted row count.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -728,12 +755,13 @@ fn mirrors_rewrite_preserves_row_id_test_replacements_keep_original_row_id_range
 
 #[test]
 fn mirrors_rewrite_target_file_size_test_storage_accepts_prefiltered_rewrite_groups() {
-    // Mirrors: third_party/ducklake/test/sql/rewrite_data_files/test_rewrite_target_file_size.test
+    // Mirrors: third_party/ducklake/test/sql/rewrite_data_files/
+    // test_rewrite_target_file_size.test
     //
     // Storage contract:
     // - Target-file-size planning is done by DuckLake before it calls storage.
-    // - Storage must apply whatever source group and replacement files it is given, preserving
-    //   current file count and closing delete files.
+    // - Storage must apply whatever source group and replacement files it is
+    //   given, preserving current file count and closing delete files.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -800,12 +828,14 @@ fn mirrors_rewrite_target_file_size_test_storage_accepts_prefiltered_rewrite_gro
 
 #[test]
 fn mirrors_rewrite_transaction_conflict_test_delete_and_rewrite_conflict_but_insert_does_not() {
-    // Mirrors: third_party/ducklake/test/sql/rewrite_data_files/test_rewrite_transaction_conflict.test
+    // Mirrors: third_party/ducklake/test/sql/rewrite_data_files/
+    // test_rewrite_transaction_conflict.test
     //
     // Storage contract:
-    // - Delete/rewrite and rewrite/rewrite races against the same table must be rejected.
-    // - A concurrent insert after a rewrite base does not mutate the source files and should not
-    //   conflict with the rewrite.
+    // - Delete/rewrite and rewrite/rewrite races against the same table must be
+    //   rejected.
+    // - A concurrent insert after a rewrite base does not mutate the source
+    //   files and should not conflict with the rewrite.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -891,7 +921,8 @@ fn mirrors_row_id_test_storage_rejects_current_row_id_overlap_and_keeps_gaps_aft
     // Storage contract:
     // - Committed data-file row-id ranges are stable storage metadata.
     // - Rewrites preserve gaps by using the row-id start DuckLake supplies.
-    // - New current files may not overlap current row-id ranges for the same table.
+    // - New current files may not overlap current row-id ranges for the same
+    //   table.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -927,9 +958,11 @@ fn mirrors_retry_commit_failure_test_storage_rejects_stale_commit_and_accepts_re
     // Mirrors: third_party/ducklake/test/sql/retry/commit_failure.test
     //
     // Storage contract:
-    // - The retry loop lives above storage, but storage must give deterministic conflict results.
-    // - A stale rewrite attempt is rejected; the same logical work retried from the latest base is
-    //   accepted when the source file is still current and deleted.
+    // - The retry loop lives above storage, but storage must give deterministic
+    //   conflict results.
+    // - A stale rewrite attempt is rejected; the same logical work retried from
+    //   the latest base is accepted when the source file is still current and
+    //   deleted.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -981,9 +1014,10 @@ fn mirrors_max_retry_count_test_storage_conflict_signal_is_stable_for_retry_budg
     // Mirrors: third_party/ducklake/test/sql/settings/max_retry_count.test
     //
     // Storage contract:
-    // - `ducklake_max_retry_count` is a DuckDB setting, but its useful behavior depends on storage
-    //   reporting conflicts consistently.
-    // - Repeated stale attempts against the same base should all fail without changing metadata.
+    // - `ducklake_max_retry_count` is a DuckDB setting, but its useful behavior
+    //   depends on storage reporting conflicts consistently.
+    // - Repeated stale attempts against the same base should all fail without
+    //   changing metadata.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -1020,12 +1054,14 @@ fn mirrors_max_retry_count_test_storage_conflict_signal_is_stable_for_retry_budg
 
 #[test]
 fn mirrors_current_commit_test_latest_snapshot_reports_only_committed_metadata() {
-    // Mirrors: third_party/ducklake/test/sql/snapshot_info/ducklake_current_commit.test
+    // Mirrors: third_party/ducklake/test/sql/snapshot_info/
+    // ducklake_current_commit.test
     //
     // Storage contract:
-    // - The current snapshot id is the latest committed catalog snapshot sequence.
-    // - Uncommitted DuckDB transactions do not write catalog metadata, so storage should only
-    //   advance after a commit reaches the catalog.
+    // - The current snapshot id is the latest committed catalog snapshot
+    //   sequence.
+    // - Uncommitted DuckDB transactions do not write catalog metadata, so
+    //   storage should only advance after a commit reaches the catalog.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     initialize_catalog_if_absent(&mut kv, catalog).unwrap();

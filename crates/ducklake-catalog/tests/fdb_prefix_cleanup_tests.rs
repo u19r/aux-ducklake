@@ -100,7 +100,8 @@ fn put_entries(db: &Database, entries: &[(String, &[u8])]) {
     let trx = db.create_trx().unwrap();
     trx.set_option(TransactionOption::Timeout(5_000)).unwrap();
     for (key, value) in entries {
-        // Namespace cleanup operates on the catalog's tuple-encoded physical keys.
+        // Namespace cleanup operates on the catalog's tuple-encoded physical
+        // keys.
         let physical = foundationdb::tuple::pack(&(key.as_bytes(), b"payload".as_slice()));
         trx.set(&physical, value);
     }

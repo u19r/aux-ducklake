@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod tests {
+    use std::{cell::Cell, collections::BTreeSet};
+
     use crate::{
         CatalogId, CatalogOrderId, DataFileId, DataFileRow, FakeOrderedCatalogKv, InlinedTableRow,
         KvBatch, MutableCatalogKv, RawSnapshotSequence, SnapshotRow, TableId, TableRow,
@@ -11,7 +13,6 @@ mod tests {
             load_schema_versions_at, stage_next_schema_version,
         },
     };
-    use std::{cell::Cell, collections::BTreeSet};
 
     #[test]
     fn given_schema_version_key_missing_when_staging_next_version_then_version_becomes_one() {
@@ -92,9 +93,11 @@ mod tests {
 
     #[test]
     fn given_long_schema_history_when_reading_recent_orders_then_versions_match_point_reads() {
-        use crate::keys::schema_version_history_key;
-        use crate::schema_version_state::load_schema_version_at;
         use std::time::Instant;
+
+        use crate::{
+            keys::schema_version_history_key, schema_version_state::load_schema_version_at,
+        };
         let mut kv = FakeOrderedCatalogKv::new();
         let catalog = CatalogId(1);
         let mut batch = KvBatch::new();

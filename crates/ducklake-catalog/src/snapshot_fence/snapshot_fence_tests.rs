@@ -269,8 +269,8 @@ fn given_native_file_retries_and_flush_race_when_fenced_then_recovery_or_failure
         .unwrap();
         let published = latest_snapshot(&kv, catalog).unwrap().unwrap();
         assert_ne!(published.order, before.order);
-        // Exact lost-response retry must recover before validating its own now-dropped
-        // target.
+        // Exact lost-response retry must recover before validating its own
+        // now-dropped target.
         commit_attempt(
             RuntimeCatalogBackend::FoundationDb,
             catalog,

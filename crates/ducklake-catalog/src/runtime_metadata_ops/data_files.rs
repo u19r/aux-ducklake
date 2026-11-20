@@ -1,11 +1,12 @@
+use std::fmt::Write as _;
+
 #[cfg(not(test))]
 use crate::latest_snapshot;
-use crate::runtime_protocol::RuntimePayload;
 use crate::{
     CatalogId, CatalogResult, DataFileRow, list_data_files, list_snapshots,
-    runtime_metadata_ops::*, runtime_protocol::RuntimeCatalogBackend,
+    runtime_metadata_ops::*,
+    runtime_protocol::{RuntimeCatalogBackend, RuntimePayload},
 };
-use std::fmt::Write as _;
 
 pub(crate) fn list_data_file_rows(
     _backend: RuntimeCatalogBackend,
@@ -81,7 +82,7 @@ pub(super) fn cached_foundationdb_current_metadata_data_file_rows(
         crate::runtime_read_context::CatalogCurrentFilesContext::for_current_files(&kv, catalog)?;
     let snapshots = list_snapshots(&kv, catalog)?;
     let rows = context.current_data_files();
-    let payload = data_file_rows_payload(&rows, &snapshots).into_bytes();
+    let payload = data_file_rows_payload(rows, &snapshots).into_bytes();
     let payload = std::sync::Arc::new(payload);
     cache.insert(key, payload.clone());
     Ok(payload.into())
@@ -117,9 +118,9 @@ pub(super) fn data_file_rows_payload(
         } else {
             Default::default()
         };
-        write!(
+        writeln!(
             out,
-            "data_file\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "data_file\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             row.data_file_id.0,
             row.table_id.0,
             row.path,

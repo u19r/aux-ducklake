@@ -21,9 +21,7 @@ const DEFAULT_TEST_FILE: &str = "crates/ducklake-fdb-sim-workload/simulation/cat
 const DEFAULT_WORKLOAD: &str = "catalog_smoke";
 
 pub fn run<I>(args: I) -> Result<(), String>
-where
-    I: IntoIterator<Item = String>,
-{
+where I: IntoIterator<Item = String> {
     let args = CliArgs::parse(args.into_iter())?;
     match args.command.as_str() {
         "run" => run_simulation(args),
@@ -47,9 +45,7 @@ struct CliArgs {
 
 impl CliArgs {
     fn parse<I>(mut args: I) -> Result<Self, String>
-    where
-        I: Iterator<Item = String>,
-    {
+    where I: Iterator<Item = String> {
         let command = args.next().unwrap_or_else(|| "run".to_owned());
         let mut parsed = Self {
             command,
@@ -319,9 +315,7 @@ fn command_exists(command: &str) -> bool {
 }
 
 fn next_arg<I>(args: &mut I, flag: &str) -> Result<String, String>
-where
-    I: Iterator<Item = String>,
-{
+where I: Iterator<Item = String> {
     args.next()
         .ok_or_else(|| format!("{flag} requires a value"))
 }

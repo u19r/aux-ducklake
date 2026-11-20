@@ -1,8 +1,3 @@
-use super::{
-    accumulator::{consume_inline_payload_lines, reconstruct_inline_current_rows_streaming},
-    capture_cache::{ByteBoundedCache, CaptureFlightRegistry},
-    history::InlineHistoryRequest,
-};
 use std::{
     collections::BTreeMap,
     sync::{
@@ -14,9 +9,14 @@ use std::{
     time::Duration,
 };
 
-use super::capture::{
-    CaptureKey, CapturedInlineRows, CapturedInlineRowsBySchema, MAX_CAPTURE_CACHE_BYTES,
-    capture_bounds_for_bytes, capture_weight, captured_inline_current_rows_or_latest,
+use super::{
+    accumulator::{consume_inline_payload_lines, reconstruct_inline_current_rows_streaming},
+    capture::{
+        CaptureKey, CapturedInlineRows, CapturedInlineRowsBySchema, MAX_CAPTURE_CACHE_BYTES,
+        capture_bounds_for_bytes, capture_weight, captured_inline_current_rows_or_latest,
+    },
+    capture_cache::{ByteBoundedCache, CaptureFlightRegistry},
+    history::InlineHistoryRequest,
 };
 use crate::{
     CatalogCacheNamespace, CatalogError, CatalogId, CatalogOrderId, DataFileId, DeleteFileId,
@@ -584,9 +584,9 @@ fn pinned_context_capture_survives_pressure_and_fails_closed() {
     assert!(cache.insert(1, (), 6, true));
     assert!(cache.insert(2, (), 4, false));
 
-    // An active capture is pinned until EndRuntimeReadContext. The unpinned entry may
-    // be evicted, but a new active capture is rejected rather than evicting
-    // the pinned value.
+    // An active capture is pinned until EndRuntimeReadContext. The unpinned
+    // entry may be evicted, but a new active capture is rejected rather than
+    // evicting the pinned value.
     assert!(!cache.insert(3, (), 5, true));
     assert!(cache.get(&1).is_some());
     assert_eq!(cache.get(&2), None);

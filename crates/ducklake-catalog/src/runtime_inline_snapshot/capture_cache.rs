@@ -33,8 +33,7 @@ pub(super) struct CaptureFlight<V> {
 }
 
 impl<K, V> CaptureFlightRegistry<K, V>
-where
-    K: Clone + Ord,
+where K: Clone + Ord
 {
     pub(super) fn new() -> Self {
         Self {
@@ -43,9 +42,7 @@ where
     }
 
     pub(super) fn get_or_build<F>(&self, key: K, builder: F) -> CatalogResult<Arc<V>>
-    where
-        F: FnOnce() -> CatalogResult<Arc<V>>,
-    {
+    where F: FnOnce() -> CatalogResult<Arc<V>> {
         let (flight, is_builder) = self.start(key.clone())?;
 
         if !is_builder {
@@ -86,10 +83,10 @@ where
         {
             flights.remove(key);
         }
-        // Publish the result before releasing waiters. Removing the slot first means a
-        // concurrent retry after a failed build starts a fresh builder instead of
-        // attaching to the completed failure, while existing waiters still own
-        // the flight Arc.
+        // Publish the result before releasing waiters. Removing the slot first
+        // means a concurrent retry after a failed build starts a fresh builder
+        // instead of attaching to the completed failure, while existing waiters
+        // still own the flight Arc.
         flight.notify_waiters();
         result
     }
@@ -122,8 +119,7 @@ impl<V> CaptureFlight<V> {
 }
 
 impl<K, V> ByteBoundedCache<K, V>
-where
-    K: Clone + Ord,
+where K: Clone + Ord
 {
     pub(super) fn new(max_bytes: usize) -> Self {
         Self {

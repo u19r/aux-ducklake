@@ -4,10 +4,10 @@ use std::sync::OnceLock;
 
 #[cfg(not(test))]
 use crate::bounded_cache::{BoundedCache, static_bounded_cache};
-use crate::data_file_store::*;
 use crate::{
     AttachedDataFile, CatalogCacheNamespace, CatalogId, CatalogResult, DataFileRow,
     OrderedCatalogKv, RangeDirection, TableId,
+    data_file_store::*,
     ids::CatalogOrderId,
     keys::{
         decode_order_delete_file_change_table_id, order_delete_file_change_prefix,

@@ -1,3 +1,7 @@
+use std::collections::{BTreeMap, BTreeSet};
+#[cfg(not(test))]
+use std::sync::OnceLock;
+
 use super::{
     inline_end_orders::{
         InlineTableEndOrders, inline_chunk_visible_at, inline_table_all_end_orders,
@@ -5,15 +9,10 @@ use super::{
     },
     inline_group_orders::assemble_inline_payload,
 };
-use std::collections::{BTreeMap, BTreeSet};
-#[cfg(not(test))]
-use std::sync::OnceLock;
-
 #[cfg(not(test))]
 use crate::CatalogCacheNamespace;
 #[cfg(not(test))]
 use crate::bounded_cache::{BoundedCache, static_bounded_cache};
-use crate::runtime_metrics::RuntimeMetricStage;
 #[cfg(feature = "runtime-metrics")]
 use crate::runtime_metrics::record_runtime_method_elapsed;
 use crate::{
@@ -28,6 +27,7 @@ use crate::{
     },
     keys::{InlineFlushWatermarkKey, KeyFamily, family_prefix, table_object_key},
     rows::{STORED_ORDER_LEN, decode_stored_order, encode_stored_order},
+    runtime_metrics::RuntimeMetricStage,
     store::{
         invalidate_runtime_read_context, latest_snapshot, snapshot_by_raw_sequence,
         snapshot_row_for_next_sequence, stage_snapshot,

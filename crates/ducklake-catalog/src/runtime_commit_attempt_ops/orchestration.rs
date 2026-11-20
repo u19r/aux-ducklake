@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 
 #[cfg(feature = "runtime-metrics")]
 use crate::runtime_metrics::{RuntimeMetricStatus, record_runtime_request};
-use crate::runtime_trace::RuntimeSpan;
 use crate::{
     CatalogError, CatalogId, CatalogResult, TableId,
     runtime_commit_attempt_ops::*,
@@ -11,6 +10,7 @@ use crate::{
     runtime_inline_ops::{inline_delete_payload, inline_rows_payloads, register_inline_tables},
     runtime_mutable_catalog::{RuntimeMutableCatalog, open_runtime_catalog},
     runtime_protocol::RuntimeCatalogBackend,
+    runtime_trace::RuntimeSpan,
 };
 pub(crate) fn commit_attempt(
     backend: RuntimeCatalogBackend,

@@ -1,3 +1,7 @@
+use std::collections::BTreeMap;
+#[cfg(not(test))]
+use std::sync::OnceLock;
+
 #[cfg(not(test))]
 use crate::CatalogCacheNamespace;
 #[cfg(not(test))]
@@ -14,9 +18,6 @@ use crate::{
         order_delete_file_change_scan_start,
     },
 };
-use std::collections::BTreeMap;
-#[cfg(not(test))]
-use std::sync::OnceLock;
 
 #[cfg(not(test))]
 static ORDER_DELETE_FILE_CHANGE_CACHE: OnceLock<

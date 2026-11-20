@@ -1,15 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::conflict::write_data_file_change;
 use crate::{
     CatalogError, CatalogId, CatalogResult, DataFileId, DataFileRow, DeleteFileRow,
     FileColumnStatsRow, FilePartitionValueRow, InlineFileDeletionRow, InlineTableFlush, KvBatch,
     MutableCatalogKv, TableId,
+    conflict::write_data_file_change,
     conflict_watermarks::stage_max_file_id_watermark,
-    data_file_store::reject_current_data_file_row_id_overlaps_except,
     data_file_store::{
-        stage_append_data_file, stage_append_data_file_without_change, stage_expire_data_file,
-        stage_register_delete_file, stage_register_delete_file_for_data_file,
+        reject_current_data_file_row_id_overlaps_except, stage_append_data_file,
+        stage_append_data_file_without_change, stage_expire_data_file, stage_register_delete_file,
+        stage_register_delete_file_for_data_file,
     },
     data_mutation_intents::DeleteFileMaterialization,
     file_partitions::{remove_cached_file_partition_values, stage_file_partition_value},

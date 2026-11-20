@@ -8,8 +8,9 @@ mod tests {
         PartitionKeyIndex, RangeDirection, RangeItem, RawSnapshotSequence, SchemaId,
         TableColumnRow, TableId, TablePartitionFieldRow, TablePartitionRow, TableRow,
         append_data_file, commit_create_table_row, initialize_catalog_if_absent,
-        keys::data_file_key, latest_snapshot, runtime_data_mutation_ops::RuntimeDataMutation,
-        runtime_data_mutation_ops::RuntimeFilePartitionSet,
+        keys::data_file_key,
+        latest_snapshot,
+        runtime_data_mutation_ops::{RuntimeDataMutation, RuntimeFilePartitionSet},
     };
 
     #[test]

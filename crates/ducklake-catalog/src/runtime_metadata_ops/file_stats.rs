@@ -1,23 +1,21 @@
-use crate::runtime_protocol::RuntimePayload;
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::typed_scalar::{
-    CatalogScalarType, compare_typed_scalars, normalize_catalog_scalar_type,
-    typed_extrema_are_invalid,
-};
 use crate::{
     CatalogId, CatalogResult, ColumnId, DataFileId, DataFileRow, FileColumnStatsRow,
     PartitionKeyIndex, TableId, TableRow, list_column_mappings, list_file_column_stats,
-    put_column_mappings, runtime_protocol::RuntimeCatalogBackend,
+    put_column_mappings,
+    runtime_metadata_ops::*,
+    runtime_protocol::{RuntimeCatalogBackend, RuntimePayload},
+    typed_scalar::{
+        CatalogScalarType, compare_typed_scalars, normalize_catalog_scalar_type,
+        typed_extrema_are_invalid,
+    },
 };
-
 #[cfg(feature = "foundationdb")]
 use crate::{
     DuckLakeSnapshotId, runtime_catalog_snapshot::conflict_snapshot_payload_for_row,
     runtime_payload::payload_u64_value, runtime_snapshots::snapshot_changes_after_payload,
 };
-
-use crate::runtime_metadata_ops::*;
 
 pub(crate) fn commit_column_mappings(
     backend: RuntimeCatalogBackend,

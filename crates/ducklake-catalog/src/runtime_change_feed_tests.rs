@@ -2,12 +2,7 @@
 mod tests {
     use std::cell::Cell;
 
-    use crate::delete_change_feed::list_table_deletion_scan_files;
-    use crate::keys::delete_file_timeline_key;
-    use crate::keys::{
-        order_delete_file_change_key, order_delete_file_change_prefix,
-        table_delete_file_change_key, table_delete_file_change_prefix,
-    };
+    use super::super::{ChangeFeedPayload, data_file_changes_payload, table_deletions_payload};
     use crate::{
         CatalogId, CatalogOrderId, CatalogResult, ColumnId, DataFileId, DataFileRow, DeleteFileId,
         DeleteFileRow, DuckLakeSnapshotId, FakeOrderedCatalogKv, InlineFileDeletionRow,
@@ -15,12 +10,17 @@ mod tests {
         RangeItem, SchemaId, TableColumnRow, TableId, TableRow, append_data_file,
         commit_append_data_files, commit_create_table_row, commit_data_mutation,
         commit_inline_file_deletions, commit_merge_adjacent_data_files,
-        commit_register_delete_files, initialize_catalog_if_absent, latest_snapshot,
-        register_inline_table_payload_with_table,
+        commit_register_delete_files,
+        delete_change_feed::list_table_deletion_scan_files,
+        initialize_catalog_if_absent,
+        keys::{
+            delete_file_timeline_key, order_delete_file_change_key,
+            order_delete_file_change_prefix, table_delete_file_change_key,
+            table_delete_file_change_prefix,
+        },
+        latest_snapshot, register_inline_table_payload_with_table,
+        runtime_snapshot_range::{ChangeFeedEndSnapshot, ChangeFeedStartSnapshot},
     };
-
-    use super::super::{ChangeFeedPayload, data_file_changes_payload, table_deletions_payload};
-    use crate::runtime_snapshot_range::{ChangeFeedEndSnapshot, ChangeFeedStartSnapshot};
 
     #[test]
     fn given_unflushed_inline_payload_when_listing_insertions_then_payload_returns_materialized_file()

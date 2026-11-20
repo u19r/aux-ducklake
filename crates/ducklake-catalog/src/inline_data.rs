@@ -8,12 +8,6 @@ mod inline_tables;
 
 #[cfg(test)]
 mod inline_current_rows_tests;
-use crate::{
-    CatalogError, CatalogResult, ValidityWindow,
-    ids::CatalogOrderId,
-    rows::{STORED_ORDER_LEN, decode_stored_order, encode_stored_order},
-};
-
 #[cfg(feature = "foundationdb")]
 pub(crate) use inline_current_rows::{
     InlineCurrentRow, decode_inline_next_row_id, list_inline_current_row_metadata_bounded,
@@ -51,6 +45,12 @@ pub(crate) use inline_tables::{
 #[cfg(feature = "foundationdb")]
 pub(crate) use inline_tables::{
     flush_inline_table_payload_rows_at_snapshot_order, inline_table_chunk_key, inline_table_chunks,
+};
+
+use crate::{
+    CatalogError, CatalogResult, ValidityWindow,
+    ids::CatalogOrderId,
+    rows::{STORED_ORDER_LEN, decode_stored_order, encode_stored_order},
 };
 
 pub const INLINE_PAYLOAD_LIMIT_BYTES: usize = 90 * 1024;
@@ -134,11 +134,10 @@ pub(crate) fn validate_contiguous_chunks(
     )))
 }
 
-pub(crate) use inline_group_orders::{InlineGroupOrderRequest, assemble_inline_payload};
-
 #[cfg(feature = "foundationdb")]
 pub(crate) use inline_end_orders::decode_inline_end_marker;
 pub(crate) use inline_end_orders::{
     InlineTableEndOrders, decode_inline_flush_watermark, inline_chunk_visible_at,
     inline_table_all_end_orders, inline_table_end_orders_at,
 };
+pub(crate) use inline_group_orders::{InlineGroupOrderRequest, assemble_inline_payload};

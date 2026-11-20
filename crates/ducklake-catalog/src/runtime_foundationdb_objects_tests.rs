@@ -1,11 +1,10 @@
 #[cfg(test)]
 mod tests {
+    use super::super::reject_stale_object_commit;
     use crate::{
         CatalogId, CatalogOrderId, DuckLakeSnapshotId, FakeOrderedCatalogKv, SchemaId, TableId,
         ViewRow, commit_create_view_row, initialize_catalog_if_absent,
     };
-
-    use super::super::reject_stale_object_commit;
 
     #[test]
     fn given_same_public_snapshot_when_validating_object_helper_commit_then_it_is_not_stale() {

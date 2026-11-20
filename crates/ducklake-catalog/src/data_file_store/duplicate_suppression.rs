@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::data_file_store::*;
 use crate::{
     CatalogId, CatalogResult, DataFileId, DataFileRow, FilePartitionValueRow, OrderedCatalogKv,
-    TableId, file_partitions::list_file_partition_values_for_data_files, ids::CatalogOrderId,
+    TableId, data_file_store::*, file_partitions::list_file_partition_values_for_data_files,
+    ids::CatalogOrderId,
 };
 pub(crate) fn data_file_visible_at(row: &DataFileRow, snapshot_order: CatalogOrderId) -> bool {
     row.validity.is_visible_at(snapshot_order)

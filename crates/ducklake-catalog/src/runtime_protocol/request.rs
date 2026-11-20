@@ -48,12 +48,12 @@ impl<'a> RuntimeRequestRef<'a> {
 
     pub(super) fn validate(&self) -> CatalogResult<()> {
         validate_token(
-            &self.request_id,
+            self.request_id,
             MAX_RUNTIME_REQUEST_ID_BYTES,
             "runtime request_id",
         )?;
         validate_token(
-            &self.operation,
+            self.operation,
             MAX_RUNTIME_OPERATION_BYTES,
             "runtime operation",
         )?;

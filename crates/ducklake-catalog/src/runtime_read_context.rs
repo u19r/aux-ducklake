@@ -1,7 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 #[cfg(not(test))]
 use std::sync::OnceLock;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 #[cfg(not(test))]
 use crate::CatalogCacheNamespace;

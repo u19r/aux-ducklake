@@ -1,15 +1,14 @@
 #[cfg(test)]
 mod tests {
-    use crate::{
-        CatalogId, CatalogOrderId, ColumnId, DataFileId, DataFileRow, FakeOrderedCatalogKv,
-        SchemaId, TableColumnRow, TableId, TableRow, commit_append_data_files,
-        commit_create_table_row, initialize_catalog_if_absent, latest_snapshot,
-    };
-
     use super::super::{
         MERGE_ADJACENT_FILES, RewriteDeleteOperation, compaction_payload_values,
         merge_adjacent_compactions_from_payload, resolve_compaction_file_visibility,
         resolve_compaction_file_visibility_orders,
+    };
+    use crate::{
+        CatalogId, CatalogOrderId, ColumnId, DataFileId, DataFileRow, FakeOrderedCatalogKv,
+        SchemaId, TableColumnRow, TableId, TableRow, commit_append_data_files,
+        commit_create_table_row, initialize_catalog_if_absent, latest_snapshot,
     };
 
     #[test]

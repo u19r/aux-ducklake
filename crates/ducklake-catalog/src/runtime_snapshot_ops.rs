@@ -1,4 +1,3 @@
-use crate::runtime_protocol::RuntimePayload;
 use crate::{
     CatalogId, CatalogResult, DuckLakeSnapshotId, SnapshotTimestampBound,
     runtime_catalog_snapshot::CatalogSnapshotIdKind,
@@ -12,7 +11,7 @@ use crate::{
         optional_payload_i64_value, optional_payload_string_value, payload_i64_value,
         payload_u64_value,
     },
-    runtime_protocol::RuntimeCatalogBackend,
+    runtime_protocol::{RuntimeCatalogBackend, RuntimePayload},
     runtime_snapshots::ListSnapshotsPayload,
 };
 

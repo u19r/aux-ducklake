@@ -153,9 +153,8 @@ fn immutable_data_file_metadata_cache()
 mod tests {
     use std::cell::Cell;
 
-    use crate::{CatalogOrderId, FakeOrderedCatalogKv, KvBatch, RangeDirection, RangeItem};
-
     use super::*;
+    use crate::{CatalogOrderId, FakeOrderedCatalogKv, KvBatch, RangeDirection, RangeItem};
 
     #[test]
     fn given_same_metadata_loaded_twice_when_cached_then_second_load_skips_kv_get() {

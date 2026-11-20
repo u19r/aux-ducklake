@@ -1,4 +1,3 @@
-use crate::runtime_protocol::RuntimePayload;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 #[cfg(feature = "runtime-metrics")]
@@ -8,8 +7,8 @@ use crate::{
     runtime_metrics::{RuntimeMetricStage, RuntimeMetricStatus},
     runtime_operations::{payload_for_request, runtime_operation_policy},
     runtime_protocol::{
-        RuntimeCatalogBackend, RuntimeRequestRef, RuntimeResponse, RuntimeResponseStatus,
-        paged_runtime_response,
+        RuntimeCatalogBackend, RuntimePayload, RuntimeRequestRef, RuntimeResponse,
+        RuntimeResponseStatus, paged_runtime_response,
     },
     runtime_trace::RuntimeSpan,
 };
@@ -62,8 +61,8 @@ pub unsafe extern "C" fn ducklake_catalog_runtime_probe(
     if request_ptr.is_null() || out.is_null() {
         return FFI_INVALID_ARGUMENT;
     }
-    // SAFETY: The caller provides a non-null pointer and length for the duration of
-    // this call.
+    // SAFETY: The caller provides a non-null pointer and length for the
+    // duration of this call.
     let request_bytes = unsafe { std::slice::from_raw_parts(request_ptr, request_len) };
     let mut span = RuntimeSpan::enter("ffi.request");
     let probe = match catch_unwind(AssertUnwindSafe(|| {
@@ -98,7 +97,8 @@ pub unsafe extern "C" fn ducklake_catalog_runtime_free(ptr: *mut u8, len: usize)
     if ptr.is_null() {
         return;
     }
-    // SAFETY: Buffers returned by this module are allocated as boxed byte slices.
+    // SAFETY: Buffers returned by this module are allocated as boxed byte
+    // slices.
     unsafe {
         let slice = std::ptr::slice_from_raw_parts_mut(ptr, len);
         let _ = Box::from_raw(slice);
@@ -119,7 +119,8 @@ pub extern "C" fn ducklake_catalog_runtime_shutdown() -> i32 {
 ///
 /// # Safety
 /// `operation` references `len` readable UTF-8 bytes during this call.
-/// End the returned scope exactly once, on this thread, in reverse nesting order.
+/// End the returned scope exactly once, on this thread, in reverse nesting
+/// order.
 pub unsafe extern "C" fn ducklake_catalog_runtime_trace_begin(
     operation: *const u8,
     len: usize,
@@ -147,13 +148,15 @@ pub unsafe extern "C" fn ducklake_catalog_runtime_trace_begin(
 /// Ends a scope returned by `ducklake_catalog_runtime_trace_begin`.
 ///
 /// # Safety
-/// `span` is null or an unfreed scope from this thread at the top of its trace stack.
+/// `span` is null or an unfreed scope from this thread at the top of its trace
+/// stack.
 pub unsafe extern "C" fn ducklake_catalog_runtime_trace_end(
     span: *mut std::ffi::c_void,
     is_ok: i32,
 ) {
     if !span.is_null() {
-        // SAFETY: The caller supplies its unique live scope on the originating thread.
+        // SAFETY: The caller supplies its unique live scope on the originating
+        // thread.
         let span = unsafe { Box::from_raw(span.cast::<RuntimeSpan>()) };
         span.finish(is_ok != 0);
     }
@@ -238,9 +241,9 @@ fn runtime_response_from_request(
     request: RuntimeRequestRef<'_>,
 ) -> CatalogResult<RuntimeResponse<RuntimePayload>> {
     let started = RuntimeMetricStage::start();
-    let mutates_catalog = runtime_operation_policy(&request.operation).mutates_catalog;
-    // Commit validation must observe commits made after the caller's pinned read
-    // context.
+    let mutates_catalog = runtime_operation_policy(request.operation).mutates_catalog;
+    // Commit validation must observe commits made after the caller's pinned
+    // read context.
     let context_id = request.read_context_id.filter(|_| !mutates_catalog);
     let mut read_request = crate::store::begin_runtime_read_request(context_id);
     if mutates_catalog && request.page_offset != 0 {
@@ -260,7 +263,7 @@ fn runtime_response_from_request(
         Ok(payload) => {
             record_runtime_request_stage(
                 request.backend,
-                &request.operation,
+                request.operation,
                 RuntimeMetricStatus::Ok,
                 started,
             );
@@ -269,7 +272,7 @@ fn runtime_response_from_request(
         Err(error) => {
             record_runtime_request_stage(
                 request.backend,
-                &request.operation,
+                request.operation,
                 RuntimeMetricStatus::Error,
                 started,
             );

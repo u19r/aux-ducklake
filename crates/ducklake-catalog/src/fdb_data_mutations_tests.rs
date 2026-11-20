@@ -1,10 +1,10 @@
-use super::*;
 use std::{
     cell::Cell,
     collections::BTreeSet,
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use super::*;
 use crate::{
     CatalogError, CatalogId, CatalogOrderId, CatalogResult, ColumnId, CommitAttemptRow,
     DataMutationCommit, DeleteFileId, FakeOrderedCatalogKv, FileColumnStatsRow,

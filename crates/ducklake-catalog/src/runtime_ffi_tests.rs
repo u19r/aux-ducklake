@@ -1,6 +1,5 @@
 #![cfg_attr(not(feature = "foundationdb"), allow(unused_imports))]
 
-use crate::runtime_protocol::RuntimeRequest;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::*;
@@ -10,7 +9,9 @@ use crate::{
     MacroId, MetadataSettingRow, PartitionKeyIndex, RawSnapshotSequence, SchemaId, SnapshotRow,
     TableColumnRow, TableId, TableRow, list_data_files_at, load_macro_at, load_schema_at,
     load_table_at, load_view_at, register_file_partition_value,
-    runtime_protocol::RuntimeCatalogBackend, set_metadata_setting, store::stage_snapshot,
+    runtime_protocol::{RuntimeCatalogBackend, RuntimeRequest},
+    set_metadata_setting,
+    store::stage_snapshot,
 };
 
 #[test]

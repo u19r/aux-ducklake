@@ -1,8 +1,9 @@
-use crate::runtime_protocol::RuntimePayload;
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write as _;
 #[cfg(not(test))]
 use std::sync::OnceLock;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
+};
 
 #[cfg(not(test))]
 use crate::bounded_cache::{BoundedCache, static_bounded_cache};
@@ -16,6 +17,7 @@ use crate::{
         ConflictWatermarkValues, load_conflict_snapshot_values, load_conflict_watermarks,
     },
     runtime_metrics::RuntimeMetricStage,
+    runtime_protocol::RuntimePayload,
     runtime_read_context::{CatalogSnapshotReadContext, CatalogSnapshotRequestContext},
     schema_version_state::load_schema_version_at,
 };
@@ -231,11 +233,11 @@ fn render_requested_catalog(
 fn render_catalog_snapshot_payload(context: CatalogSnapshotReadContext) -> Vec<u8> {
     let _snapshot_order = context.snapshot.order;
     let mut out = String::new();
-    write!(out, "schema_count={}\n", context.schemas.len()).expect("writing to String cannot fail");
+    writeln!(out, "schema_count={}", context.schemas.len()).expect("writing to String cannot fail");
     for schema in context.schemas.iter() {
-        write!(
+        writeln!(
             out,
-            "schema\t{}\t{}\t{}\t{}\t{}\n",
+            "schema\t{}\t{}\t{}\t{}\t{}",
             schema.schema_id.0,
             schema.uuid,
             schema.name,
@@ -247,11 +249,11 @@ fn render_catalog_snapshot_payload(context: CatalogSnapshotReadContext) -> Vec<u
         )
         .expect("writing to String cannot fail");
     }
-    write!(out, "table_count={}\n", context.tables.len()).expect("writing to String cannot fail");
+    writeln!(out, "table_count={}", context.tables.len()).expect("writing to String cannot fail");
     for table in context.tables.iter() {
-        write!(
+        writeln!(
             out,
-            "table\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "table\t{}\t{}\t{}\t{}\t{}\t{}",
             table.table_id.0,
             table.schema_id.0,
             table.uuid,
@@ -261,9 +263,9 @@ fn render_catalog_snapshot_payload(context: CatalogSnapshotReadContext) -> Vec<u
         )
         .expect("writing to String cannot fail");
         for column in columns_parent_before_children(&table.columns) {
-            write!(
+            writeln!(
                 out,
-                "column\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                "column\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 table.table_id.0,
                 column.column_id.0,
                 column.name,
@@ -280,18 +282,18 @@ fn render_catalog_snapshot_payload(context: CatalogSnapshotReadContext) -> Vec<u
             .expect("writing to String cannot fail");
         }
         for inlined_table in &table.inlined_data_tables {
-            write!(
+            writeln!(
                 out,
-                "inlined_table\t{}\t{}\t{}\n",
+                "inlined_table\t{}\t{}\t{}",
                 table.table_id.0, inlined_table.table_name, inlined_table.schema_version
             )
             .expect("writing to String cannot fail");
         }
         if let Some(partition) = &table.partition {
             for field in &partition.fields {
-                write!(
+                writeln!(
                     out,
-                    "partition\t{}\t{}\t{}\t{}\t{}\n",
+                    "partition\t{}\t{}\t{}\t{}\t{}",
                     table.table_id.0,
                     partition.partition_id,
                     field.partition_key_index,
@@ -303,9 +305,9 @@ fn render_catalog_snapshot_payload(context: CatalogSnapshotReadContext) -> Vec<u
         }
         if let Some(sort) = &table.sort {
             for field in &sort.fields {
-                write!(
+                writeln!(
                     out,
-                    "sort\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                    "sort\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                     table.table_id.0,
                     sort.sort_id,
                     field.sort_key_index,
@@ -318,11 +320,11 @@ fn render_catalog_snapshot_payload(context: CatalogSnapshotReadContext) -> Vec<u
             }
         }
     }
-    write!(out, "view_count={}\n", context.views.len()).expect("writing to String cannot fail");
+    writeln!(out, "view_count={}", context.views.len()).expect("writing to String cannot fail");
     for view in context.views.iter() {
-        write!(
+        writeln!(
             out,
-            "view\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "view\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             view.view_id.0,
             view.schema_id.0,
             view.uuid,
@@ -334,18 +336,18 @@ fn render_catalog_snapshot_payload(context: CatalogSnapshotReadContext) -> Vec<u
         )
         .expect("writing to String cannot fail");
     }
-    write!(out, "macro_count={}\n", context.macros.len()).expect("writing to String cannot fail");
+    writeln!(out, "macro_count={}", context.macros.len()).expect("writing to String cannot fail");
     for macro_row in context.macros.iter() {
-        write!(
+        writeln!(
             out,
-            "macro\t{}\t{}\t{}\n",
+            "macro\t{}\t{}\t{}",
             macro_row.macro_id.0, macro_row.schema_id.0, macro_row.name
         )
         .expect("writing to String cannot fail");
         for (impl_id, implementation) in macro_row.implementations.iter().enumerate() {
-            write!(
+            writeln!(
                 out,
-                "macro_impl\t{}\t{}\t{}\t{}\t{}\n",
+                "macro_impl\t{}\t{}\t{}\t{}\t{}",
                 macro_row.macro_id.0,
                 impl_id,
                 implementation.dialect,
@@ -354,9 +356,9 @@ fn render_catalog_snapshot_payload(context: CatalogSnapshotReadContext) -> Vec<u
             )
             .expect("writing to String cannot fail");
             for (param_id, parameter) in implementation.parameters.iter().enumerate() {
-                write!(
+                writeln!(
                     out,
-                    "macro_param\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                    "macro_param\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                     macro_row.macro_id.0,
                     impl_id,
                     param_id,

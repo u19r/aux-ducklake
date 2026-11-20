@@ -1,4 +1,3 @@
-use crate::runtime_protocol::RuntimePayload;
 #[cfg(feature = "foundationdb")]
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -14,6 +13,7 @@ use crate::{
         CurrentPartitionPruneFilesPayload, ListDataFilesAtPayload, PartitionFilesAtBatchPayload,
         PartitionFilesAtPayload, PartitionPruneFilesAtPayload,
     },
+    runtime_protocol::RuntimePayload,
     runtime_snapshots::ListSnapshotsPayload,
 };
 #[cfg(feature = "foundationdb")]

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Versions: software-versions.snapshot.json; details in software-version-consumers.md.
+# Versions: software-versions.json; details in software-version-consumers.md.
 set -euo pipefail
 
 # DuckLake integration pin selected by the paired DuckDB release configuration.

@@ -15,8 +15,10 @@ fn mirrors_ducklake_snapshots_test_snapshot_listing_tracks_schema_and_data_chang
     // Mirrors: third_party/ducklake/test/sql/functions/ducklake_snapshots.test
     //
     // Storage contract:
-    // - Schema/table/view/data operations create snapshots with increasing public sequence ids.
-    // - Snapshot helpers must return schema-version and change summaries for those snapshots.
+    // - Schema/table/view/data operations create snapshots with increasing
+    //   public sequence ids.
+    // - Snapshot helpers must return schema-version and change summaries for
+    //   those snapshots.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(101);
     initialize_catalog_if_absent(&mut kv, catalog).unwrap();
@@ -78,9 +80,10 @@ fn mirrors_issue_1074_test_mixed_inline_and_delete_file_snapshots_remain_time_tr
     // Mirrors: third_party/ducklake/test/sql/issues/issue_1074.test
     //
     // Storage contract:
-    // - A file can first receive an inline deletion, then replacement delete files in later
-    //   snapshots.
-    // - Historical reads at each snapshot attach only the delete metadata visible then.
+    // - A file can first receive an inline deletion, then replacement delete
+    //   files in later snapshots.
+    // - Historical reads at each snapshot attach only the delete metadata
+    //   visible then.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(102);
     let table = TableId(1);
@@ -190,13 +193,15 @@ fn mirrors_issue_1074_test_mixed_inline_and_delete_file_snapshots_remain_time_tr
 
 #[test]
 fn mirrors_issue_865_update_wrong_result_test_file_listing_returns_physical_and_inline_deletes() {
-    // Mirrors: third_party/ducklake/test/sql/issues/issue_865_update_wrong_result.test
+    // Mirrors: third_party/ducklake/test/sql/issues/
+    // issue_865_update_wrong_result.test
     //
     // Storage contract:
-    // - After one physical delete file hides ids >= 80 and a later inline file deletion hides ids
-    //   75..79, a scan at the latest snapshot must receive both deletion sources for the same
-    //   data file. Returning only the physical delete file makes DuckLake count 80 rows instead
-    //   of the user-visible 75 rows.
+    // - After one physical delete file hides ids >= 80 and a later inline file
+    //   deletion hides ids 75..79, a scan at the latest snapshot must receive
+    //   both deletion sources for the same data file. Returning only the
+    //   physical delete file makes DuckLake count 80 rows instead of the
+    //   user-visible 75 rows.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(103);
     let table = TableId(1);
@@ -271,8 +276,8 @@ fn mirrors_merge_timestamp_test_timestamp_partition_values_are_saved_for_inserte
     // Mirrors: third_party/ducklake/test/sql/merge/merge_timestamp.test
     //
     // Storage contract:
-    // - A MERGE insert into a timestamp-partitioned table saves year/month partition values for
-    //   the inserted data file.
+    // - A MERGE insert into a timestamp-partitioned table saves year/month
+    //   partition values for the inserted data file.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(104);
     let table = TableId(1);

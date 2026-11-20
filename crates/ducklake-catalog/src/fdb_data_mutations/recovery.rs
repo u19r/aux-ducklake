@@ -1,9 +1,7 @@
 use crate::{
-    CatalogError, CommitAttemptId, FoundationDbErrorClass,
+    CatalogError, CommitAttemptId, FoundationDbErrorClass, fdb_data_mutations::*,
     snapshot_operations::SnapshotOperationKind,
 };
-
-use crate::fdb_data_mutations::*;
 pub(super) fn mutation_recovery_attempt_id(
     snapshot_id: Option<CommitAttemptId>,
     commit_metadata: &crate::SnapshotCommitMetadata,

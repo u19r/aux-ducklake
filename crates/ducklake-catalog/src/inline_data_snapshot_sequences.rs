@@ -8,7 +8,8 @@ use crate::{
 
 /// Data-changing snapshots keep their raw sequence when public groups coalesce:
 /// a data group can merge into its predecessor only when both sequences match.
-/// Callers supply orders from inline payloads or deletion events, never metadata helpers.
+/// Callers supply orders from inline payloads or deletion events, never
+/// metadata helpers.
 pub(crate) fn active_data_snapshot_sequences(
     kv: &impl OrderedCatalogKv,
     catalog: CatalogId,

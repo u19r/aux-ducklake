@@ -1,10 +1,11 @@
+use std::fmt::Write as _;
+
 #[cfg(not(test))]
 use crate::runtime_protocol::RuntimePayload;
 use crate::{
     CatalogId, CatalogResult, FileColumnStatsRow, FilePartitionValueRow, OrderedCatalogKv,
     runtime_metadata_ops::*, runtime_read_context::CatalogCurrentFileColumnStatsContext,
 };
-use std::fmt::Write as _;
 
 #[cfg(not(test))]
 pub(super) fn cached_foundationdb_current_metadata_file_column_stats_rows(
@@ -27,7 +28,7 @@ pub(super) fn cached_foundationdb_current_metadata_file_column_stats_rows(
         return Ok(payload.into());
     }
     let rows = context.current_file_column_stats();
-    let payload = file_column_stats_payload(&rows)?;
+    let payload = file_column_stats_payload(rows)?;
     let payload = std::sync::Arc::new(payload);
     cache.insert(key, payload.clone());
     Ok(payload.into())
@@ -49,9 +50,9 @@ pub(super) fn file_partition_values_payload(
 ) -> CatalogResult<Vec<u8>> {
     let mut out = format!("file_partition_value_count={}\n", rows.len());
     for row in rows {
-        write!(
+        writeln!(
             out,
-            "file_partition_value\t{}\t{}\t{}\t{}\n",
+            "file_partition_value\t{}\t{}\t{}\t{}",
             row.data_file_id.0, row.table_id.0, row.partition_key_index.0, row.partition_value
         )
         .expect("writing to String cannot fail");
@@ -98,7 +99,7 @@ pub(super) fn file_column_stats_payload(rows: &[FileColumnStatsRow]) -> CatalogR
         .expect("writing to String cannot fail");
         if let Some(extra_stats) = &row.extra_stats {
             out.push('\t');
-            out.push_str(&extra_stats);
+            out.push_str(extra_stats);
         }
         out.push('\n');
     }
@@ -137,7 +138,7 @@ pub(super) fn append_mirror_values(
     values: impl Iterator<Item = Vec<String>>,
 ) {
     if let Some(select) = render_mirror_select(values) {
-        write!(out, "INSERT INTO {{METADATA_CATALOG}}.{table} {select};\n")
+        writeln!(out, "INSERT INTO {{METADATA_CATALOG}}.{table} {select};")
             .expect("writing to String cannot fail");
     }
 }

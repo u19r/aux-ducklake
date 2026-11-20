@@ -1,8 +1,9 @@
+use std::collections::BTreeSet;
+
 use super::{file_column_stats_payload, open_foundationdb_catalog, parse_u64};
 use crate::{
     CatalogId, CatalogResult, ColumnId, DataFileId, runtime_protocol::RuntimeCatalogBackend,
 };
-use std::collections::BTreeSet;
 
 pub(crate) fn list_current_metadata_file_column_stats_rows_for_data_file_ids(
     _backend: RuntimeCatalogBackend,

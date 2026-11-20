@@ -6,13 +6,12 @@ use crate::{
     CatalogOrderId, CatalogResult, DataFileId, DataFileRow, DeleteFileRow, FdbOrderedCatalogKv,
     InlineFileDeletionRow, SnapshotRow, TableId, ValidityWindow,
     data_mutation_intents::DeleteFileMaterialization,
+    fdb_data_mutations::*,
     fdb_versionstamp::{incomplete_order, versionstamped_value},
     inline_data::list_inline_file_deletion_rows_for_data_files_at,
     keys::inline_file_deletion_key,
     kv::OrderedCatalogKv,
 };
-
-use crate::fdb_data_mutations::*;
 
 pub(super) fn prepare_delete_file_for_versionstamped_commit(
     row: &mut DeleteFileRow,

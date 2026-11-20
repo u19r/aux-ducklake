@@ -3,7 +3,6 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
-use crate::runtime_metrics::RuntimeMetricStage;
 #[cfg(feature = "runtime-metrics")]
 use crate::runtime_metrics::{record_runtime_measurement, record_runtime_method_elapsed};
 use crate::{
@@ -16,6 +15,7 @@ use crate::{
         file_column_stats_lookup_prefix, prefix_end, table_file_stats_version_key,
     },
     lru_cache::LruCache,
+    runtime_metrics::RuntimeMetricStage,
 };
 
 const FILE_COLUMN_STATS_ROW_CACHE_CAPACITY: usize = 131_072;
@@ -647,7 +647,7 @@ fn load_missing_file_column_stats_for_data_file_columns(
             for row in cached_rows.iter() {
                 if requested_columns.contains(&row.column_id) {
                     insert_file_column_stats(
-                        file_column_stats_cache_key_for_row(kv, catalog, &row),
+                        file_column_stats_cache_key_for_row(kv, catalog, row),
                         row.clone(),
                     );
                     rows.push(row.clone());

@@ -1,12 +1,11 @@
 use std::collections::BTreeMap;
 
+use super::{proposed_file_ids, remap_file_id, remap_mutation_file_ids};
 use crate::{
     CatalogOrderId, ColumnId, DataFileId, DataFileRow, DeleteFileId, DeleteFileRow,
     FdbDataMutation, FileColumnStatsRow, FilePartitionValueRow, InlineFileDeletionRow,
     PartitionKeyIndex, TableId, fdb_data_mutations::FdbAppendPartitionExpectation,
 };
-
-use super::{proposed_file_ids, remap_file_id, remap_mutation_file_ids};
 
 #[test]
 fn given_mixed_file_mutation_when_ids_are_reserved_then_all_new_references_are_remapped() {

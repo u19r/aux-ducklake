@@ -7,10 +7,12 @@ use foundationdb_simulation::{
     Metrics, RustWorkload, Severity, SimDatabase, WorkloadContext, details,
 };
 
-use crate::common::{
-    OPTION_ACTIVE_CLIENT_COUNT, OPTION_PROFILE, option_or_default, option_or_default_string,
+use crate::{
+    common::{
+        OPTION_ACTIVE_CLIENT_COUNT, OPTION_PROFILE, option_or_default, option_or_default_string,
+    },
+    metrics::metric,
 };
-use crate::metrics::metric;
 
 pub(crate) struct CatalogExpireWorkload {
     name: String,

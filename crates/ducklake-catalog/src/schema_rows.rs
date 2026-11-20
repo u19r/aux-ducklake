@@ -139,7 +139,8 @@ fn decode_parent_schema(bytes: &[u8], cursor: &mut usize) -> CatalogResult<Optio
             }
         }
     };
-    // Existing v1 FDB key mutations also stored the unused value-offset trailer.
+    // Existing v1 FDB key mutations also stored the unused value-offset
+    // trailer.
     let has_legacy_offset = bytes[0] == 1 && bytes[*cursor..] == 10_u32.to_le_bytes();
     if *cursor != bytes.len() && !has_legacy_offset {
         return Err(CatalogError::Decode("trailing schema row bytes".to_owned()));

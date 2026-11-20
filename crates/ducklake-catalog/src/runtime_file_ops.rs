@@ -1,4 +1,5 @@
-use crate::runtime_protocol::RuntimePayload;
+use std::collections::BTreeSet;
+
 use crate::{
     CatalogId, CatalogResult, DataFileChangeKind, DataFileId, OrderedCatalogKv, PartitionKeyIndex,
     TableId,
@@ -19,11 +20,10 @@ use crate::{
     runtime_payload::{
         payload_string_value, payload_string_values, payload_u32_value, payload_u64_value,
     },
-    runtime_protocol::RuntimeCatalogBackend,
+    runtime_protocol::{RuntimeCatalogBackend, RuntimePayload},
     runtime_snapshots::snapshot_data_file_changes_at,
     store::list_snapshots,
 };
-use std::collections::BTreeSet;
 
 pub(crate) fn list_data_files_at(
     _backend: RuntimeCatalogBackend,

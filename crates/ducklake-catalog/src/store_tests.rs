@@ -1,20 +1,21 @@
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
-    use std::sync::{
-        Arc, Barrier, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    };
-
-    use crate::{
-        CatalogCacheNamespace, CatalogError, CatalogId, FakeOrderedCatalogKv, KvBatch,
-        RangeDirection, RawSnapshotSequence, SnapshotRow,
-        keys::{latest_snapshot_row_key, snapshot_prefix},
+    use std::{
+        cell::Cell,
+        sync::{
+            Arc, Barrier, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     use super::super::{
         expire_snapshots, latest_snapshot, latest_snapshot_value, list_snapshots,
         snapshot_by_raw_sequence, stage_snapshot,
+    };
+    use crate::{
+        CatalogCacheNamespace, CatalogError, CatalogId, FakeOrderedCatalogKv, KvBatch,
+        RangeDirection, RawSnapshotSequence, SnapshotRow,
+        keys::{latest_snapshot_row_key, snapshot_prefix},
     };
 
     #[test]

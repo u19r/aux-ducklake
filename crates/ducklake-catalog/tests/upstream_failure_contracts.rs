@@ -20,15 +20,17 @@ use ducklake_catalog::{
     register_inline_table_payload_with_table, remove_old_data_files, snapshot_by_public_sequence,
 };
 
-// This file is a fast Rust translation queue for upstream SQLLogic failures. Each test names the
-// storage contract directly: DuckLake asks the metadata storage to save X, then later asks it to
-// return Y. Some tests intentionally fail until the Rust storage model owns the missing concept.
+// This file is a fast Rust translation queue for upstream SQLLogic failures.
+// Each test names the storage contract directly: DuckLake asks the metadata
+// storage to save X, then later asks it to return Y. Some tests intentionally
+// fail until the Rust storage model owns the missing concept.
 
 #[test]
 fn given_external_file_footer_size_when_saving_data_file_then_footer_size_is_returnable() {
     // Upstream: test/sql/add_files/add_file_footer_size.test
-    // Storage request: persist data-file metadata for an externally added Parquet file.
-    // Required return: ducklake_list_files can return data_file_footer_size > 0.
+    // Storage request: persist data-file metadata for an externally added
+    // Parquet file. Required return: ducklake_list_files can return
+    // data_file_footer_size > 0.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(10);
@@ -58,9 +60,10 @@ fn given_external_file_footer_size_when_saving_data_file_then_footer_size_is_ret
 
 #[test]
 fn given_hidden_metadata_debug_rows_when_stats_are_saved_then_stats_are_returned() {
-    // Upstream: hidden metadata table access failures such as add_column_default_stats and stats/*.
-    // Storage request: save table, column, data-file, and column-stats rows.
-    // Required return: a metadata reader can see the stats row, not only the base file row.
+    // Upstream: hidden metadata table access failures such as
+    // add_column_default_stats and stats/*. Storage request: save table,
+    // column, data-file, and column-stats rows. Required return: a metadata
+    // reader can see the stats row, not only the base file row.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(10);
@@ -96,10 +99,11 @@ fn given_hidden_metadata_debug_rows_when_stats_are_saved_then_stats_are_returned
 #[test]
 fn given_many_small_inline_rows_when_registering_large_payload_then_storage_chunks_fdb_values() {
     // Upstream: test/sql/data_inlining/data_inlining_partitions.test
-    // Storage request: save many inline rows whose total encoded payload is over FDB's safe item
-    // size, while each encoded row remains below the per-value limit.
-    // Required return: metadata commit succeeds by chunking the payload; object/file fallback is
-    // only required when one encoded row is too large to inline safely.
+    // Storage request: save many inline rows whose total encoded payload is
+    // over FDB's safe item size, while each encoded row remains below the
+    // per-value limit. Required return: metadata commit succeeds by chunking
+    // the payload; object/file fallback is only required when one encoded row
+    // is too large to inline safely.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(10);
@@ -138,7 +142,8 @@ fn given_compacted_sources_when_listing_hidden_current_data_files_then_only_repl
  {
     // Upstream: test/sql/compaction/merge_adjacent_max_files.test
     // Storage request: replace many source files with one compacted file.
-    // Required return: current metadata readers should not report expired source rows as current.
+    // Required return: current metadata readers should not report expired
+    // source rows as current.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(10);
@@ -184,9 +189,10 @@ fn given_compacted_sources_when_listing_hidden_current_data_files_then_only_repl
 fn given_compacted_sources_when_cleanup_all_runs_then_scheduled_files_are_returned_and_metadata_remains()
  {
     // Upstream: test/sql/add_files/add_files_compaction.test
-    // Storage request: replace compacted source files and schedule their physical paths for cleanup.
-    // Required return: cleanup_all lists the scheduled files immediately, then removing cleanup records
-    // clears only the cleanup markers and preserves historical data-file metadata.
+    // Storage request: replace compacted source files and schedule their
+    // physical paths for cleanup. Required return: cleanup_all lists the
+    // scheduled files immediately, then removing cleanup records clears only
+    // the cleanup markers and preserves historical data-file metadata.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(10);
@@ -255,8 +261,9 @@ fn given_compacted_sources_when_cleanup_all_runs_then_scheduled_files_are_return
 fn given_add_column_default_after_existing_rows_when_stats_are_saved_then_default_contributes_to_min_max()
  {
     // Upstream: test/sql/alter/add_column_default_stats.test
-    // Storage request: after ADD COLUMN DEFAULT, save stats for values materialized by that default.
-    // Required return: min/max for the new column reflect both default and explicit values.
+    // Storage request: after ADD COLUMN DEFAULT, save stats for values
+    // materialized by that default. Required return: min/max for the new column
+    // reflect both default and explicit values.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(10);
@@ -306,9 +313,10 @@ fn given_add_column_default_after_existing_rows_when_stats_are_saved_then_defaul
 #[test]
 fn given_partition_values_for_new_files_when_data_mutation_commits_then_partition_pruning_reads_them()
  {
-    // Upstream: add_files_hive_partition_cast, partitioning/*, compaction partition failures.
-    // Storage request: save files and partition values in one metadata mutation.
-    // Required return: partition pruning returns exactly the matching current files.
+    // Upstream: add_files_hive_partition_cast, partitioning/*, compaction
+    // partition failures. Storage request: save files and partition values in
+    // one metadata mutation. Required return: partition pruning returns exactly
+    // the matching current files.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(10);
@@ -348,9 +356,10 @@ fn given_partition_values_for_new_files_when_data_mutation_commits_then_partitio
 #[test]
 fn given_partition_values_for_compaction_output_when_sources_replaced_then_pruning_reads_replacement()
  {
-    // Upstream: compaction_partitioned_table, merge_adjacent_null_partition, multi_key_merge.
-    // Storage request: expire partitioned source files and save replacement file partition values.
-    // Required return: partition pruning returns the replacement file and not expired sources.
+    // Upstream: compaction_partitioned_table, merge_adjacent_null_partition,
+    // multi_key_merge. Storage request: expire partitioned source files and
+    // save replacement file partition values. Required return: partition
+    // pruning returns the replacement file and not expired sources.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(10);
@@ -406,9 +415,10 @@ fn given_partition_values_for_compaction_output_when_sources_replaced_then_pruni
 
 #[test]
 fn given_null_partition_value_when_saved_then_null_and_empty_string_are_distinct() {
-    // Upstream: test/sql/partitioning/partition_null.test and merge_adjacent_null_partition.test
-    // Storage request: save partition metadata for SQL NULL and empty string.
-    // Required return: pruning can distinguish IS NULL from = ''.
+    // Upstream: test/sql/partitioning/partition_null.test and
+    // merge_adjacent_null_partition.test Storage request: save partition
+    // metadata for SQL NULL and empty string. Required return: pruning can
+    // distinguish IS NULL from = ''.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(10);
@@ -452,7 +462,8 @@ fn given_null_partition_value_when_saved_then_null_and_empty_string_are_distinct
 fn given_sort_definition_when_saved_and_reset_then_current_and_history_are_isolated() {
     // Upstream: sorted_table/* and sorted flush tests.
     // Storage request: save a table sort definition, then reset it.
-    // Required return: current table has no sort while historical snapshots keep the saved sort.
+    // Required return: current table has no sort while historical snapshots
+    // keep the saved sort.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(10);
@@ -513,9 +524,10 @@ fn given_sort_definition_when_saved_and_reset_then_current_and_history_are_isola
 
 #[test]
 fn given_partition_definition_when_saved_and_reset_then_current_and_history_are_isolated() {
-    // Upstream: partitioning_alter, drop_partition_column, partition_rename_in_transaction.
-    // Storage request: save a table partition definition, then reset it.
-    // Required return: current table has no partition while historical snapshots keep the saved one.
+    // Upstream: partitioning_alter, drop_partition_column,
+    // partition_rename_in_transaction. Storage request: save a table partition
+    // definition, then reset it. Required return: current table has no
+    // partition while historical snapshots keep the saved one.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(10);
@@ -578,8 +590,9 @@ fn given_partition_definition_when_saved_and_reset_then_current_and_history_are_
 fn given_inline_file_deletes_across_schema_changes_when_listing_deletions_then_deleted_rows_are_returned()
  {
     // Upstream: test/sql/deletion_inlining/test_deletion_inlining_alter.test
-    // Storage request: save inline file deletion rows before/after table schema changes.
-    // Required return: deletion scan planning still returns the deleted row ids for the data file.
+    // Storage request: save inline file deletion rows before/after table schema
+    // changes. Required return: deletion scan planning still returns the
+    // deleted row ids for the data file.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(10);
@@ -608,7 +621,8 @@ fn given_inline_file_deletes_across_schema_changes_when_listing_deletions_then_d
 fn given_physical_delete_file_when_registered_then_deletion_scan_returns_previous_delete_context() {
     // Upstream: delete/deletion_vector and rewrite_data_files families.
     // Storage request: save multiple delete files for one data file.
-    // Required return: later delete scan includes the previous delete file so rewrites can compose correctly.
+    // Required return: later delete scan includes the previous delete file so
+    // rewrites can compose correctly.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(10);
@@ -675,7 +689,8 @@ fn given_delete_file_then_rewrite_when_listing_deletions_then_full_delete_keeps_
  {
     // Upstream: rewrite_data_files/* and deletion_vector_multi_snapshot.
     // Storage request: save a partial delete file, then rewrite the data file.
-    // Required return: delete planning sees both the partial delete and later full-file deletion.
+    // Required return: delete planning sees both the partial delete and later
+    // full-file deletion.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(10);
@@ -777,8 +792,9 @@ fn given_macro_metadata_when_saved_then_current_snapshot_lists_macro_rows() {
 #[test]
 fn given_many_column_stats_when_saved_then_all_stats_are_returnable_by_column() {
     // Upstream: stats/*, default/*_stats, geo stats, and nested stats families.
-    // Storage request: save file-level column stats for multiple files and columns.
-    // Required return: each table/column lookup returns all saved stats without cross-column bleed.
+    // Storage request: save file-level column stats for multiple files and
+    // columns. Required return: each table/column lookup returns all saved
+    // stats without cross-column bleed.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(10);
@@ -833,7 +849,8 @@ fn given_many_files_in_one_transaction_when_checkpoint_reads_table_then_all_file
  {
     // Upstream: test/sql/checkpoint/many_inserts_transaction.test
     // Storage request: one DuckLake transaction can save many file additions.
-    // Required return: checkpoint/current read sees all rows from the one committed snapshot.
+    // Required return: checkpoint/current read sees all rows from the one
+    // committed snapshot.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(10);
@@ -865,10 +882,10 @@ fn given_many_files_in_one_transaction_when_checkpoint_reads_table_then_all_file
 #[test]
 fn given_expired_snapshot_when_current_files_are_read_then_current_state_survives_and_old_snapshot_disappears()
  {
-    // Upstream: expire_snapshots*, cleanup_old_files*, and time-travel expiry failures.
-    // Storage request: expire an older public snapshot.
-    // Required return: lookup for the expired snapshot fails closed while current file metadata
-    // remains readable.
+    // Upstream: expire_snapshots*, cleanup_old_files*, and time-travel expiry
+    // failures. Storage request: expire an older public snapshot.
+    // Required return: lookup for the expired snapshot fails closed while
+    // current file metadata remains readable.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(10);
@@ -904,7 +921,8 @@ fn given_expired_snapshot_when_current_files_are_read_then_current_state_survive
 fn given_inline_rows_deleted_then_payload_read_at_old_snapshot_still_returns_original_rows() {
     // Upstream: data_inlining update/delete and time-travel families.
     // Storage request: save inline rows, then save row tombstones.
-    // Required return: historical reads still return the original inline payload.
+    // Required return: historical reads still return the original inline
+    // payload.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(10);
@@ -942,8 +960,9 @@ fn given_inline_rows_deleted_then_payload_read_at_old_snapshot_still_returns_ori
 #[test]
 fn given_inline_rows_flushed_to_file_when_listing_insertions_then_flush_file_is_not_user_insert() {
     // Upstream: data_inlining_flush.test table_changes('test', 12, 12).
-    // Storage request: save inline rows, then save a physical file that materializes those rows.
-    // Required return: reads see the file, but insertion change feeds do not report the flush as new data.
+    // Storage request: save inline rows, then save a physical file that
+    // materializes those rows. Required return: reads see the file, but
+    // insertion change feeds do not report the flush as new data.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(10);
@@ -1008,10 +1027,11 @@ fn given_inline_rows_flushed_to_file_when_listing_insertions_then_flush_file_is_
 #[test]
 fn given_unrelated_commit_between_inline_insert_and_flush_when_reading_table_then_inline_row_is_not_duplicated()
  {
-    // Upstream: test/sql/add_files/add_files_compaction.test before merge_adjacent_files.
-    // Storage request: save inline rows for one table, save an unrelated commit for another table,
-    // then save a physical file that materializes the first table's inline rows.
-    // Required return: current reads see the materialized file and no still-live inline payload.
+    // Upstream: test/sql/add_files/add_files_compaction.test before
+    // merge_adjacent_files. Storage request: save inline rows for one table,
+    // save an unrelated commit for another table, then save a physical file
+    // that materializes the first table's inline rows. Required return: current
+    // reads see the materialized file and no still-live inline payload.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(10);
@@ -1089,10 +1109,12 @@ fn given_unrelated_commit_between_inline_insert_and_flush_when_reading_table_the
 #[test]
 fn given_inline_rows_flushed_before_feed_end_when_listing_insertions_then_original_inline_rows_are_hidden()
  {
-    // Upstream: test/sql/add_files/add_files_compaction.test ducklake_table_insertions(..., s3).
-    // Storage request: save inline rows, flush them to a physical data file, then save later files.
-    // Required return: an insertion feed through the later files returns the physical-file rows,
-    // not the old inline rows that have already been materialized by the flush.
+    // Upstream: test/sql/add_files/add_files_compaction.test
+    // ducklake_table_insertions(..., s3). Storage request: save inline rows,
+    // flush them to a physical data file, then save later files.
+    // Required return: an insertion feed through the later files returns the
+    // physical-file rows, not the old inline rows that have already been
+    // materialized by the flush.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(10);
@@ -1158,10 +1180,11 @@ fn given_inline_rows_flushed_before_feed_end_when_listing_insertions_then_origin
 #[test]
 fn given_two_inline_inserts_flushed_when_listing_insertions_to_second_public_snapshot_then_both_files_return()
  {
-    // Upstream: test/sql/table_changes/ducklake_table_insertions.test, ti(0, s2).
-    // Storage request: save two inline inserts, each later materialized by a flush file, then
-    // read insertions through the second public insert snapshot.
-    // Required return: both materialized files are returned and the old inline rows are hidden.
+    // Upstream: test/sql/table_changes/ducklake_table_insertions.test, ti(0,
+    // s2). Storage request: save two inline inserts, each later materialized by
+    // a flush file, then read insertions through the second public insert
+    // snapshot. Required return: both materialized files are returned and the
+    // old inline rows are hidden.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(10);
@@ -1236,11 +1259,12 @@ fn given_two_inline_inserts_flushed_when_listing_insertions_to_second_public_sna
 #[test]
 fn given_inline_file_materialized_inside_change_feed_window_when_listing_data_file_changes_then_file_is_returned()
  {
-    // Upstream: test/sql/table_changes/ducklake_table_insertions.test, ti(s3, s4).
-    // Storage request: save an inline insert, then save the physical file that materializes it,
-    // then save a later inline insert in the same table.
-    // Required return: a data-file change feed starting at the materialization snapshot returns
-    // the materialized file, even though the row's logical visibility began at the inline insert.
+    // Upstream: test/sql/table_changes/ducklake_table_insertions.test, ti(s3,
+    // s4). Storage request: save an inline insert, then save the physical file
+    // that materializes it, then save a later inline insert in the same table.
+    // Required return: a data-file change feed starting at the materialization
+    // snapshot returns the materialized file, even though the row's logical
+    // visibility began at the inline insert.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(10);
@@ -1337,11 +1361,12 @@ fn given_inline_file_materialized_inside_change_feed_window_when_listing_data_fi
 #[test]
 fn given_inline_flush_before_add_file_when_public_snapshot_is_used_then_time_travel_reads_add_file_snapshot()
  {
-    // Upstream: test/sql/add_files/add_files_compaction.test time travel to s2 after compaction.
-    // Storage request: publish snapshot ids, then resolve a public snapshot id back to a storage
-    // snapshot for a table read.
-    // Required return: the public id for the first add-file commit resolves to that add-file
-    // snapshot, not to the preceding inline flush or unrelated table commit.
+    // Upstream: test/sql/add_files/add_files_compaction.test time travel to s2
+    // after compaction. Storage request: publish snapshot ids, then resolve a
+    // public snapshot id back to a storage snapshot for a table read.
+    // Required return: the public id for the first add-file commit resolves to
+    // that add-file snapshot, not to the preceding inline flush or unrelated
+    // table commit.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(10);

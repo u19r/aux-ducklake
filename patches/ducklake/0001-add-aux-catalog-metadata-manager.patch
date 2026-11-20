@@ -1895,7 +1895,7 @@ diff --git a/src/storage/ducklake_transaction_state.cpp b/src/storage/ducklake_t
  		if (current_stats) {
  			InitializeGlobalStats(table_id, *current_stats, new_globals);
  		}
-@@ -2157,34 +2250,37 @@
+@@ -2157,49 +2250,49 @@
  	string batch_queries;
  	// drop entries
  	if (!dropped_tables.empty()) {
@@ -1950,9 +1950,15 @@ diff --git a/src/storage/ducklake_transaction_state.cpp b/src/storage/ducklake_t
 +			batch_queries += DuckLakeMetadataManager::DropSchemas(dropped_schema_ids);
 +		}
  	}
- 	auto relative_paths = [&](const auto &entries) {
- 		vector<DuckLakePath> result;
-@@ -2198,8 +2294,14 @@
+-	auto relative_paths = [&](const auto &entries) {
+-		vector<DuckLakePath> result;
+-		result.reserve(entries.size());
+-		for (auto &entry : entries) {
+-			result.push_back(DuckLakeMetadataManager::GetRelativePath(entry.path, data_path, separator));
+-		}
+-		return result;
+-	};
+-	// write new schemas
  	vector<DuckLakeSchemaInfo> new_schemas_result;
  	if (new_schemas) {
  		new_schemas_result = GetNewSchemas(commit_state);
@@ -1969,7 +1975,7 @@ diff --git a/src/storage/ducklake_transaction_state.cpp b/src/storage/ducklake_t
  	}
  
  	// write new tables
-@@ -2238,56 +2340,106 @@
+@@ -2238,56 +2331,106 @@
  	if (!new_tables.empty()) {
  		auto result = GetNewTables(commit_state, transaction_changes);
  		auto float_bounds = GetFloatBoundsToRewrite(commit_state, context);
@@ -2115,7 +2121,7 @@ diff --git a/src/storage/ducklake_transaction_state.cpp b/src/storage/ducklake_t
  	}
  
  	// write new name maps
-@@ -2309,14 +2461,15 @@
+@@ -2309,14 +2452,15 @@
  		    files, table_relative_paths(files, &DuckLakeFileInfo::file_name), context.supports_v1_1_metadata);
  	};
  
@@ -2139,7 +2145,7 @@ diff --git a/src/storage/ducklake_transaction_state.cpp b/src/storage/ducklake_t
  
  	// drop data files
  	if (!dropped_files.empty()) {
-@@ -2324,7 +2477,9 @@
+@@ -2324,7 +2468,9 @@
  		for (auto &entry : dropped_files) {
  			dropped_indexes.insert(entry.second);
  		}
@@ -2150,7 +2156,7 @@ diff --git a/src/storage/ducklake_transaction_state.cpp b/src/storage/ducklake_t
  		batch_queries += UpdateStatsForDroppedFiles(stats, context, attempt_dropped_file_stats);
  	}
  
-@@ -2332,45 +2487,75 @@
+@@ -2332,45 +2478,75 @@
  		// write new delete files
  		vector<DuckLakeOverwrittenDeleteFile> overwritten_delete_files;
  		auto file_list = GetNewDeleteFiles(commit_state, overwritten_delete_files);
@@ -2259,7 +2265,7 @@ diff --git a/src/storage/ducklake_transaction_state.cpp b/src/storage/ducklake_t
  			}
  		}
  
-@@ -2381,8 +2566,7 @@
+@@ -2381,8 +2557,7 @@
  	batch_queries += DuckLakeMetadataManager::RefreshTableSizesSql(refreshed_table_sizes);
  
  	// delete the flushed inlined rows and inlined file deletions after the deletes of the transaction
@@ -2269,7 +2275,7 @@ diff --git a/src/storage/ducklake_transaction_state.cpp b/src/storage/ducklake_t
  
  	// Tracking for tables that had schema changes
  	set<TableIndex> tables_with_schema_changes;
-@@ -2633,6 +2817,7 @@
+@@ -2633,6 +2808,7 @@
  	    snapshot_and_stats, context.conflict_query_executor, context.supports_v1_1_metadata);
  	// parse changes made by other transactions
  	auto other_changes = SnapshotChangeInformation::ParseChangesMade(changes_made.changes_made);
@@ -2277,7 +2283,7 @@ diff --git a/src/storage/ducklake_transaction_state.cpp b/src/storage/ducklake_t
  
  	// now check for conflicts
  	CheckForConflicts(changes, other_changes, transaction_snapshot, context);
-@@ -2740,11 +2925,11 @@
+@@ -2740,11 +2916,11 @@
  	context.set_committed_snapshot_id(commit_snapshot.snapshot_id);
  	context.set_table_options(committed_table_options);
  	for (auto &entry : dropped_file_stats) {

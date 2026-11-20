@@ -179,7 +179,8 @@ impl OrderedCatalogKv for FdbOrderedCatalogKv {
 
     fn batch_get(&self, keys: &[Vec<u8>]) -> CatalogResult<Vec<Option<Vec<u8>>>> {
         let started = RuntimeMetricStage::start();
-        // Acquire the query lease before polling the asynchronous batch executor.
+        // Acquire the query lease before polling the asynchronous batch
+        // executor.
         let kv = if !keys.is_empty() && crate::store::active_runtime_read_context_id().is_some() {
             self.with_read_version()?
         } else {

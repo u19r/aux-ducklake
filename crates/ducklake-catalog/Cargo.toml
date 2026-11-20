@@ -25,14 +25,14 @@ name = "ducklake-fdb-prefix-clear"
 path = "src/bin/ducklake-fdb-prefix-clear.rs"
 
 [dependencies]
-chrono = { workspace = true }
 foundationdb = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
+jiff = { workspace = true }
 libc = { workspace = true, optional = true }
 sha2 = { workspace = true }
 
 [dev-dependencies]
-alloc-counter = {  package = "alloc-counter",  git = "https://github.com/u19r/aux-common",rev = "d5d2bd38f8fb1419de8bb6758934da2557731b79"}
+alloc-counter = {  package = "alloc-counter",  git = "https://github.com/u19r/aux-common",rev = "1c20f49ffc0e76ca75d53c7afcc42a26bbbc2e5a"}
 tempfile = { workspace = true }
 
 [features]

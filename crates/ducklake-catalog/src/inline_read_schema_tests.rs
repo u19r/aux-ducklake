@@ -1,13 +1,12 @@
 #[cfg(test)]
 mod tests {
+    use super::super::table_row_for_inline_schema;
     use crate::{
         CatalogId, CatalogOrderId, ColumnId, ColumnRename, FakeOrderedCatalogKv, InlinedTableRow,
         MutableCatalogKv, SchemaId, TableColumnRow, TableId, TableRow, TableVersionReplacement,
         commit_create_table_row, commit_rename_table_columns, initialize_catalog_if_absent,
         latest_snapshot,
     };
-
-    use super::super::table_row_for_inline_schema;
 
     #[test]
     fn given_inlined_payload_registered_before_rename_when_loading_schema_then_original_column_names_are_used()

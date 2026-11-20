@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::runtime_metrics::RuntimeMetricStage;
 #[cfg(feature = "runtime-metrics")]
 use crate::runtime_metrics::record_runtime_method_elapsed;
 use crate::{
@@ -20,6 +19,7 @@ use crate::{
         data_file_key, delete_file_key, delete_file_timeline_key, order_delete_file_change_key,
         table_delete_file_change_key,
     },
+    runtime_metrics::RuntimeMetricStage,
     store::{
         invalidate_runtime_read_context, latest_snapshot, snapshot_row_for_next_sequence,
         stage_snapshot,

@@ -7,7 +7,6 @@ use crate::{
     CatalogCacheNamespace,
     bounded_cache::{BoundedCache, static_bounded_cache},
 };
-
 use crate::{
     CatalogError, CatalogId, CatalogOrderId, CatalogOrderKind, CatalogResult, KvBatch,
     OrderedCatalogKv, RangeDirection, TableId,

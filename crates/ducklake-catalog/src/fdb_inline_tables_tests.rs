@@ -1,9 +1,10 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use super::*;
 use crate::{
     CatalogOrderId, FdbOrderedCatalogKv, INLINE_PAYLOAD_LIMIT_BYTES,
     inline_data::validate_inline_table_rows_fit_fdb,
 };
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn inline_row_limit_stays_under_foundationdb_item_limit() {

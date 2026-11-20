@@ -143,7 +143,8 @@ impl Drop for RuntimeSpan {
     }
 }
 
-/// Carries attribution to a scoped worker without moving a live span between threads.
+/// Carries attribution to a scoped worker without moving a live span between
+/// threads.
 #[cfg(feature = "foundationdb")]
 #[derive(Clone, Copy)]
 pub(crate) struct RuntimeTraceParent {
@@ -268,7 +269,8 @@ fn thread_cpu_micros() -> Option<u64> {
         tv_sec: 0,
         tv_nsec: 0,
     };
-    // SAFETY: `time` points to a writable timespec; this clock has no external state.
+    // SAFETY: `time` points to a writable timespec; this clock has no external
+    // state.
     let status = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) };
     (status == 0)
         .then(|| (time.tv_sec as u64).saturating_mul(1_000_000) + time.tv_nsec as u64 / 1_000)

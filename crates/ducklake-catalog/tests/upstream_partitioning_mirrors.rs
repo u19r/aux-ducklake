@@ -12,10 +12,12 @@ use ducklake_catalog::{
 
 #[test]
 fn mirrors_bucket_partitioning_test_bucket_transform_and_values_are_stored() {
-    // Mirrors: third_party/ducklake/test/sql/partitioning/bucket_partitioning.test
+    // Mirrors: third_party/ducklake/test/sql/partitioning/bucket_partitioning.
+    // test
     //
     // Storage contract:
-    // - Bucket partitioning is stored as table partition metadata with transform `bucket(n)`.
+    // - Bucket partitioning is stored as table partition metadata with
+    //   transform `bucket(n)`.
     // - Flushed files carry the bucket partition values DuckLake calculated.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
@@ -124,11 +126,14 @@ fn mirrors_bucket_pruning_test_partition_scan_uses_bucket_partition_values() {
 
 #[test]
 fn mirrors_merge_adjacent_null_partition_test_null_partition_values_survive_merge() {
-    // Mirrors: third_party/ducklake/test/sql/partitioning/merge_adjacent_null_partition.test
+    // Mirrors: third_party/ducklake/test/sql/partitioning/
+    // merge_adjacent_null_partition.test
     //
     // Storage contract:
-    // - SQL NULL partition values are stored consistently, including after add-files and merge.
-    // - Multi-column partition replacements keep one partition value row per key.
+    // - SQL NULL partition values are stored consistently, including after
+    //   add-files and merge.
+    // - Multi-column partition replacements keep one partition value row per
+    //   key.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -182,11 +187,12 @@ fn mirrors_merge_adjacent_null_partition_test_null_partition_values_survive_merg
 
 #[test]
 fn mirrors_multi_table_partition_test_partition_changes_are_independent_per_table() {
-    // Mirrors: third_party/ducklake/test/sql/partitioning/multi_table_partition.test
+    // Mirrors: third_party/ducklake/test/sql/partitioning/
+    // multi_table_partition.test
     //
     // Storage contract:
-    // - Two partition changes in one DuckLake transaction become independent table partition
-    //   metadata rows keyed by table id.
+    // - Two partition changes in one DuckLake transaction become independent
+    //   table partition metadata rows keyed by table id.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     initialize_catalog_if_absent(&mut kv, catalog).unwrap();
@@ -246,7 +252,8 @@ fn mirrors_partition_null_test_null_and_non_null_partition_values_are_separately
     // Mirrors: third_party/ducklake/test/sql/partitioning/partition_null.test
     //
     // Storage contract:
-    // - NULL, zero, and one partition values are stored as distinct file partition values.
+    // - NULL, zero, and one partition values are stored as distinct file
+    //   partition values.
     // - Partition scans can target each value separately.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
@@ -296,10 +303,12 @@ fn mirrors_partition_null_test_null_and_non_null_partition_values_are_separately
 
 #[test]
 fn mirrors_partition_rename_in_transaction_test_renamed_table_keeps_partition_metadata() {
-    // Mirrors: third_party/ducklake/test/sql/partitioning/partition_rename_in_transaction.test
+    // Mirrors: third_party/ducklake/test/sql/partitioning/
+    // partition_rename_in_transaction.test
     //
     // Storage contract:
-    // - Renaming a partitioned table must preserve its partition metadata on the same table id.
+    // - Renaming a partitioned table must preserve its partition metadata on
+    //   the same table id.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);

@@ -13,7 +13,8 @@ fn mirrors_audit_base_audit_test_snapshot_commit_metadata_is_saved_and_returned(
     //
     // Storage contract:
     // - DuckLake asks the catalog to save per-snapshot audit metadata.
-    // - Later snapshot reads must return author, commit message, and extra info unchanged.
+    // - Later snapshot reads must return author, commit message, and extra info
+    //   unchanged.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     initialize_catalog_if_absent(&mut kv, catalog).unwrap();
@@ -49,8 +50,10 @@ fn mirrors_geo_ducklake_geometry_test_geometry_extra_stats_are_saved_for_base_co
     // Mirrors: third_party/ducklake/test/sql/geo/ducklake_geometry.test
     //
     // Storage contract:
-    // - DuckLake saves a geometry column's serialized extra stats with the file-column stats row.
-    // - Listing stats for that table/column must return the exact serialized value.
+    // - DuckLake saves a geometry column's serialized extra stats with the
+    //   file-column stats row.
+    // - Listing stats for that table/column must return the exact serialized
+    //   value.
     let mut kv = seeded_catalog_with_file(TableId(10), DataFileId(1));
     let extra = geometry_extra_stats("POINT", 0.0, 0.0, 10.0, 10.0);
 
@@ -61,11 +64,14 @@ fn mirrors_geo_ducklake_geometry_test_geometry_extra_stats_are_saved_for_base_co
 
 #[test]
 fn mirrors_geo_ducklake_geometry_add_files_test_added_file_extra_stats_are_saved() {
-    // Mirrors: third_party/ducklake/test/sql/geo/ducklake_geometry_add_files.test
+    // Mirrors: third_party/ducklake/test/sql/geo/ducklake_geometry_add_files.
+    // test
     //
     // Storage contract:
-    // - ADD FILES gives the catalog file-column stats for an existing Parquet object.
-    // - The catalog must preserve the geometry extra stats exactly like native append files.
+    // - ADD FILES gives the catalog file-column stats for an existing Parquet
+    //   object.
+    // - The catalog must preserve the geometry extra stats exactly like native
+    //   append files.
     let mut kv = seeded_catalog_with_file(TableId(10), DataFileId(42));
     let extra = geometry_extra_stats("LINESTRING", -5.0, 1.0, 5.0, 9.0);
 
@@ -79,11 +85,13 @@ fn mirrors_geo_ducklake_geometry_add_files_test_added_file_extra_stats_are_saved
 
 #[test]
 fn mirrors_geo_ducklake_geometry_nested_list_test_nested_leaf_extra_stats_are_keyed_by_column_id() {
-    // Mirrors: third_party/ducklake/test/sql/geo/ducklake_geometry_nested_list.test
+    // Mirrors: third_party/ducklake/test/sql/geo/ducklake_geometry_nested_list.
+    // test
     //
     // Storage contract:
     // - Nested geometry leaf stats are still keyed by the DuckLake column id.
-    // - Saving one nested leaf must not make the stats visible under a sibling column id.
+    // - Saving one nested leaf must not make the stats visible under a sibling
+    //   column id.
     let mut kv = seeded_catalog_with_file(TableId(10), DataFileId(7));
     let extra = geometry_extra_stats("LIST<GEOMETRY>", -1.0, -2.0, 3.0, 4.0);
 
@@ -95,11 +103,13 @@ fn mirrors_geo_ducklake_geometry_nested_list_test_nested_leaf_extra_stats_are_ke
 
 #[test]
 fn mirrors_geo_ducklake_geometry_nested_map_test_nested_map_extra_stats_are_keyed_by_column_id() {
-    // Mirrors: third_party/ducklake/test/sql/geo/ducklake_geometry_nested_map.test
+    // Mirrors: third_party/ducklake/test/sql/geo/ducklake_geometry_nested_map.
+    // test
     //
     // Storage contract:
     // - Map value geometry stats are opaque per-column stats rows.
-    // - Storage must preserve the serialized extra stats without interpreting map structure.
+    // - Storage must preserve the serialized extra stats without interpreting
+    //   map structure.
     let mut kv = seeded_catalog_with_file(TableId(10), DataFileId(8));
     let key_extra = geometry_extra_stats("MAP_KEY", 0.0, 0.0, 1.0, 1.0);
     let value_extra = geometry_extra_stats("MAP_VALUE_GEOMETRY", 10.0, 20.0, 30.0, 40.0);
@@ -125,10 +135,12 @@ fn mirrors_geo_ducklake_geometry_nested_map_test_nested_map_extra_stats_are_keye
 
 #[test]
 fn mirrors_geo_ducklake_geometry_nested_struct_test_struct_leaf_extra_stats_are_independent() {
-    // Mirrors: third_party/ducklake/test/sql/geo/ducklake_geometry_nested_struct.test
+    // Mirrors: third_party/ducklake/test/sql/geo/
+    // ducklake_geometry_nested_struct.test
     //
     // Storage contract:
-    // - Struct child geometry stats are saved independently for each child column id.
+    // - Struct child geometry stats are saved independently for each child
+    //   column id.
     // - Re-reading one child must not return the sibling's serialized stats.
     let mut kv = seeded_catalog_with_file(TableId(10), DataFileId(9));
     let left = geometry_extra_stats("STRUCT.LEFT", -10.0, -10.0, 0.0, 0.0);
@@ -146,8 +158,10 @@ fn mirrors_geo_ducklake_geometry_stats_test_multiple_file_extra_stats_are_return
     // Mirrors: third_party/ducklake/test/sql/geo/ducklake_geometry_stats.test
     //
     // Storage contract:
-    // - Spatial pruning depends on reading each file's serialized geometry stats.
-    // - The catalog must return every file-column stats row for the requested table/column.
+    // - Spatial pruning depends on reading each file's serialized geometry
+    //   stats.
+    // - The catalog must return every file-column stats row for the requested
+    //   table/column.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(10);

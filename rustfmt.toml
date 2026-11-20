@@ -20,7 +20,9 @@ indent_style = "Block"
 trailing_comma = "Vertical"
 trailing_semicolon = true
 
-format_strings = true
+# Preserve protocol bytes: nightly string wrapping split escaped newlines in
+# systemd response fixtures, changing their runtime values (friction batch218).
+format_strings = false
 format_macro_matchers = true
 
 normalize_comments = true

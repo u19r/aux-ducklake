@@ -1,4 +1,4 @@
-# Versions: software-versions.snapshot.json; details in software-version-consumers.md.
+# Versions: software-versions.json; details in software-version-consumers.md.
 [workspace]
 members = [
     "crates/ducklake-catalog",
@@ -13,13 +13,13 @@ edition = "2024"
 license = "BUSL-1.1"
 publish = false
 repository = "https://github.com/u19r/aux-ducklake"
-rust-version = "1.99.1"
+rust-version = "1.100.0"
 
 [workspace.dependencies]
-chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 foundationdb = { version = "0.11.0", default-features = false, features = ["embedded-fdb-include", "fdb-7_4"], git = "https://github.com/foundationdb-rs/foundationdb-rs.git", rev = "9c91ad4fc84836a51f6544ea7c60c784f4d9b6f3" }
 foundationdb-simulation = { version = "0.3.0", default-features = false, features = ["embedded-fdb-include", "fdb-7_4", "cpp-abi"], git = "https://github.com/foundationdb-rs/foundationdb-rs.git", rev = "9c91ad4fc84836a51f6544ea7c60c784f4d9b6f3" }
 futures = "0.3.34"
+jiff = { version = "0.2.46", default-features = false, features = ["std"] }
 libc = "0.2.191"
 sha2 = "0.11.1"
 tempfile = "3.27.0"

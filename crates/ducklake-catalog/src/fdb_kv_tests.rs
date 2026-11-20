@@ -636,11 +636,12 @@ fn given_query_read_version_when_renewed_then_callback_is_pinned_until_whole_rea
 
 #[test]
 fn given_concurrent_query_callbacks_when_acquiring_version_then_one_builder_runs() {
-    use crate::runtime_read_versions::{begin_request, end_context, fetch_version};
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+
+    use crate::runtime_read_versions::{begin_request, end_context, fetch_version};
     let namespace =
         crate::CatalogCacheNamespace::foundationdb(987_067, 1).with_read_context(Some(70_108));
     let count = Arc::new(AtomicUsize::new(0));
@@ -737,7 +738,8 @@ fn given_live_expired_query_version_when_read_callback_retries_then_fresh_physic
     assert!(expected.is_some());
     {
         let _request = crate::store::begin_runtime_read_request(Some(context));
-        // Force an obsolete version. Idle storage can retain versions beyond six seconds.
+        // Force an obsolete version. Idle storage can retain versions beyond
+        // six seconds.
         crate::runtime_read_versions::fetch_version(kv.catalog_cache_namespace(), || Ok(1))
             .unwrap();
         let attempts = Cell::new(0);

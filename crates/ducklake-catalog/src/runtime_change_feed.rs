@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use crate::{
     CatalogId, CatalogOrderId, CatalogOrderKind, CatalogResult, DataFileChangeKind, DataFileId,
     DataFileRow, DeleteFileRow, DeleteScanFile, DuckLakeSnapshotId, OrderedCatalogKv,
@@ -8,7 +10,6 @@ use crate::{
     runtime_snapshots::{public_snapshot_order_span, public_snapshot_sequences_by_order_shared},
     snapshot_operations::{SnapshotOperationKind, snapshot_operation_table_ids_at},
 };
-use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy)]
 pub(crate) struct ChangeFeedPayload {

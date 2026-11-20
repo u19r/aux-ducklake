@@ -1,3 +1,5 @@
+use futures::try_join;
+
 use crate::{
     CatalogError, CatalogId, CatalogResult, ColumnId, DataFileId, DataFileRow, FdbOrderedCatalogKv,
     FileColumnStatsRow, FilePartitionValueRow, PartitionKeyIndex, RangeDirection, TableId,
@@ -13,7 +15,6 @@ use crate::{
         file_partition_value_key, file_partition_value_prefix, partition_value_lookup_key,
     },
 };
-use futures::try_join;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AsyncFileCleanupMetadataCounts {

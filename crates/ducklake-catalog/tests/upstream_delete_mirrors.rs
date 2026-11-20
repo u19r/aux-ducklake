@@ -12,10 +12,11 @@ fn mirrors_basic_delete_test_time_travel_before_delete_returns_undeleted_files()
     // Mirrors: third_party/ducklake/test/sql/delete/basic_delete.test
     //
     // Storage contract:
-    // - DuckLake saves two data files, then saves delete files for both inside the delete commit.
+    // - DuckLake saves two data files, then saves delete files for both inside
+    //   the delete commit.
     // - Current reads should attach the delete files.
-    // - Time travel to the snapshot before the delete should return the same two data files with
-    //   no delete file attached.
+    // - Time travel to the snapshot before the delete should return the same
+    //   two data files with no delete file attached.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -69,10 +70,12 @@ fn mirrors_multi_deletes_test_consolidated_delete_file_preserves_first_delete_be
     //
     // Storage contract:
     // - DuckLake saves one physical data file.
-    // - The first transaction writes a consolidated delete file for that data file.
+    // - The first transaction writes a consolidated delete file for that data
+    //   file.
     // - A later delete replaces/consolidates that delete file.
-    // - The current delete-file metadata should still begin at the first delete's logical
-    //   snapshot, because the replacement represents all deletes since that first delete.
+    // - The current delete-file metadata should still begin at the first
+    //   delete's logical snapshot, because the replacement represents all
+    //   deletes since that first delete.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -107,9 +110,10 @@ fn mirrors_delete_join_test_insert_and_delete_in_one_transaction() {
     //
     // Storage contract:
     // - DuckLake has one existing data file.
-    // - One transaction appends a second data file and saves delete files for the joined delete.
-    // - Storage must commit the new file and all delete metadata atomically so current reads see
-    //   both files and both delete files.
+    // - One transaction appends a second data file and saves delete files for
+    //   the joined delete.
+    // - Storage must commit the new file and all delete metadata atomically so
+    //   current reads see both files and both delete files.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -138,9 +142,10 @@ fn mirrors_delete_mixed_formats_test_replacements_keep_cumulative_delete_history
     // Mirrors: third_party/ducklake/test/sql/delete/delete_mixed_formats.test
     //
     // Storage contract:
-    // - A file receives delete-file replacements in alternating physical formats.
-    // - The latest current delete file must hold the cumulative delete count and retain the first
-    //   delete's logical begin snapshot for time travel.
+    // - A file receives delete-file replacements in alternating physical
+    //   formats.
+    // - The latest current delete file must hold the cumulative delete count
+    //   and retain the first delete's logical begin snapshot for time travel.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -183,12 +188,14 @@ fn mirrors_delete_mixed_formats_test_replacements_keep_cumulative_delete_history
 
 #[test]
 fn mirrors_delete_same_transaction_test_new_file_can_be_deleted_before_commit() {
-    // Mirrors: third_party/ducklake/test/sql/delete/delete_same_transaction.test
+    // Mirrors: third_party/ducklake/test/sql/delete/delete_same_transaction.
+    // test
     //
     // Storage contract:
-    // - DuckLake creates a new table data file and deletes rows from it before the transaction
-    //   commits.
-    // - Storage must be able to save the data file and its delete file in the same metadata commit.
+    // - DuckLake creates a new table data file and deletes rows from it before
+    //   the transaction commits.
+    // - Storage must be able to save the data file and its delete file in the
+    //   same metadata commit.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -213,9 +220,10 @@ fn mirrors_deletion_vector_test_replacement_delete_files_keep_time_travel_visibi
     // Mirrors: third_party/ducklake/test/sql/delete/deletion_vector.test
     //
     // Storage contract:
-    // - Two files receive initial delete files, then one file receives a replacement delete file.
-    // - The replacement must preserve the first delete snapshot and historical reads before the
-    //   first delete must remain undeleted.
+    // - Two files receive initial delete files, then one file receives a
+    //   replacement delete file.
+    // - The replacement must preserve the first delete snapshot and historical
+    //   reads before the first delete must remain undeleted.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -263,13 +271,14 @@ fn mirrors_deletion_vector_test_replacement_delete_files_keep_time_travel_visibi
 
 #[test]
 fn mirrors_deletion_vector_inlined_flush_test_inline_deletions_become_one_delete_file() {
-    // Mirrors: third_party/ducklake/test/sql/delete/deletion_vector_inlined_flush.test
+    // Mirrors: third_party/ducklake/test/sql/delete/
+    // deletion_vector_inlined_flush.test
     //
     // Storage contract:
     // - Small deletes first land as inline file deletions.
     // - A flush materializes them as a delete file.
-    // - A later inline delete and flush replaces that delete file while preserving the first
-    //   flush's logical begin snapshot.
+    // - A later inline delete and flush replaces that delete file while
+    //   preserving the first flush's logical begin snapshot.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -335,12 +344,14 @@ fn mirrors_deletion_vector_inlined_flush_test_inline_deletions_become_one_delete
 
 #[test]
 fn mirrors_deletion_vector_multi_snapshot_test_delete_scan_keeps_first_seen_attribution() {
-    // Mirrors: third_party/ducklake/test/sql/delete/deletion_vector_multi_snapshot.test
+    // Mirrors: third_party/ducklake/test/sql/delete/
+    // deletion_vector_multi_snapshot.test
     //
     // Storage contract:
     // - Three deletes across three snapshots target one file.
     // - The current delete file is cumulative.
-    // - The deletion scan over the full range returns each row id at its first delete snapshot.
+    // - The deletion scan over the full range returns each row id at its first
+    //   delete snapshot.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);
@@ -384,12 +395,13 @@ fn mirrors_deletion_vector_multi_snapshot_test_delete_scan_keeps_first_seen_attr
 
 #[test]
 fn mirrors_parquet_deletion_describe_test_inline_deletions_keep_per_row_snapshot_attribution() {
-    // Mirrors: third_party/ducklake/test/sql/delete/parquet_deletion_describe.test
+    // Mirrors: third_party/ducklake/test/sql/delete/parquet_deletion_describe.
+    // test
     //
     // Storage contract:
     // - Inline file deletions are saved across multiple snapshots.
-    // - Before physical flush, storage can still return the row ids and the snapshot at which each
-    //   row was first deleted.
+    // - Before physical flush, storage can still return the row ids and the
+    //   snapshot at which each row was first deleted.
     let mut kv = FakeOrderedCatalogKv::new();
     let catalog = CatalogId(1);
     let table = TableId(1);

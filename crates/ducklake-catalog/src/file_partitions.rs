@@ -3,11 +3,10 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-use crate::RangeItem;
 use crate::{
     AttachedDataFile, CatalogCacheNamespace, CatalogError, CatalogId, CatalogResult, DataFileId,
     DataFileRow, KvBatch, MutableCatalogKv, OrderedCatalogKv, PartitionKeyIndex, RangeDirection,
-    TableId,
+    RangeItem, TableId,
     data_file_store::{
         attach_current_delete_files, attach_delete_files_at, list_current_data_files,
         list_data_files_at,
